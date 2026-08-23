@@ -31,10 +31,17 @@ struct MetadataStore<Value: Codable & Sendable>: Sendable {
 }
 
 typealias DiagnosticsStore = MetadataStore<DiagnosticResult>
+typealias ObserverMetricsStore = MetadataStore<PassiveObserverMetrics>
 
 extension MetadataStore where Value == DiagnosticResult {
     static var applicationSupport: Self {
         Self(fileURL: Self.applicationSupportURL.appendingPathComponent("diagnostics.json"))
+    }
+}
+
+extension MetadataStore where Value == PassiveObserverMetrics {
+    static var applicationSupport: Self {
+        Self(fileURL: Self.applicationSupportURL.appendingPathComponent("observer-metrics.json"))
     }
 }
 

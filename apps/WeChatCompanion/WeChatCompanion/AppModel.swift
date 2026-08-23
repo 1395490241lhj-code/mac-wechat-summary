@@ -9,30 +9,44 @@ final class AppModel {
     var lastDiagnostic: DiagnosticResult?
     var isRunningDiagnostics = false
     var persistenceFailed = false
+    var observerMetrics = PassiveObserverMetrics()
 
     @ObservationIgnored private let service: DiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
+    @ObservationIgnored private let observer: PassiveObserver
+    @ObservationIgnored private let observerStore: ObserverMetricsStore
+    @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
 
     init(
         service: DiagnosticsService = DiagnosticsService(),
-        store: DiagnosticsStore = .applicationSupport
+        store: DiagnosticsStore = .applicationSupport,
+        observer: PassiveObserver = PassiveObserver(),
+        observerStore: ObserverMetricsStore = .applicationSupport
     ) {
         self.service = service
         self.store = store
+        self.observer = observer
+        self.observerStore = observerStore
     }
 
     var lastDiagnosticStatus: DiagnosticStatus {
         lastDiagnostic?.status ?? .neverRun
     }
 
-    func bootstrap(autoRunDiagnostics: Bool) async {
+    func bootstrap(autoRunDiagnostics: Bool, runObserverValidation: Bool) async {
         guard !didBootstrap else { return }
         didBootstrap = true
         lastDiagnostic = try? store.load()
         await refreshSystemStatus()
+        await startObserver()
         if autoRunDiagnostics {
             await runDiagnostics(requestPermissionIfNeeded: false)
+        }
+        if runObserverValidation {
+            try? await Task.sleep(for: .seconds(5))
+            observerMetrics = await observer.snapshot()
+            try? observerStore.save(observerMetrics)
         }
     }
 
@@ -56,6 +70,23 @@ final class AppModel {
         lastDiagnostic = result
         await refreshSystemStatus()
         isRunningDiagnostics = false
+    }
+
+    func startObserver() async {
+        await observer.start()
+        observerPollingTask?.cancel()
+        observerPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.observerMetrics = await self.observer.snapshot()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    func pauseObserver() async {
+        await observer.pause()
+        observerMetrics = await observer.snapshot()
     }
 
 }

@@ -60,6 +60,50 @@ private struct OverviewView: View {
                     }
                 }
 
+                GroupBox("Passive Observer") {
+                    VStack(spacing: 0) {
+                        StatusRow(
+                            label: "Status",
+                            value: model.observerMetrics.state.label,
+                            isPositive: model.observerMetrics.state == .observing
+                        )
+                        Divider()
+                        LabeledContent("Meaningful Frames") {
+                            Text(String(model.observerMetrics.meaningfulFramesObserved))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        LabeledContent("Last Observed") {
+                            Text(model.observerMetrics.lastCaptureAt?.formatted() ?? "Never")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        LabeledContent("Capture Mode") {
+                            Text(model.observerMetrics.currentCaptureMode?.label ?? "Waiting")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        HStack {
+                            Button("Start Observer") {
+                                Task { await model.startObserver() }
+                            }
+                            Button("Pause Observer") {
+                                Task { await model.pauseObserver() }
+                            }
+                            Spacer()
+                            Text(
+                                "\(model.observerMetrics.framesSampled) sampled · "
+                                    + "\(model.observerMetrics.duplicateFramesSkipped) duplicates skipped"
+                            )
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                }
+
                 GroupBox("Diagnostics") {
                     VStack(spacing: 0) {
                         StatusRow(

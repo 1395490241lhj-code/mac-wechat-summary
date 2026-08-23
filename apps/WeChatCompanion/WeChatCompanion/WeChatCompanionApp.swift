@@ -9,10 +9,10 @@ struct WeChatCompanionApp: App {
             ContentView(model: model)
                 .frame(minWidth: 760, minHeight: 520)
                 .task {
+                    let arguments = ProcessInfo.processInfo.arguments
                     await model.bootstrap(
-                        autoRunDiagnostics: ProcessInfo.processInfo.arguments.contains(
-                            "--run-diagnostics"
-                        )
+                        autoRunDiagnostics: arguments.contains("--run-diagnostics"),
+                        runObserverValidation: arguments.contains("--run-observer-validation")
                     )
                 }
         }
