@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-if ! APP_PATH="$("$ROOT/scripts/build-dev-app.sh" 2>/dev/null)"; then
+APP_PATH="$HOME/Applications/WeChat Companion Dev.app"
+if ! "$ROOT/scripts/build-dev-app.sh" >/dev/null 2>&1; then
   echo "WeChat Companion build failed." >&2
   exit 1
 fi

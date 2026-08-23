@@ -28,7 +28,9 @@ actor InteractionDiagnosticsService {
             ?? WeChatWindowLocator.largestNormalWindowFrame(for: application.processIdentifier)
         result.wechatWindowFound = frame != nil
 
-        guard result.accessibilityGranted, let frame else { return result }
+        guard result.accessibilityGranted,
+              result.screenRecordingGranted,
+              let frame else { return result }
 
         let beforeBackground = await captureSignature(captureWindow)
         result.backgroundScrollAttempted = true

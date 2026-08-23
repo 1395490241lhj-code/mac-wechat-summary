@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -134,6 +135,12 @@ private struct DiagnosticsView: View {
                     ProgressView("Capturing one in-memory frame and measuring OCR…")
                 }
 
+                PermissionRow(
+                    label: "Screen Recording Permission",
+                    isGranted: model.systemStatus.screenRecordingGranted,
+                    settingsAnchor: "Privacy_ScreenCapture"
+                )
+
                 if let result = model.lastDiagnostic {
                     GroupBox(result.status.label) {
                         Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
@@ -180,10 +187,10 @@ private struct DiagnosticsView: View {
                         Text("This test temporarily scrolls the currently open WeChat conversation and restores the previous position.")
                             .foregroundStyle(.secondary)
 
-                        StatusRow(
+                        PermissionRow(
                             label: "Accessibility Permission",
-                            value: model.systemStatus.accessibilityGranted ? "Granted" : "Required",
-                            isPositive: model.systemStatus.accessibilityGranted
+                            isGranted: model.systemStatus.accessibilityGranted,
+                            settingsAnchor: "Privacy_Accessibility"
                         )
 
                         if let result = model.lastInteractionDiagnostic {
@@ -242,6 +249,34 @@ private struct StatusRow: View {
         LabeledContent(label) {
             Label(value, systemImage: isPositive ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(isPositive ? .green : .secondary)
+        }
+        .padding(.vertical, 10)
+    }
+}
+
+private struct PermissionRow: View {
+    let label: String
+    let isGranted: Bool
+    let settingsAnchor: String
+
+    var body: some View {
+        LabeledContent(label) {
+            HStack(spacing: 12) {
+                Label(
+                    isGranted ? "Granted" : "Required",
+                    systemImage: isGranted ? "checkmark.circle.fill" : "circle.dashed"
+                )
+                .foregroundStyle(isGranted ? .green : .secondary)
+
+                if !isGranted {
+                    Button("Open System Settings") {
+                        guard let url = URL(
+                            string: "x-apple.systempreferences:com.apple.preference.security?\(settingsAnchor)"
+                        ) else { return }
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
         .padding(.vertical, 10)
     }
