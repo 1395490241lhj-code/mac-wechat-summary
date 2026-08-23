@@ -143,6 +143,62 @@ private struct ProcessAXStats {
     }
 }
 
+private struct AXGraphSummary: Codable {
+    var elementCount = 0
+    var maxDepth = 0
+    var roleCounts: [String: Int] = [:]
+    var windowCount = 0
+    var groupCount = 0
+    var listCount = 0
+    var scrollAreaCount = 0
+    var staticTextCount = 0
+    var textAreaCount = 0
+    var webAreaCount = 0
+    var imageCount = 0
+    var buttonCount = 0
+    var identifierCount = 0
+    var largestOutboundRelationshipCount = 0
+    var traversalCapped = false
+}
+
+private struct RelationshipAttributeSummary: Codable {
+    let attribute: String
+    var elementOccurrences = 0
+    var scalarElementReferences = 0
+    var arrayOccurrences = 0
+    var totalElementReferences = 0
+    var maxReferencesOnOneElement = 0
+}
+
+private struct RelationshipsResult: Codable {
+    let accessibilityGranted: Bool
+    let targetPID: Int?
+    let targetName: String?
+    let targetBundleIdentifier: String?
+    let targetExecutable: String?
+    let targetIsFrontmost: Bool
+    let childrenOnlyElementCount: Int
+    let relationshipGraphElementCount: Int
+    let additionalElementsDiscovered: Int
+    let childrenTraversal: AXGraphSummary?
+    let relationshipTraversal: AXGraphSummary?
+    let relationshipAttributes: [RelationshipAttributeSummary]
+    let notes: [String]
+}
+
+private struct AXElementSet {
+    private var buckets: [CFHashCode: [AXUIElement]] = [:]
+    private(set) var count = 0
+
+    mutating func insert(_ element: AXUIElement) -> Bool {
+        let hash = CFHash(element)
+        if buckets[hash]?.contains(where: { CFEqual($0, element) }) == true { return false }
+        buckets[hash, default: []].append(element)
+        count += 1
+        return true
+    }
+}
+
 private func copyAttribute(_ element: AXUIElement, _ attribute: CFString) -> (AXError, CFTypeRef?) {
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute, &value)
@@ -421,6 +477,141 @@ private func inspectProcessAX(_ root: AXUIElement) -> ProcessAXStats {
     return stats
 }
 
+private func safeRelationshipAttributeName(_ name: String) -> String {
+    guard name.hasPrefix("AX"), name.count <= 128,
+          name.unicodeScalars.allSatisfy({ $0.isASCII &&
+              (CharacterSet.alphanumerics.contains($0) || $0 == "_") }) else {
+        return "<redacted>"
+    }
+    return name
+}
+
+private func relationshipReferences(in value: CFTypeRef) ->
+    (references: [AXUIElement], scalar: Bool, array: Bool) {
+    if CFGetTypeID(value) == AXUIElementGetTypeID() {
+        return ([value as! AXUIElement], true, false)
+    }
+    guard CFGetTypeID(value) == CFArrayGetTypeID(), let values = value as? [Any] else {
+        return ([], false, false)
+    }
+
+    let references = values.compactMap { item -> AXUIElement? in
+        let object = item as AnyObject
+        guard CFGetTypeID(object) == AXUIElementGetTypeID() else { return nil }
+        return (object as! AXUIElement)
+    }
+    return (references, false, !references.isEmpty)
+}
+
+private func recordGraphElement(_ element: AXUIElement, depth: Int, outboundCount: Int,
+                                summary: inout AXGraphSummary) {
+    let role = safeRole(stringAttribute(element, kAXRoleAttribute as CFString))
+    summary.elementCount += 1
+    summary.maxDepth = max(summary.maxDepth, depth)
+    summary.roleCounts[role, default: 0] += 1
+    summary.largestOutboundRelationshipCount = max(summary.largestOutboundRelationshipCount,
+                                                   outboundCount)
+    if role == (kAXWindowRole as String) { summary.windowCount += 1 }
+    if role == (kAXGroupRole as String) { summary.groupCount += 1 }
+    if role == (kAXListRole as String) { summary.listCount += 1 }
+    if role == (kAXScrollAreaRole as String) { summary.scrollAreaCount += 1 }
+    if role == (kAXStaticTextRole as String) { summary.staticTextCount += 1 }
+    if role == (kAXTextAreaRole as String) { summary.textAreaCount += 1 }
+    if role == "AXWebArea" { summary.webAreaCount += 1 }
+    if role == (kAXImageRole as String) { summary.imageCount += 1 }
+    if role == (kAXButtonRole as String) { summary.buttonCount += 1 }
+    if stringAttribute(element, kAXIdentifierAttribute as CFString) != nil {
+        summary.identifierCount += 1
+    }
+}
+
+private func childrenGraph(from root: AXUIElement) -> AXGraphSummary {
+    var summary = AXGraphSummary()
+    var seen = AXElementSet()
+    _ = seen.insert(root)
+    var stack = [(root, 0)]
+
+    while let (element, depth) = stack.popLast(), summary.elementCount < 20_000 {
+        let elementChildren = children(of: element)
+        recordGraphElement(element, depth: depth, outboundCount: elementChildren.count,
+                           summary: &summary)
+
+        if depth == 30 {
+            for child in elementChildren where seen.insert(child) {
+                summary.traversalCapped = true
+            }
+            continue
+        }
+        for child in elementChildren.reversed() {
+            if seen.count >= 20_000 {
+                summary.traversalCapped = true
+            } else if seen.insert(child) {
+                stack.append((child, depth + 1))
+            }
+        }
+    }
+    if !stack.isEmpty { summary.traversalCapped = true }
+    return summary
+}
+
+private func relationshipGraph(from root: AXUIElement) ->
+    (summary: AXGraphSummary, attributes: [RelationshipAttributeSummary]) {
+    var summary = AXGraphSummary()
+    var attributeStats: [String: RelationshipAttributeSummary] = [:]
+    var seen = AXElementSet()
+    _ = seen.insert(root)
+    var stack = [(root, 0)]
+
+    while let (element, depth) = stack.popLast(), summary.elementCount < 20_000 {
+        var outboundReferences: [AXUIElement] = []
+
+        for rawName in attributeNames(of: element) {
+            let name = safeRelationshipAttributeName(rawName)
+            var stats = attributeStats[name] ?? RelationshipAttributeSummary(attribute: name)
+            stats.elementOccurrences += 1
+
+            let (error, value) = copyAttribute(element, rawName as CFString)
+            if error == .success, let value {
+                let relationship = relationshipReferences(in: value)
+                let referenceCount = relationship.references.count
+                if relationship.scalar { stats.scalarElementReferences += referenceCount }
+                if relationship.array { stats.arrayOccurrences += 1 }
+                stats.totalElementReferences += referenceCount
+                stats.maxReferencesOnOneElement = max(stats.maxReferencesOnOneElement,
+                                                       referenceCount)
+                outboundReferences.append(contentsOf: relationship.references)
+            }
+            attributeStats[name] = stats
+        }
+
+        recordGraphElement(element, depth: depth, outboundCount: outboundReferences.count,
+                           summary: &summary)
+        if depth == 30 {
+            for reference in outboundReferences where seen.insert(reference) {
+                summary.traversalCapped = true
+            }
+            continue
+        }
+        for reference in outboundReferences.reversed() {
+            if seen.count >= 20_000 {
+                summary.traversalCapped = true
+            } else if seen.insert(reference) {
+                stack.append((reference, depth + 1))
+            }
+        }
+    }
+    if !stack.isEmpty { summary.traversalCapped = true }
+
+    let attributes = attributeStats.values
+        .filter { $0.totalElementReferences > 0 }
+        .sorted {
+            $0.totalElementReferences == $1.totalElementReferences
+                ? $0.attribute < $1.attribute
+                : $0.totalElementReferences > $1.totalElementReferences
+        }
+    return (summary, attributes)
+}
+
 private func isInsideWeChatApp(_ url: URL?) -> Bool {
     url?.standardized.path.contains("/WeChat.app/") == true
 }
@@ -467,6 +658,27 @@ private func processCandidate(_ app: NSRunningApplication, frontmostPID: pid_t?)
         largestChildCount: stats.largestChildCount,
         richnessScore: stats.richnessScore
     )
+}
+
+private func relationshipTarget(from candidates: [NSRunningApplication],
+                                frontmostPID: pid_t?) -> NSRunningApplication? {
+    if let frontmostPID,
+       let frontmost = candidates.first(where: { $0.processIdentifier == frontmostPID }) {
+        return frontmost
+    }
+
+    var best: (app: NSRunningApplication, score: Int)?
+    for app in candidates {
+        let score = processCandidate(app, frontmostPID: frontmostPID).richnessScore
+        if let current = best,
+           score < current.score ||
+            score == current.score && app.processIdentifier >= current.app.processIdentifier {
+            continue
+        } else {
+            best = (app, score)
+        }
+    }
+    return best?.app
 }
 
 private func normalMain() {
@@ -553,6 +765,60 @@ private func processesMain() {
     }
 }
 
+private func relationshipsMain() {
+    let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let candidates = NSWorkspace.shared.runningApplications.filter(isWeChatCandidate)
+    guard let target = relationshipTarget(from: candidates, frontmostPID: frontmostPID) else {
+        let result = RelationshipsResult(
+            accessibilityGranted: AXIsProcessTrusted(),
+            targetPID: nil,
+            targetName: nil,
+            targetBundleIdentifier: nil,
+            targetExecutable: nil,
+            targetIsFrontmost: false,
+            childrenOnlyElementCount: 0,
+            relationshipGraphElementCount: 0,
+            additionalElementsDiscovered: 0,
+            childrenTraversal: nil,
+            relationshipTraversal: nil,
+            relationshipAttributes: [],
+            notes: ["No running WeChat-related process was found"]
+        )
+        writeRelationships(result)
+        return
+    }
+
+    let root = AXUIElementCreateApplication(target.processIdentifier)
+    let childrenTraversal = childrenGraph(from: root)
+    let relationshipTraversal = relationshipGraph(from: root)
+    let result = RelationshipsResult(
+        accessibilityGranted: AXIsProcessTrusted(),
+        targetPID: Int(target.processIdentifier),
+        targetName: safeProcessName(target.localizedName),
+        targetBundleIdentifier: target.bundleIdentifier ?? "<unknown>",
+        targetExecutable: target.executableURL?.lastPathComponent ?? "<unknown>",
+        targetIsFrontmost: target.processIdentifier == frontmostPID,
+        childrenOnlyElementCount: childrenTraversal.elementCount,
+        relationshipGraphElementCount: relationshipTraversal.summary.elementCount,
+        additionalElementsDiscovered: max(0, relationshipTraversal.summary.elementCount -
+                                          childrenTraversal.elementCount),
+        childrenTraversal: childrenTraversal,
+        relationshipTraversal: relationshipTraversal.summary,
+        relationshipAttributes: relationshipTraversal.attributes,
+        notes: []
+    )
+    writeRelationships(result)
+}
+
+private func writeRelationships(_ result: RelationshipsResult) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(result) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+}
+
 private func finish(_ result: inout Result) {
     result.wechatWasFrontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
     result.wechatStillRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: weChatBundleID).isEmpty
@@ -575,7 +841,9 @@ private func finishStructure(_ result: inout StructureResult) {
     }
 }
 
-if CommandLine.arguments.dropFirst() == ["--processes"] {
+if CommandLine.arguments.dropFirst() == ["--relationships"] {
+    relationshipsMain()
+} else if CommandLine.arguments.dropFirst() == ["--processes"] {
     processesMain()
 } else if CommandLine.arguments.dropFirst() == ["--structure"] {
     structureMain()
