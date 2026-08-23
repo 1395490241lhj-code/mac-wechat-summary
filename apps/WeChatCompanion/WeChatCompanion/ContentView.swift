@@ -91,7 +91,7 @@ private struct OverviewView: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Text("Run Diagnostics")
+                        Text("Test Passive Capture")
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -118,7 +118,7 @@ private struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Run Diagnostics") {
+                    Button("Test Passive Capture") {
                         Task { await model.runDiagnostics() }
                     }
                     .buttonStyle(.borderedProminent)
@@ -126,7 +126,7 @@ private struct DiagnosticsView: View {
                 }
 
                 if model.isRunningDiagnostics {
-                    ProgressView("Capturing one in-memory frame and measuring OCR…")
+                    ProgressView("Testing passive in-memory capture…")
                 }
 
                 PermissionRow(
@@ -136,21 +136,41 @@ private struct DiagnosticsView: View {
                 )
 
                 if let result = model.lastDiagnostic {
-                    GroupBox(result.status.label) {
+                    GroupBox("Passive Capture") {
                         Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
+                            DiagnosticMetric("Status", result.status.label)
                             DiagnosticMetric("Timestamp", result.timestamp.formatted())
                             DiagnosticMetric("Screen Recording", result.screenRecordingGranted)
                             DiagnosticMetric("WeChat Running", result.wechatRunning)
                             DiagnosticMetric("Window Found", result.wechatWindowFound)
-                            DiagnosticMetric("Frontmost Before", result.wechatWasFrontmostBefore)
-                            DiagnosticMetric("Frontmost After", result.wechatWasFrontmostAfter)
-                            DiagnosticMetric("Capture Succeeded", result.captureSucceeded)
+                            DiagnosticMetric(
+                                "Visibility",
+                                result.wechatFrontmost ? "Frontmost" : "Background"
+                            )
+                            DiagnosticMetric("Window On Screen", result.windowOnScreen)
+                            DiagnosticMetric(
+                                "Capture Source",
+                                result.selectedCaptureMode?.label
+                                    ?? (result.waitingForVisibleWeChat ? "Waiting" : "Unavailable")
+                            )
+                            DiagnosticMetric(
+                                "Image",
+                                result.imageAppearsNonEmpty ? "Readable" : "Empty"
+                            )
                             DiagnosticMetric(
                                 "Capture Size",
                                 "\(result.captureWidth) × \(result.captureHeight)"
                             )
-                            DiagnosticMetric("Image Non-empty", result.imageAppearsNonEmpty)
-                            DiagnosticMetric("OCR Succeeded", result.ocrSucceeded)
+                            DiagnosticMetric("Window Capture Attempted", result.windowCaptureAttempted)
+                            DiagnosticMetric("Window Capture Non-empty", result.windowCaptureNonEmpty)
+                            DiagnosticMetric(
+                                "Display Region Attempted",
+                                result.displayRegionCaptureAttempted
+                            )
+                            DiagnosticMetric(
+                                "Display Region Non-empty",
+                                result.displayRegionCaptureNonEmpty
+                            )
                             DiagnosticMetric(
                                 "Text Observations",
                                 String(result.recognizedTextObservationCount)
@@ -158,10 +178,6 @@ private struct DiagnosticsView: View {
                             DiagnosticMetric(
                                 "Character Count",
                                 String(result.totalRecognizedCharacterCount)
-                            )
-                            DiagnosticMetric(
-                                "Average Confidence",
-                                result.averageConfidence.formatted(.percent.precision(.fractionLength(1)))
                             )
                             DiagnosticMetric("UI Interaction", result.uiInteractionPerformed)
                             DiagnosticMetric("Private Content Persisted", result.privateContentPersisted)

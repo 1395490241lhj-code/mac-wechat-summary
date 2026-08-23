@@ -14,6 +14,10 @@ struct StatusModelTests {
         #expect(result.status == .windowNotFound)
 
         result.wechatWindowFound = true
+        result.waitingForVisibleWeChat = true
+        #expect(result.status == .waitingForVisibleWeChat)
+
+        result.waitingForVisibleWeChat = false
         #expect(result.status == .captureFailed)
 
         result.captureSucceeded = true

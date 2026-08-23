@@ -5,8 +5,14 @@ struct DiagnosticResult: Codable, Equatable, Sendable {
     var screenRecordingGranted = false
     var wechatRunning = false
     var wechatWindowFound = false
-    var wechatWasFrontmostBefore = false
-    var wechatWasFrontmostAfter = false
+    var wechatFrontmost = false
+    var windowOnScreen = false
+    var windowCaptureAttempted = false
+    var windowCaptureNonEmpty = false
+    var displayRegionCaptureAttempted = false
+    var displayRegionCaptureNonEmpty = false
+    var waitingForVisibleWeChat = false
+    var selectedCaptureMode: CaptureMode?
     var captureSucceeded = false
     var captureWidth = 0
     var captureHeight = 0
@@ -22,6 +28,7 @@ struct DiagnosticResult: Codable, Equatable, Sendable {
         if !screenRecordingGranted { return .screenRecordingPermissionRequired }
         if !wechatRunning { return .wechatNotRunning }
         if !wechatWindowFound { return .windowNotFound }
+        if waitingForVisibleWeChat { return .waitingForVisibleWeChat }
         if !captureSucceeded { return .captureFailed }
         if !ocrSucceeded { return .ocrFailed }
         return .succeeded
@@ -34,6 +41,7 @@ enum DiagnosticStatus: String, Codable, Sendable {
     case screenRecordingPermissionRequired
     case wechatNotRunning
     case windowNotFound
+    case waitingForVisibleWeChat
     case captureFailed
     case ocrFailed
 
@@ -44,6 +52,7 @@ enum DiagnosticStatus: String, Codable, Sendable {
         case .screenRecordingPermissionRequired: "Permission Required"
         case .wechatNotRunning: "WeChat Not Running"
         case .windowNotFound: "Window Not Found"
+        case .waitingForVisibleWeChat: "Waiting for Visible WeChat"
         case .captureFailed: "Capture Failed"
         case .ocrFailed: "OCR Failed"
         }

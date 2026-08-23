@@ -9,6 +9,7 @@ struct DiagnosticPrivacyTests {
         result.screenRecordingGranted = true
         result.wechatRunning = true
         result.captureSucceeded = true
+        result.selectedCaptureMode = .visibleDisplayRegion
         result.ocrSucceeded = true
         result.recognizedTextObservationCount = 3
         result.totalRecognizedCharacterCount = 42
@@ -23,7 +24,10 @@ struct DiagnosticPrivacyTests {
         #expect(!json.contains("windowTitle"))
         #expect(!json.contains("wxid"))
         #expect(!json.contains("private example content"))
+        #expect(!json.contains("imageData"))
+        #expect(!json.contains("screenshot"))
         #expect(json.contains("totalRecognizedCharacterCount"))
+        #expect(json.contains("selectedCaptureMode"))
         #expect(json.contains("privateContentPersisted"))
     }
 }
