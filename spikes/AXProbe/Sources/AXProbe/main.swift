@@ -80,6 +80,69 @@ private struct StructureResult: Codable {
     var notes: [String] = []
 }
 
+private struct ProcessCandidate: Codable {
+    let pid: Int
+    let name: String
+    let bundleIdentifier: String
+    let executable: String
+    let isActive: Bool
+    let isHidden: Bool
+    let isTerminated: Bool
+    let isFrontmost: Bool
+    let windowCount: Int
+    let totalElements: Int
+    let maxDepth: Int
+    let traversalCapped: Bool
+    let roleCounts: [String: Int]
+    let listCount: Int
+    let scrollAreaCount: Int
+    let groupCount: Int
+    let staticTextCount: Int
+    let identifierCount: Int
+    let largestChildCount: Int
+    let richnessScore: Int
+}
+
+private struct ProcessesResult: Encodable {
+    let accessibilityGranted: Bool
+    let frontmostPID: Int?
+    let richnessFormula = "totalElements + 50*listCount + 25*scrollAreaCount + 2*staticTextCount"
+    var candidates: [ProcessCandidate]
+
+    private enum CodingKeys: String, CodingKey {
+        case accessibilityGranted, frontmostPID, richnessFormula, candidates
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(accessibilityGranted, forKey: .accessibilityGranted)
+        if let frontmostPID {
+            try container.encode(frontmostPID, forKey: .frontmostPID)
+        } else {
+            try container.encodeNil(forKey: .frontmostPID)
+        }
+        try container.encode(richnessFormula, forKey: .richnessFormula)
+        try container.encode(candidates, forKey: .candidates)
+    }
+}
+
+private struct ProcessAXStats {
+    var totalElements = 0
+    var maxDepth = 0
+    var traversalCapped = false
+    var roleCounts: [String: Int] = [:]
+    var listCount = 0
+    var scrollAreaCount = 0
+    var groupCount = 0
+    var staticTextCount = 0
+    var identifierCount = 0
+    var largestChildCount = 0
+
+    var richnessScore: Int {
+        totalElements + 50 * listCount + 25 * scrollAreaCount + 2 * staticTextCount
+    }
+}
+
 private func copyAttribute(_ element: AXUIElement, _ attribute: CFString) -> (AXError, CFTypeRef?) {
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute, &value)
@@ -327,6 +390,85 @@ private func inspectStructure(_ roots: [AXUIElement], result: inout StructureRes
     }
 }
 
+private func inspectProcessAX(_ root: AXUIElement) -> ProcessAXStats {
+    var stats = ProcessAXStats()
+    var stack = [(root, 0)]
+
+    while let (element, depth) = stack.popLast(), stats.totalElements < 20_000 {
+        stats.totalElements += 1
+        stats.maxDepth = max(stats.maxDepth, depth)
+
+        let role = safeRole(stringAttribute(element, kAXRoleAttribute as CFString))
+        let elementChildren = children(of: element)
+        stats.roleCounts[role, default: 0] += 1
+        stats.largestChildCount = max(stats.largestChildCount, elementChildren.count)
+        if role == (kAXListRole as String) { stats.listCount += 1 }
+        if role == (kAXScrollAreaRole as String) { stats.scrollAreaCount += 1 }
+        if role == (kAXGroupRole as String) { stats.groupCount += 1 }
+        if role == (kAXStaticTextRole as String) { stats.staticTextCount += 1 }
+        if sanitizedIdentifier(stringAttribute(element, kAXIdentifierAttribute as CFString)) != nil {
+            stats.identifierCount += 1
+        }
+
+        if depth < 30 {
+            stack.append(contentsOf: elementChildren.reversed().map { ($0, depth + 1) })
+        } else if !elementChildren.isEmpty {
+            stats.traversalCapped = true
+        }
+    }
+
+    if !stack.isEmpty { stats.traversalCapped = true }
+    return stats
+}
+
+private func isInsideWeChatApp(_ url: URL?) -> Bool {
+    url?.standardized.path.contains("/WeChat.app/") == true
+}
+
+private func isWeChatCandidate(_ app: NSRunningApplication) -> Bool {
+    app.bundleIdentifier == weChatBundleID ||
+        app.localizedName == "WeChat" ||
+        app.localizedName == "WeChatAppEx" ||
+        isInsideWeChatApp(app.executableURL) ||
+        isInsideWeChatApp(app.bundleURL)
+}
+
+private func safeProcessName(_ name: String?) -> String {
+    guard let name, name == "WeChat" || name == "WeChatAppEx" else { return "<redacted>" }
+    return name
+}
+
+private func processCandidate(_ app: NSRunningApplication, frontmostPID: pid_t?) -> ProcessCandidate {
+    let pid = app.processIdentifier
+    let axApp = AXUIElementCreateApplication(pid)
+    let (windowsError, windowsValue) = copyAttribute(axApp, kAXWindowsAttribute as CFString)
+    let windowCount = windowsError == .success ? (windowsValue as? [AXUIElement])?.count ?? 0 : 0
+    let stats = inspectProcessAX(axApp)
+
+    return ProcessCandidate(
+        pid: Int(pid),
+        name: safeProcessName(app.localizedName),
+        bundleIdentifier: app.bundleIdentifier ?? "<unknown>",
+        executable: app.executableURL?.lastPathComponent ?? "<unknown>",
+        isActive: app.isActive,
+        isHidden: app.isHidden,
+        isTerminated: app.isTerminated,
+        isFrontmost: pid == frontmostPID,
+        windowCount: windowCount,
+        totalElements: stats.totalElements,
+        maxDepth: stats.maxDepth,
+        traversalCapped: stats.traversalCapped,
+        roleCounts: stats.roleCounts,
+        listCount: stats.listCount,
+        scrollAreaCount: stats.scrollAreaCount,
+        groupCount: stats.groupCount,
+        staticTextCount: stats.staticTextCount,
+        identifierCount: stats.identifierCount,
+        largestChildCount: stats.largestChildCount,
+        richnessScore: stats.richnessScore
+    )
+}
+
 private func normalMain() {
     var result = Result()
     result.accessibilityGranted = AXIsProcessTrusted()
@@ -389,6 +531,28 @@ private func structureMain() {
     finishStructure(&result)
 }
 
+private func processesMain() {
+    let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let matchingApps = NSWorkspace.shared.runningApplications.filter(isWeChatCandidate)
+    var candidates = matchingApps.map { processCandidate($0, frontmostPID: frontmostPID) }
+    candidates.sort {
+        $0.richnessScore == $1.richnessScore
+            ? $0.pid < $1.pid
+            : $0.richnessScore > $1.richnessScore
+    }
+    let result = ProcessesResult(
+        accessibilityGranted: AXIsProcessTrusted(),
+        frontmostPID: frontmostPID.map(Int.init),
+        candidates: candidates
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(result) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+}
+
 private func finish(_ result: inout Result) {
     result.wechatWasFrontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
     result.wechatStillRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: weChatBundleID).isEmpty
@@ -411,7 +575,9 @@ private func finishStructure(_ result: inout StructureResult) {
     }
 }
 
-if CommandLine.arguments.dropFirst() == ["--structure"] {
+if CommandLine.arguments.dropFirst() == ["--processes"] {
+    processesMain()
+} else if CommandLine.arguments.dropFirst() == ["--structure"] {
     structureMain()
 } else {
     normalMain()
