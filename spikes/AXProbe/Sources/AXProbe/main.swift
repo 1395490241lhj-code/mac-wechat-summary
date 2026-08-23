@@ -22,6 +22,64 @@ private struct Result: Codable {
     var notes: [String] = []
 }
 
+private struct Point: Codable {
+    let x: Double
+    let y: Double
+}
+
+private struct Size: Codable {
+    let width: Double
+    let height: Double
+}
+
+private struct StructuralElement: Codable {
+    let path: String
+    let depth: Int
+    let role: String
+    let subrole: String?
+    let childCount: Int
+    let titleExists: Bool
+    let titleLength: Int?
+    let valueExists: Bool
+    let valueLength: Int?
+    let descriptionExists: Bool
+    let descriptionLength: Int?
+    let identifier: String?
+    let position: Point?
+    let size: Size?
+    let availableAttributeNames: [String]
+}
+
+private struct IdentifierCandidate: Codable {
+    let identifier: String
+    let role: String
+    let path: String
+    let childCount: Int
+}
+
+private struct TreeStats: Codable {
+    var totalElementsInspected = 0
+    var maxDepthReached = 0
+    var traversalCapped = false
+}
+
+private struct StructureResult: Codable {
+    var wechatRunning = false
+    var accessibilityGranted = false
+    var backgroundReadSucceeded = false
+    var wechatWasFrontmostBefore = false
+    var wechatWasFrontmostAfter = false
+    var wechatStillRunning = false
+    var windowCount = 0
+    var uiInteractionPerformed = false
+    var listCandidates: [StructuralElement] = []
+    var staticTextCandidates: [StructuralElement] = []
+    var nonEmptyIdentifiers: [IdentifierCandidate] = []
+    var roleCounts: [String: Int] = [:]
+    var treeStats = TreeStats()
+    var notes: [String] = []
+}
+
 private func copyAttribute(_ element: AXUIElement, _ attribute: CFString) -> (AXError, CFTypeRef?) {
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute, &value)
@@ -38,6 +96,103 @@ private func children(of element: AXUIElement) -> [AXUIElement] {
     let (error, value) = copyAttribute(element, kAXChildrenAttribute as CFString)
     guard error == .success else { return [] }
     return value as? [AXUIElement] ?? []
+}
+
+private func attributeNames(of element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyAttributeNames(element, &names) == .success else { return [] }
+    return names as? [String] ?? []
+}
+
+private func textFacts(_ element: AXUIElement, _ attribute: CFString) -> (exists: Bool, length: Int?) {
+    let (error, value) = copyAttribute(element, attribute)
+    guard error == .success, let value else { return (false, nil) }
+    return (true, (value as? String)?.count)
+}
+
+private func pointAttribute(_ element: AXUIElement) -> Point? {
+    let (error, rawValue) = copyAttribute(element, kAXPositionAttribute as CFString)
+    guard error == .success, let rawValue, CFGetTypeID(rawValue) == AXValueGetTypeID() else { return nil }
+    let value = rawValue as! AXValue
+    guard AXValueGetType(value) == .cgPoint else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(value, .cgPoint, &point) else { return nil }
+    return Point(x: point.x, y: point.y)
+}
+
+private func sizeAttribute(_ element: AXUIElement) -> Size? {
+    let (error, rawValue) = copyAttribute(element, kAXSizeAttribute as CFString)
+    guard error == .success, let rawValue, CFGetTypeID(rawValue) == AXValueGetTypeID() else { return nil }
+    let value = rawValue as! AXValue
+    guard AXValueGetType(value) == .cgSize else { return nil }
+    var size = CGSize.zero
+    guard AXValueGetValue(value, .cgSize, &size) else { return nil }
+    return Size(width: size.width, height: size.height)
+}
+
+private func safeRole(_ role: String?) -> String {
+    guard let role, role.hasPrefix("AX"), role.unicodeScalars.allSatisfy(\.isASCII) else {
+        return "AXUnknown"
+    }
+    return role
+}
+
+private func sanitizedIdentifier(_ identifier: String?) -> String? {
+    guard let identifier, !identifier.isEmpty else { return nil }
+    let lower = identifier.lowercased()
+    if lower.hasPrefix("session_item_") { return "session_item_<redacted>" }
+    if lower.contains("wxid") || identifier != lower ||
+        !identifier.unicodeScalars.allSatisfy(\.isASCII) {
+        return "<redacted>"
+    }
+
+    let safeTokens: Set<Substring> = [
+        "area", "avatar", "big", "button", "cell", "chat", "container", "content",
+        "date", "group", "h", "image", "input", "item", "label", "line", "list",
+        "main", "message", "messages", "row", "scroll", "search", "sidebar", "table",
+        "text", "time", "title", "toolbar", "v", "view", "window",
+    ]
+    let tokens = identifier.split(separator: "_", omittingEmptySubsequences: false)
+    guard tokens.count > 1, tokens.allSatisfy({ !$0.isEmpty && safeTokens.contains($0) }) else {
+        return "<redacted>"
+    }
+    return identifier
+}
+
+private let safeAttributeNames: Set<String> = [
+    kAXChildrenAttribute as String,
+    kAXDescriptionAttribute as String,
+    kAXIdentifierAttribute as String,
+    kAXPositionAttribute as String,
+    kAXRoleAttribute as String,
+    kAXSizeAttribute as String,
+    kAXSubroleAttribute as String,
+    kAXTitleAttribute as String,
+    kAXValueAttribute as String,
+]
+
+private func structuralElement(_ element: AXUIElement, path: String, depth: Int,
+                               role: String, childCount: Int) -> StructuralElement {
+    let title = textFacts(element, kAXTitleAttribute as CFString)
+    let value = textFacts(element, kAXValueAttribute as CFString)
+    let description = textFacts(element, kAXDescriptionAttribute as CFString)
+    return StructuralElement(
+        path: path,
+        depth: depth,
+        role: role,
+        subrole: stringAttribute(element, kAXSubroleAttribute as CFString).map { safeRole($0) },
+        childCount: childCount,
+        titleExists: title.exists,
+        titleLength: title.length,
+        valueExists: value.exists,
+        valueLength: value.length,
+        descriptionExists: description.exists,
+        descriptionLength: description.length,
+        identifier: sanitizedIdentifier(stringAttribute(element, kAXIdentifierAttribute as CFString)),
+        position: pointAttribute(element),
+        size: sizeAttribute(element),
+        availableAttributeNames: attributeNames(of: element).filter(safeAttributeNames.contains).sorted()
+    )
 }
 
 private struct Metadata {
@@ -126,7 +281,53 @@ private func inspect(_ roots: [AXUIElement], result: inout Result) {
     }
 }
 
-private func main() {
+private func inspectStructure(_ roots: [AXUIElement], result: inout StructureResult) {
+    let candidateLimit = 500
+    var stack = roots.enumerated().reversed().map { ($0.element, String($0.offset), 0) }
+
+    while let (element, path, depth) = stack.popLast(), result.treeStats.totalElementsInspected < 20_000 {
+        result.treeStats.totalElementsInspected += 1
+        result.treeStats.maxDepthReached = max(result.treeStats.maxDepthReached, depth)
+
+        let role = safeRole(stringAttribute(element, kAXRoleAttribute as CFString))
+        let elementChildren = children(of: element)
+        let metadata = structuralElement(element, path: path, depth: depth,
+                                         role: role, childCount: elementChildren.count)
+        result.roleCounts[role, default: 0] += 1
+
+        if elementChildren.count > 0,
+           role == (kAXListRole as String) || role == (kAXScrollAreaRole as String) ||
+           role == (kAXGroupRole as String) {
+            if result.listCandidates.count < candidateLimit { result.listCandidates.append(metadata) }
+        }
+        if role == (kAXStaticTextRole as String),
+           metadata.identifier != nil || metadata.position != nil || metadata.size != nil {
+            if result.staticTextCandidates.count < candidateLimit { result.staticTextCandidates.append(metadata) }
+        }
+        if let identifier = metadata.identifier, result.nonEmptyIdentifiers.count < candidateLimit {
+            result.nonEmptyIdentifiers.append(IdentifierCandidate(
+                identifier: identifier,
+                role: role,
+                path: path,
+                childCount: elementChildren.count
+            ))
+        }
+
+        if depth < 30 {
+            for (index, child) in elementChildren.enumerated().reversed() {
+                stack.append((child, "\(path)/\(index)", depth + 1))
+            }
+        } else if !elementChildren.isEmpty {
+            result.treeStats.traversalCapped = true
+        }
+    }
+
+    if !stack.isEmpty {
+        result.treeStats.traversalCapped = true
+    }
+}
+
+private func normalMain() {
     var result = Result()
     result.accessibilityGranted = AXIsProcessTrusted()
     result.wechatWasFrontmostBefore = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
@@ -157,6 +358,37 @@ private func main() {
     finish(&result)
 }
 
+private func structureMain() {
+    var result = StructureResult()
+    result.accessibilityGranted = AXIsProcessTrusted()
+    result.wechatWasFrontmostBefore = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
+
+    guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: weChatBundleID).first else {
+        result.notes.append("WeChat is not running")
+        finishStructure(&result)
+        return
+    }
+    result.wechatRunning = true
+
+    guard result.accessibilityGranted else {
+        result.notes.append("Accessibility permission is not granted")
+        finishStructure(&result)
+        return
+    }
+
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    let (windowsError, windowsValue) = copyAttribute(axApp, kAXWindowsAttribute as CFString)
+    if windowsError == .success, let windows = windowsValue as? [AXUIElement] {
+        result.backgroundReadSucceeded = true
+        result.windowCount = windows.count
+        inspectStructure(windows, result: &result)
+    } else {
+        result.notes.append("AX windows were unavailable (error \(windowsError.rawValue))")
+    }
+
+    finishStructure(&result)
+}
+
 private func finish(_ result: inout Result) {
     result.wechatWasFrontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
     result.wechatStillRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: weChatBundleID).isEmpty
@@ -168,4 +400,19 @@ private func finish(_ result: inout Result) {
     }
 }
 
-main()
+private func finishStructure(_ result: inout StructureResult) {
+    result.wechatWasFrontmostAfter = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleID
+    result.wechatStillRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: weChatBundleID).isEmpty
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(result) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+}
+
+if CommandLine.arguments.dropFirst() == ["--structure"] {
+    structureMain()
+} else {
+    normalMain()
+}
