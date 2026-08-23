@@ -1,0 +1,42 @@
+import Testing
+@testable import WeChatCompanion
+
+struct StatusModelTests {
+    @Test
+    func diagnosticStatusUsesSafeFailureStates() {
+        #expect(DiagnosticResult().status == .screenRecordingPermissionRequired)
+
+        var result = DiagnosticResult()
+        result.screenRecordingGranted = true
+        #expect(result.status == .wechatNotRunning)
+
+        result.wechatRunning = true
+        #expect(result.status == .windowNotFound)
+
+        result.wechatWindowFound = true
+        #expect(result.status == .captureFailed)
+
+        result.captureSucceeded = true
+        #expect(result.status == .ocrFailed)
+
+        result.ocrSucceeded = true
+        #expect(result.status == .succeeded)
+        #expect(result.uiInteractionPerformed == false)
+        #expect(result.privateContentPersisted == false)
+    }
+
+    @Test
+    func systemStatusRetainsIndependentCapabilities() {
+        let status = SystemStatus(
+            wechatInstalled: true,
+            wechatRunning: false,
+            screenRecordingGranted: true,
+            accessibilityGranted: false
+        )
+
+        #expect(status.wechatInstalled)
+        #expect(!status.wechatRunning)
+        #expect(status.screenRecordingGranted)
+        #expect(!status.accessibilityGranted)
+    }
+}
