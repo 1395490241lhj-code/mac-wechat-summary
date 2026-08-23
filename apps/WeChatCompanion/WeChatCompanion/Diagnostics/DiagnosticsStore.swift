@@ -1,28 +1,16 @@
 import Foundation
 
-struct DiagnosticsStore: Sendable {
+struct MetadataStore<Value: Codable & Sendable>: Sendable {
     let fileURL: URL
 
-    static var applicationSupport: DiagnosticsStore {
-        let base = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first!
-        return DiagnosticsStore(
-            fileURL: base
-                .appendingPathComponent("WeChatCompanion", isDirectory: true)
-                .appendingPathComponent("diagnostics.json")
-        )
-    }
-
-    func load() throws -> DiagnosticResult? {
+    func load() throws -> Value? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(DiagnosticResult.self, from: Data(contentsOf: fileURL))
+        return try decoder.decode(Value.self, from: Data(contentsOf: fileURL))
     }
 
-    func save(_ result: DiagnosticResult) throws {
+    func save(_ result: Value) throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,
@@ -39,5 +27,30 @@ struct DiagnosticsStore: Sendable {
             [.posixPermissions: 0o600],
             ofItemAtPath: fileURL.path
         )
+    }
+}
+
+typealias DiagnosticsStore = MetadataStore<DiagnosticResult>
+typealias InteractionDiagnosticsStore = MetadataStore<InteractionDiagnosticResult>
+
+extension MetadataStore where Value == DiagnosticResult {
+    static var applicationSupport: Self {
+        Self(fileURL: Self.applicationSupportURL.appendingPathComponent("diagnostics.json"))
+    }
+}
+
+extension MetadataStore where Value == InteractionDiagnosticResult {
+    static var applicationSupport: Self {
+        Self(fileURL: Self.applicationSupportURL.appendingPathComponent("interaction-diagnostics.json"))
+    }
+}
+
+private extension MetadataStore {
+    static var applicationSupportURL: URL {
+        FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+        .appendingPathComponent("WeChatCompanion", isDirectory: true)
     }
 }

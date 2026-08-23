@@ -175,7 +175,53 @@ private struct DiagnosticsView: View {
                     )
                 }
 
-                if model.persistenceFailed {
+                GroupBox("Interaction") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("This test temporarily scrolls the currently open WeChat conversation and restores the previous position.")
+                            .foregroundStyle(.secondary)
+
+                        StatusRow(
+                            label: "Accessibility Permission",
+                            value: model.systemStatus.accessibilityGranted ? "Granted" : "Required",
+                            isPositive: model.systemStatus.accessibilityGranted
+                        )
+
+                        if let result = model.lastInteractionDiagnostic {
+                            Divider()
+                            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
+                                DiagnosticMetric("Status", result.status.label)
+                                DiagnosticMetric("WeChat Running", result.wechatRunning)
+                                DiagnosticMetric("Window Found", result.wechatWindowFound)
+                                DiagnosticMetric("Background Scroll", result.backgroundScrollSucceeded)
+                                DiagnosticMetric("Foreground Scroll", result.foregroundScrollSucceeded)
+                                DiagnosticMetric("Visual Change", result.imageDifferenceDetected)
+                                DiagnosticMetric(
+                                    "Changed Pixels",
+                                    result.changedPixelRatio.formatted(
+                                        .percent.precision(.fractionLength(1))
+                                    )
+                                )
+                                DiagnosticMetric("Restore Attempted", result.restoreAttempted)
+                                DiagnosticMetric("Restore Verified", result.restoreAppearsSuccessful)
+                                DiagnosticMetric("Message Sent", result.messageWasSent)
+                                DiagnosticMetric("Private Content Persisted", result.privateContentPersisted)
+                            }
+                        }
+
+                        Button("Test Safe Scroll") {
+                            Task { await model.runInteractionDiagnostics() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isRunningInteractionDiagnostics)
+
+                        if model.isRunningInteractionDiagnostics {
+                            ProgressView("Testing one safe scroll and restoration…")
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+
+                if model.persistenceFailed || model.interactionPersistenceFailed {
                     Label("Diagnostic metadata could not be saved.", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                 }

@@ -6,14 +6,10 @@ import ScreenCaptureKit
 import Vision
 
 actor DiagnosticsService {
-    private let weChatBundleIdentifier = "com.tencent.xinWeChat"
-
     func currentSystemStatus() -> SystemStatus {
         SystemStatus(
             wechatInstalled: FileManager.default.fileExists(atPath: "/Applications/WeChat.app"),
-            wechatRunning: !NSRunningApplication.runningApplications(
-                withBundleIdentifier: weChatBundleIdentifier
-            ).isEmpty,
+            wechatRunning: WeChatWindowLocator.runningApplication() != nil,
             screenRecordingGranted: CGPreflightScreenCaptureAccess(),
             accessibilityGranted: AXIsProcessTrusted()
         )
@@ -22,9 +18,8 @@ actor DiagnosticsService {
     func run(requestPermissionIfNeeded: Bool) async -> DiagnosticResult {
         var result = DiagnosticResult()
         result.wechatWasFrontmostBefore = isWeChatFrontmost
-        result.wechatRunning = !NSRunningApplication.runningApplications(
-            withBundleIdentifier: weChatBundleIdentifier
-        ).isEmpty
+        let application = WeChatWindowLocator.runningApplication()
+        result.wechatRunning = application != nil
 
         result.screenRecordingGranted = CGPreflightScreenCaptureAccess()
         if !result.screenRecordingGranted, requestPermissionIfNeeded {
@@ -37,21 +32,10 @@ actor DiagnosticsService {
         }
 
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: false
-            )
-            let windows = content.windows.filter { window in
-                window.owningApplication?.bundleIdentifier == weChatBundleIdentifier
-                    && window.windowLayer == 0
-                    && window.isOnScreen
-                    && window.frame.width > 0
-                    && window.frame.height > 0
-            }
-
-            guard let window = windows.max(by: {
-                $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
-            }) else {
+            guard let application,
+                  let window = try await WeChatWindowLocator.largestScreenCaptureWindow(
+                    for: application.processIdentifier
+                  ) else {
                 result.wechatWasFrontmostAfter = isWeChatFrontmost
                 return result
             }
@@ -85,7 +69,8 @@ actor DiagnosticsService {
     }
 
     private var isWeChatFrontmost: Bool {
-        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == weChatBundleIdentifier
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            == WeChatWindowLocator.bundleIdentifier
     }
 
     private func imageAppearsNonEmpty(_ image: CGImage) -> Bool {

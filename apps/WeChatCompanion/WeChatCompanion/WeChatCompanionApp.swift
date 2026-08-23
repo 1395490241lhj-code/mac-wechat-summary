@@ -12,6 +12,9 @@ struct WeChatCompanionApp: App {
                     await model.bootstrap(
                         autoRunDiagnostics: ProcessInfo.processInfo.arguments.contains(
                             "--run-diagnostics"
+                        ),
+                        autoRunInteractionDiagnostics: ProcessInfo.processInfo.arguments.contains(
+                            "--run-interaction-diagnostics"
                         )
                     )
                 }
