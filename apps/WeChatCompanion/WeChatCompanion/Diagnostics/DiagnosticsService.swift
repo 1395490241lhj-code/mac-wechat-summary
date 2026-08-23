@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 import CoreGraphics
 import Foundation
 import ScreenCaptureKit
@@ -10,8 +9,7 @@ actor DiagnosticsService {
         SystemStatus(
             wechatInstalled: FileManager.default.fileExists(atPath: "/Applications/WeChat.app"),
             wechatRunning: WeChatWindowLocator.runningApplication() != nil,
-            screenRecordingGranted: CGPreflightScreenCaptureAccess(),
-            accessibilityGranted: AXIsProcessTrusted()
+            screenRecordingGranted: CGPreflightScreenCaptureAccess()
         )
     }
 

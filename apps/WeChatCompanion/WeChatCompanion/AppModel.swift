@@ -7,48 +7,32 @@ final class AppModel {
     var selectedDestination: Destination? = .overview
     var systemStatus = SystemStatus.unknown
     var lastDiagnostic: DiagnosticResult?
-    var lastInteractionDiagnostic: InteractionDiagnosticResult?
     var isRunningDiagnostics = false
-    var isRunningInteractionDiagnostics = false
     var persistenceFailed = false
-    var interactionPersistenceFailed = false
 
     @ObservationIgnored private let service: DiagnosticsService
-    @ObservationIgnored private let interactionService: InteractionDiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
-    @ObservationIgnored private let interactionStore: InteractionDiagnosticsStore
     @ObservationIgnored private var didBootstrap = false
 
     init(
         service: DiagnosticsService = DiagnosticsService(),
-        interactionService: InteractionDiagnosticsService = InteractionDiagnosticsService(),
-        store: DiagnosticsStore = .applicationSupport,
-        interactionStore: InteractionDiagnosticsStore = .applicationSupport
+        store: DiagnosticsStore = .applicationSupport
     ) {
         self.service = service
-        self.interactionService = interactionService
         self.store = store
-        self.interactionStore = interactionStore
     }
 
     var lastDiagnosticStatus: DiagnosticStatus {
         lastDiagnostic?.status ?? .neverRun
     }
 
-    func bootstrap(
-        autoRunDiagnostics: Bool,
-        autoRunInteractionDiagnostics: Bool
-    ) async {
+    func bootstrap(autoRunDiagnostics: Bool) async {
         guard !didBootstrap else { return }
         didBootstrap = true
         lastDiagnostic = try? store.load()
-        lastInteractionDiagnostic = try? interactionStore.load()
         await refreshSystemStatus()
         if autoRunDiagnostics {
             await runDiagnostics(requestPermissionIfNeeded: false)
-        }
-        if autoRunInteractionDiagnostics {
-            await runInteractionDiagnostics(requestPermissionIfNeeded: false)
         }
     }
 
@@ -74,23 +58,6 @@ final class AppModel {
         isRunningDiagnostics = false
     }
 
-    func runInteractionDiagnostics(requestPermissionIfNeeded: Bool = true) async {
-        guard !isRunningInteractionDiagnostics else { return }
-        isRunningInteractionDiagnostics = true
-        interactionPersistenceFailed = false
-
-        let result = await interactionService.run(
-            requestPermissionIfNeeded: requestPermissionIfNeeded
-        )
-        do {
-            try interactionStore.save(result)
-        } catch {
-            interactionPersistenceFailed = true
-        }
-        lastInteractionDiagnostic = result
-        await refreshSystemStatus()
-        isRunningInteractionDiagnostics = false
-    }
 }
 
 enum Destination: String, CaseIterable, Identifiable {

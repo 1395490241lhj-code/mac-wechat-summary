@@ -26,17 +26,15 @@ struct StatusModelTests {
     }
 
     @Test
-    func systemStatusRetainsIndependentCapabilities() {
+    func systemStatusRetainsPassiveCaptureCapabilities() {
         let status = SystemStatus(
             wechatInstalled: true,
             wechatRunning: false,
-            screenRecordingGranted: true,
-            accessibilityGranted: false
+            screenRecordingGranted: true
         )
 
         #expect(status.wechatInstalled)
         #expect(!status.wechatRunning)
         #expect(status.screenRecordingGranted)
-        #expect(!status.accessibilityGranted)
     }
 }

@@ -54,12 +54,10 @@ struct SystemStatus: Equatable, Sendable {
     var wechatInstalled: Bool
     var wechatRunning: Bool
     var screenRecordingGranted: Bool
-    var accessibilityGranted: Bool
 
     static let unknown = SystemStatus(
         wechatInstalled: false,
         wechatRunning: false,
-        screenRecordingGranted: false,
-        accessibilityGranted: false
+        screenRecordingGranted: false
     )
 }

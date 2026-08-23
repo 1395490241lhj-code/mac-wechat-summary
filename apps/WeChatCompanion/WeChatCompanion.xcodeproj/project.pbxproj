@@ -13,14 +13,10 @@
 		A00000000000000000000004 /* DiagnosticResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000004 /* DiagnosticResult.swift */; };
 		A00000000000000000000005 /* DiagnosticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* DiagnosticsService.swift */; };
 		A00000000000000000000006 /* DiagnosticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* DiagnosticsStore.swift */; };
-		A00000000000000000000007 /* WeChatNavigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* WeChatNavigator.swift */; };
-		A00000000000000000000008 /* InteractionDiagnosticResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* InteractionDiagnosticResult.swift */; };
-		A00000000000000000000009 /* InteractionDiagnosticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000A /* InteractionDiagnosticsService.swift */; };
+		A00000000000000000000007 /* WeChatWindowLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* WeChatWindowLocator.swift */; };
 		B00000000000000000000001 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* DiagnosticPrivacyTests.swift */; };
 		B00000000000000000000002 /* DiagnosticsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* DiagnosticsStoreTests.swift */; };
 		B00000000000000000000003 /* StatusModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000013 /* StatusModelTests.swift */; };
-		B00000000000000000000004 /* WeChatNavigatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000014 /* WeChatNavigatorTests.swift */; };
-		B00000000000000000000005 /* InteractionDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000015 /* InteractionDiagnosticTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -41,14 +37,10 @@
 		C00000000000000000000005 /* DiagnosticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticsService.swift; sourceTree = "<group>"; };
 		C00000000000000000000006 /* DiagnosticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticsStore.swift; sourceTree = "<group>"; };
 		C00000000000000000000007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		C00000000000000000000008 /* WeChatNavigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Navigation/WeChatNavigator.swift; sourceTree = "<group>"; };
-		C00000000000000000000009 /* InteractionDiagnosticResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/InteractionDiagnosticResult.swift; sourceTree = "<group>"; };
-		C0000000000000000000000A /* InteractionDiagnosticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/InteractionDiagnosticsService.swift; sourceTree = "<group>"; };
+		C00000000000000000000008 /* WeChatWindowLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Navigation/WeChatWindowLocator.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000012 /* DiagnosticsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsStoreTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000013 /* StatusModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusModelTests.swift; sourceTree = "<group>"; };
-		C00000000000000000000014 /* WeChatNavigatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatNavigatorTests.swift; sourceTree = "<group>"; };
-		C00000000000000000000015 /* InteractionDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InteractionDiagnosticTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000021 /* WeChat Companion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "WeChat Companion.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000022 /* WeChatCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WeChatCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -89,9 +81,7 @@
 				C00000000000000000000004 /* DiagnosticResult.swift */,
 				C00000000000000000000005 /* DiagnosticsService.swift */,
 				C00000000000000000000006 /* DiagnosticsStore.swift */,
-				C00000000000000000000008 /* WeChatNavigator.swift */,
-				C00000000000000000000009 /* InteractionDiagnosticResult.swift */,
-				C0000000000000000000000A /* InteractionDiagnosticsService.swift */,
+				C00000000000000000000008 /* WeChatWindowLocator.swift */,
 				C00000000000000000000007 /* Info.plist */,
 			);
 			path = WeChatCompanion;
@@ -103,8 +93,6 @@
 				C00000000000000000000011 /* DiagnosticPrivacyTests.swift */,
 				C00000000000000000000012 /* DiagnosticsStoreTests.swift */,
 				C00000000000000000000013 /* StatusModelTests.swift */,
-				C00000000000000000000014 /* WeChatNavigatorTests.swift */,
-				C00000000000000000000015 /* InteractionDiagnosticTests.swift */,
 			);
 			path = WeChatCompanionTests;
 			sourceTree = "<group>";
@@ -222,9 +210,7 @@
 				A00000000000000000000004 /* DiagnosticResult.swift in Sources */,
 				A00000000000000000000005 /* DiagnosticsService.swift in Sources */,
 				A00000000000000000000006 /* DiagnosticsStore.swift in Sources */,
-				A00000000000000000000007 /* WeChatNavigator.swift in Sources */,
-				A00000000000000000000008 /* InteractionDiagnosticResult.swift in Sources */,
-				A00000000000000000000009 /* InteractionDiagnosticsService.swift in Sources */,
+				A00000000000000000000007 /* WeChatWindowLocator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -235,8 +221,6 @@
 				B00000000000000000000001 /* DiagnosticPrivacyTests.swift in Sources */,
 				B00000000000000000000002 /* DiagnosticsStoreTests.swift in Sources */,
 				B00000000000000000000003 /* StatusModelTests.swift in Sources */,
-				B00000000000000000000004 /* WeChatNavigatorTests.swift in Sources */,
-				B00000000000000000000005 /* InteractionDiagnosticTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
