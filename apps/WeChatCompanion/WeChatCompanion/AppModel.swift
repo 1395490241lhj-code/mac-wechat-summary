@@ -34,6 +34,10 @@ final class AppModel {
         lastDiagnostic?.status ?? .neverRun
     }
 
+    /// True while a metrics polling loop is running. Polling only runs while the
+    /// observer is active, so a paused observer costs nothing.
+    var isPollingObserverMetrics: Bool { observerPollingTask != nil }
+
     func bootstrap(autoRunDiagnostics: Bool, runObserverValidation: Bool) async {
         guard !didBootstrap else { return }
         didBootstrap = true
@@ -74,7 +78,10 @@ final class AppModel {
 
     func startObserver() async {
         await observer.start()
-        observerPollingTask?.cancel()
+        observerMetrics = await observer.snapshot()
+        guard ObserverPollingPolicy.shouldStartPolling(
+            isPolling: observerPollingTask != nil
+        ) else { return }
         observerPollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -87,6 +94,8 @@ final class AppModel {
     func pauseObserver() async {
         await observer.pause()
         observerMetrics = await observer.snapshot()
+        observerPollingTask?.cancel()
+        observerPollingTask = nil
     }
 
 }

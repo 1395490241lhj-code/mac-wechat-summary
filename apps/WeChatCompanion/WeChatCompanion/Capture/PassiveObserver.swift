@@ -8,7 +8,6 @@ enum PassiveObserverState: String, Codable, Sendable {
     case observing
     case paused
     case permissionRequired
-    case error
 
     var label: String {
         switch self {
@@ -17,7 +16,6 @@ enum PassiveObserverState: String, Codable, Sendable {
         case .observing: "Observing"
         case .paused: "Paused"
         case .permissionRequired: "Screen Recording Required"
-        case .error: "Error"
         }
     }
 }
@@ -30,6 +28,8 @@ struct PassiveObserverMetrics: Codable, Equatable, Sendable {
     var meaningfulFramesObserved = 0
     var duplicateFramesSkipped = 0
     var captureFailures = 0
+    var consecutiveCaptureFailures = 0
+    var lastCaptureFailureAt: Date?
     var samplesDroppedWhileBusy = 0
     var currentCaptureMode: CaptureMode?
     var currentImageWidth = 0
@@ -51,6 +51,12 @@ enum PassiveObserverPolicy {
     }
 }
 
+enum ObserverPollingPolicy {
+    /// A metrics polling loop is created only when none is already running, so
+    /// repeated Start calls can never stack duplicate loops.
+    static func shouldStartPolling(isPolling: Bool) -> Bool { !isPolling }
+}
+
 struct ObserverCaptureGate {
     private(set) var isBusy = false
 
@@ -65,11 +71,19 @@ struct ObserverCaptureGate {
     }
 }
 
+/// The capture seam the observer samples through. Injectable so tests can prove
+/// that every sample resolves the capture source again.
+protocol WeChatCaptureProviding: Sendable {
+    func captureCurrentVisibleWeChat() async throws -> WeChatCaptureOutcome
+}
+
+extension WeChatCaptureSource: WeChatCaptureProviding {}
+
 actor PassiveObserver {
     static let sampleInterval = Duration.milliseconds(500)
     static let frameBufferLimit = 1
 
-    private let captureSource: WeChatCaptureSource
+    private let captureSource: any WeChatCaptureProviding
     private var metrics = PassiveObserverMetrics()
     private var lastAcceptedFingerprint: FrameFingerprint?
     private var captureGate = ObserverCaptureGate()
@@ -81,7 +95,7 @@ actor PassiveObserver {
     private var frameContinuation: AsyncStream<ObservedFrame>.Continuation?
     private var frameConsumerID: UUID?
 
-    init(captureSource: WeChatCaptureSource = WeChatCaptureSource()) {
+    init(captureSource: any WeChatCaptureProviding = WeChatCaptureSource()) {
         self.captureSource = captureSource
     }
 
@@ -152,7 +166,9 @@ actor PassiveObserver {
         Task { [weak self] in await self?.captureOneFrame() }
     }
 
-    private func captureOneFrame() async {
+    /// Performs exactly one sample. The sampling loop calls this once per tick,
+    /// so each sample resolves the capture source (and its window) again.
+    func captureOneFrame() async {
         defer { captureGate.finish() }
         do {
             let outcome = try await captureSource.captureCurrentVisibleWeChat()
@@ -167,11 +183,11 @@ actor PassiveObserver {
             }
             guard let frame = outcome.frame,
                   let fingerprint = FrameFingerprint(image: frame.image) else {
-                metrics.captureFailures += 1
-                metrics.state = .waitingForWeChat
+                recordCaptureFailure()
                 return
             }
 
+            recordUsableCapture()
             metrics.currentCaptureMode = frame.mode
             metrics.currentImageWidth = frame.image.width
             metrics.currentImageHeight = frame.image.height
@@ -192,9 +208,20 @@ actor PassiveObserver {
                 )
             )
         } catch {
-            metrics.captureFailures += 1
-            metrics.state = .error
+            // Only aggregate metadata is recorded; the error itself is never
+            // stored or logged, so no captured content can leak into metrics.
+            recordCaptureFailure()
         }
+    }
+
+    private func recordCaptureFailure() {
+        metrics.captureFailures += 1
+        metrics.consecutiveCaptureFailures += 1
+        metrics.lastCaptureFailureAt = Date()
+    }
+
+    private func recordUsableCapture() {
+        metrics.consecutiveCaptureFailures = 0
     }
 
     private func refreshState() {

@@ -28,6 +28,14 @@ struct ContentView: View {
 private struct OverviewView: View {
     @Bindable var model: AppModel
 
+    /// Aggregate-only failure summary: counts and a timestamp, never an error message.
+    private var observerFailureSummary: String {
+        let metrics = model.observerMetrics
+        guard let lastFailureAt = metrics.lastCaptureFailureAt else { return "None" }
+        return "\(metrics.consecutiveCaptureFailures) consecutive · "
+            + "\(metrics.captureFailures) total · last \(lastFailureAt.formatted(date: .omitted, time: .standard))"
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -82,6 +90,12 @@ private struct OverviewView: View {
                         Divider()
                         LabeledContent("Capture Mode") {
                             Text(model.observerMetrics.currentCaptureMode?.label ?? "Waiting")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        LabeledContent("Capture Failures") {
+                            Text(observerFailureSummary)
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 10)
