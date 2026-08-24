@@ -33,7 +33,7 @@ enum GeminiExtractionError: Error, Equatable {
 /// independent `ExtractedConversationFrame`.
 struct GeminiFrameExtractor: FrameExtracting {
     static let credentialAccount = "gemini-api-key"
-    static let defaultModel = "gemini-2.5-flash"
+    static let defaultModel = "gemini-3.7-flash"
     static let requestTimeout: TimeInterval = 30
 
     let isConfigured: Bool

@@ -87,6 +87,22 @@ struct GeminiExtractionTests {
         #expect(await transport.requestCount == 1)
     }
 
+    /// gemini-2.5-flash returns HTTP 404 for this project, so the default must
+    /// stay pinned to a model this credential can actually reach, and that
+    /// constant must be the one that reaches the endpoint.
+    @Test
+    func defaultModelIsThePinnedSupportedModel() async throws {
+        #expect(GeminiFrameExtractor.defaultModel == "gemini-3.7-flash")
+
+        let transport = StubTransport(responseJSON: Self.validResponseJSON)
+        let extractor = try Self.configuredExtractor(transport: transport)
+        _ = try await extractor.extract(from: .syntheticFrame())
+
+        let url = try #require(await transport.lastRequest?.url?.absoluteString)
+        #expect(url.contains("/models/gemini-3.7-flash:generateContent"))
+        #expect(!url.contains("gemini-2.5"))
+    }
+
     @Test
     func remoteProviderAlwaysDeclaresRemoteProcessing() throws {
         let extractor = try Self.configuredExtractor(
