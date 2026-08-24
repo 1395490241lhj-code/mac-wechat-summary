@@ -39,6 +39,13 @@ struct ExtractionMetrics: Codable, Equatable, Sendable {
     var lastCancellationAt: Date?
 }
 
+/// One consistent read of everything the extraction UI needs.
+struct ExtractionState: Sendable {
+    let metrics: ExtractionMetrics
+    /// Memory only. Never persisted, never written to disk.
+    let latest: ExtractedConversationFrame?
+}
+
 /// Consumes meaningful frames and runs at most one extraction at a time.
 ///
 /// Backpressure is newest-wins with a single pending slot: while an extraction
@@ -111,6 +118,13 @@ actor ExtractionCoordinator {
 
     /// In-memory only; exposed for the future message store, never persisted here.
     func latest() -> ExtractedConversationFrame? { latestExtraction }
+
+    /// Metrics and latest result read in one actor hop, so the UI can never
+    /// show counters from one instant beside a result from another.
+    /// Read-only: scheduling, cancellation and backpressure are untouched.
+    func state() -> ExtractionState {
+        ExtractionState(metrics: snapshot(), latest: latestExtraction)
+    }
 
     var hasPendingFrame: Bool { pendingFrame != nil }
 

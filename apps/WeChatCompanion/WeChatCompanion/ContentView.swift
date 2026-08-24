@@ -411,6 +411,12 @@ private struct ChatsView: View {
                                 || model.extractionMetrics.status == .processing
                         )
                         Divider()
+                        StatusRow(
+                            label: "Remote Processing",
+                            value: model.allowsRemoteProcessing ? "Enabled" : "Disabled",
+                            isPositive: model.allowsRemoteProcessing
+                        )
+                        Divider()
                         ExtractionMetric(
                             label: "Meaningful Frames Received",
                             value: model.extractionMetrics.framesReceived
@@ -436,6 +442,13 @@ private struct ChatsView: View {
                         ExtractionMetric(
                             label: "Cancelled",
                             value: model.extractionMetrics.extractionsCancelled
+                        )
+                        Divider()
+                        // Makes a consent misconfiguration obvious rather than
+                        // silently looking like "nothing is happening".
+                        ExtractionMetric(
+                            label: "Withheld Pending Consent",
+                            value: model.extractionMetrics.framesWithheldPendingConsent
                         )
                         Divider()
                         LabeledContent("Last Extraction") {

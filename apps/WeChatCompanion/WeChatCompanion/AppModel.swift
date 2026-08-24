@@ -30,6 +30,9 @@ final class AppModel {
     @ObservationIgnored private let credentials: any CredentialStoring
     @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
+    /// Independent of capture polling: an extraction already in flight can
+    /// still finish after capture is paused, and Chats must show that result.
+    @ObservationIgnored private var extractionPollingTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
 
     init(
@@ -100,7 +103,15 @@ final class AppModel {
             extractor: GeminiFrameExtractor(credentials: credentials),
             capability: ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing)
         )
-        extractionMetrics = await extractionCoordinator.snapshot()
+        await refreshExtractionState()
+    }
+
+    /// Single source of truth for extraction UI freshness. One actor hop keeps
+    /// the counters and the latest result consistent with each other.
+    func refreshExtractionState() async {
+        let state = await extractionCoordinator.state()
+        extractionMetrics = state.metrics
+        latestExtraction = state.latest
     }
 
     var lastDiagnosticStatus: DiagnosticStatus {
@@ -110,6 +121,8 @@ final class AppModel {
     /// True while a metrics polling loop is running. Polling only runs while the
     /// observer is active, so a paused observer costs nothing.
     var isPollingObserverMetrics: Bool { observerPollingTask != nil }
+
+    var isPollingExtractionState: Bool { extractionPollingTask != nil }
 
     var needsWindowSelection: Bool {
         captureMetrics.state == .needsWindowSelection || captureMetrics.state == .selectionLost
@@ -123,6 +136,7 @@ final class AppModel {
         await applyExtractionConfiguration()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()
+        startExtractionPolling()
         if autoRunDiagnostics {
             await runDiagnostics(requestPermissionIfNeeded: false)
         }
@@ -160,24 +174,32 @@ final class AppModel {
     func selectWeChatWindow() async {
         await session.selectWindow()
         await refreshCaptureMetrics()
+        await refreshExtractionState()
         startMetricsPolling()
+        startExtractionPolling()
     }
 
     func resumeObserving() async {
         await session.resume()
         await refreshCaptureMetrics()
+        await refreshExtractionState()
         startMetricsPolling()
+        startExtractionPolling()
     }
 
     func pauseObserving() async {
         await session.pause()
         await refreshCaptureMetrics()
+        // Capture polling stops, but extraction polling deliberately does not:
+        // an in-flight extraction may still complete and must become visible.
+        await refreshExtractionState()
         stopMetricsPolling()
     }
 
     func stopObserving() async {
         await session.stopObserving()
         await refreshCaptureMetrics()
+        await refreshExtractionState()
         capturePreview = nil
         stopMetricsPolling()
     }
@@ -208,6 +230,26 @@ final class AppModel {
     private func stopMetricsPolling() {
         observerPollingTask?.cancel()
         observerPollingTask = nil
+    }
+
+    /// Snapshot-only loop at ~2Hz: no image work, no network, no persistence.
+    /// Started once and never stacked, so repeated calls are harmless.
+    func startExtractionPolling() {
+        guard ObserverPollingPolicy.shouldStartPolling(
+            isPolling: extractionPollingTask != nil
+        ) else { return }
+        extractionPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refreshExtractionState()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    func stopExtractionPolling() {
+        extractionPollingTask?.cancel()
+        extractionPollingTask = nil
     }
 
 }

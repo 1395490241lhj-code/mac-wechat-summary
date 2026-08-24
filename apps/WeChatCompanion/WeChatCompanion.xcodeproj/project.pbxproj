@@ -30,6 +30,7 @@
 		B00000000000000000000007 /* SystemWindowCaptureSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000017 /* SystemWindowCaptureSessionTests.swift */; };
 		B00000000000000000000008 /* ExtractionPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000018 /* ExtractionPipelineTests.swift */; };
 		B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001C /* GeminiExtractionTests.swift */; };
+		B0000000000000000000000B /* ExtractionUIStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000041 /* ExtractionUIStateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -67,6 +68,7 @@
 		C00000000000000000000017 /* SystemWindowCaptureSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemWindowCaptureSessionTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000018 /* ExtractionPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionPipelineTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000001C /* GeminiExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiExtractionTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000041 /* ExtractionUIStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionUIStateTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000021 /* WeChat Companion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "WeChat Companion.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000022 /* WeChatCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WeChatCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -132,6 +134,7 @@
 				C00000000000000000000017 /* SystemWindowCaptureSessionTests.swift */,
 				C00000000000000000000018 /* ExtractionPipelineTests.swift */,
 				C0000000000000000000001C /* GeminiExtractionTests.swift */,
+				C00000000000000000000041 /* ExtractionUIStateTests.swift */,
 			);
 			path = WeChatCompanionTests;
 			sourceTree = "<group>";
@@ -273,6 +276,7 @@
 				B00000000000000000000007 /* SystemWindowCaptureSessionTests.swift in Sources */,
 				B00000000000000000000008 /* ExtractionPipelineTests.swift in Sources */,
 				B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */,
+				B0000000000000000000000B /* ExtractionUIStateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
