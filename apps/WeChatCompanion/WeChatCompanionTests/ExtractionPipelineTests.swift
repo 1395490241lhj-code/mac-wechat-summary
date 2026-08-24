@@ -10,12 +10,11 @@ struct ExtractionPipelineTests {
     func meaningfulFrameReachesTheExtractor() async {
         let extractor = GatedExtractor(openImmediately: true)
         let coordinator = ExtractionCoordinator(extractor: extractor)
-        let observer = PassiveObserver(
-            captureSource: StubCaptureSource(image: .syntheticTestImage(brightness: 30))
-        )
-        await coordinator.start(frames: await observer.meaningfulFrames())
+        let session = SystemWindowCaptureSession()
+        await session.markSelectedForTesting()
+        await coordinator.start(frames: await session.meaningfulFrames())
 
-        await observer.captureOneFrame()
+        await session.ingest(image: .syntheticTestImage(brightness: 30), capturedAt: Date())
 
         let delivered = await waitUntil { await coordinator.snapshot().framesReceived == 1 }
         await coordinator.waitUntilIdle()
@@ -174,13 +173,12 @@ struct ExtractionPipelineTests {
     func pausedObserverStopsFeedingTheCoordinator() async {
         let extractor = GatedExtractor(openImmediately: true)
         let coordinator = ExtractionCoordinator(extractor: extractor)
-        let observer = PassiveObserver(
-            captureSource: StubCaptureSource(image: .syntheticTestImage(brightness: 90))
-        )
-        await coordinator.start(frames: await observer.meaningfulFrames())
+        let session = SystemWindowCaptureSession()
+        await session.markSelectedForTesting()
+        await coordinator.start(frames: await session.meaningfulFrames())
         await coordinator.pause()
 
-        await observer.captureOneFrame()
+        await session.ingest(image: .syntheticTestImage(brightness: 90), capturedAt: Date())
 
         // Nothing is extracted while paused, whatever the observer emits.
         let quiet = await waitUntil { await coordinator.snapshot().extractionsStarted > 0 }
@@ -276,14 +274,14 @@ struct ExtractionPipelineTests {
     }
 
     @Test
-    func passiveObserverStaysIndependentOfAnyProvider() throws {
-        let observerSource = try String(
+    func captureSessionStaysIndependentOfAnyProvider() throws {
+        let captureSource = try String(
             contentsOf: appSourceDirectory()
-                .appendingPathComponent("Capture/PassiveObserver.swift"),
+                .appendingPathComponent("Capture/SystemWindowCaptureSession.swift"),
             encoding: .utf8
         )
         for coupling in ["Extract", "OpenAI", "Anthropic", "Gemini"] {
-            #expect(!observerSource.contains(coupling))
+            #expect(!captureSource.contains(coupling))
         }
     }
 }
@@ -370,25 +368,6 @@ private actor GatedExtractor: FrameExtracting {
             throw ExtractionTestError.providerFailed(detail: ExtractionTestError.secretMarker)
         }
         return ExtractedConversationFrame.empty(capturedAt: frame.capturedAt)
-    }
-}
-
-private struct StubCaptureSource: WeChatCaptureProviding {
-    let image: CGImage
-
-    func captureCurrentVisibleWeChat() async throws -> WeChatCaptureOutcome {
-        var outcome = WeChatCaptureOutcome()
-        outcome.wechatRunning = true
-        outcome.wechatFrontmost = true
-        outcome.windowFound = true
-        outcome.windowOnScreen = true
-        outcome.displayRegionCaptureNonEmpty = true
-        outcome.frame = CaptureFrame(
-            image: image,
-            mode: .visibleDisplayRegion,
-            timestamp: Date()
-        )
-        return outcome
     }
 }
 

@@ -4,11 +4,14 @@ import Foundation
 import ScreenCaptureKit
 
 enum CaptureMode: String, Codable, Sendable {
+    /// Production: the window the user picked via the system sharing picker.
+    case systemSelectedWindow
     case desktopIndependentWindow
     case visibleDisplayRegion
 
     var label: String {
         switch self {
+        case .systemSelectedWindow: "System Window Share"
         case .desktopIndependentWindow: "Window"
         case .visibleDisplayRegion: "Visible Display Region"
         }
@@ -123,6 +126,12 @@ enum CaptureImageValidator {
     }
 }
 
+/// LEGACY, DIAGNOSTICS ONLY.
+///
+/// One-shot passive capture behind the Diagnostics "Test Passive Capture"
+/// button. The production observation path is SystemWindowCaptureSession; this
+/// type is deliberately not part of it, and nothing here may become a silent
+/// fallback for the window stream.
 actor WeChatCaptureSource {
     func captureCurrentVisibleWeChat() async throws -> WeChatCaptureOutcome {
         var outcome = WeChatCaptureOutcome()

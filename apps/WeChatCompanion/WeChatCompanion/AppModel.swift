@@ -9,7 +9,10 @@ final class AppModel {
     var lastDiagnostic: DiagnosticResult?
     var isRunningDiagnostics = false
     var persistenceFailed = false
-    var observerMetrics = PassiveObserverMetrics()
+    var captureMetrics = WindowCaptureMetrics()
+    /// Development preview of the latest accepted meaningful frame.
+    /// Memory only, never encoded or saved.
+    var capturePreview: ObservedFrame?
     var extractionMetrics = ExtractionMetrics()
     /// In-memory only. Cleared when the app exits; never written to disk.
     var latestExtraction: ExtractedConversationFrame?
@@ -21,7 +24,7 @@ final class AppModel {
 
     @ObservationIgnored private let service: DiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
-    @ObservationIgnored private let observer: PassiveObserver
+    @ObservationIgnored private let session: SystemWindowCaptureSession
     @ObservationIgnored private let observerStore: ObserverMetricsStore
     @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
     @ObservationIgnored private let credentials: any CredentialStoring
@@ -32,7 +35,7 @@ final class AppModel {
     init(
         service: DiagnosticsService = DiagnosticsService(),
         store: DiagnosticsStore = .applicationSupport,
-        observer: PassiveObserver = PassiveObserver(),
+        session: SystemWindowCaptureSession = SystemWindowCaptureSession(),
         observerStore: ObserverMetricsStore = .applicationSupport,
         extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator(),
         credentials: any CredentialStoring = KeychainCredentialStore(),
@@ -40,7 +43,7 @@ final class AppModel {
     ) {
         self.service = service
         self.store = store
-        self.observer = observer
+        self.session = session
         self.observerStore = observerStore
         self.extractionCoordinator = extractionCoordinator
         self.credentials = credentials
@@ -108,19 +111,25 @@ final class AppModel {
     /// observer is active, so a paused observer costs nothing.
     var isPollingObserverMetrics: Bool { observerPollingTask != nil }
 
+    var needsWindowSelection: Bool {
+        captureMetrics.state == .needsWindowSelection || captureMetrics.state == .selectionLost
+    }
+
     func bootstrap(autoRunDiagnostics: Bool, runObserverValidation: Bool) async {
         guard !didBootstrap else { return }
         didBootstrap = true
         lastDiagnostic = try? store.load()
         await refreshSystemStatus()
-        await startObserver()
+        await applyExtractionConfiguration()
+        await extractionCoordinator.start(frames: await session.meaningfulFrames())
+        await refreshCaptureMetrics()
         if autoRunDiagnostics {
             await runDiagnostics(requestPermissionIfNeeded: false)
         }
         if runObserverValidation {
             try? await Task.sleep(for: .seconds(5))
-            observerMetrics = await observer.snapshot()
-            try? observerStore.save(observerMetrics)
+            captureMetrics = await session.snapshot()
+            try? observerStore.save(captureMetrics)
         }
     }
 
@@ -146,31 +155,57 @@ final class AppModel {
         isRunningDiagnostics = false
     }
 
-    func startObserver() async {
-        await applyExtractionConfiguration()
-        await observer.start()
-        await extractionCoordinator.start(frames: await observer.meaningfulFrames())
-        observerMetrics = await observer.snapshot()
-        extractionMetrics = await extractionCoordinator.snapshot()
+    /// Presents the system window picker. The user chooses the WeChat window
+    /// themselves; we never activate or control WeChat to do it.
+    func selectWeChatWindow() async {
+        await session.selectWindow()
+        await refreshCaptureMetrics()
+        startMetricsPolling()
+    }
+
+    func resumeObserving() async {
+        await session.resume()
+        await refreshCaptureMetrics()
+        startMetricsPolling()
+    }
+
+    func pauseObserving() async {
+        await session.pause()
+        await refreshCaptureMetrics()
+        stopMetricsPolling()
+    }
+
+    func stopObserving() async {
+        await session.stopObserving()
+        await refreshCaptureMetrics()
+        capturePreview = nil
+        stopMetricsPolling()
+    }
+
+    func clearCapturePreview() async {
+        await session.clearPreview()
+        capturePreview = nil
+    }
+
+    private func refreshCaptureMetrics() async {
+        captureMetrics = await session.snapshot()
+        capturePreview = await session.latestPreview()
+    }
+
+    private func startMetricsPolling() {
         guard ObserverPollingPolicy.shouldStartPolling(
             isPolling: observerPollingTask != nil
         ) else { return }
         observerPollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.observerMetrics = await self.observer.snapshot()
-                self.extractionMetrics = await self.extractionCoordinator.snapshot()
-                self.latestExtraction = await self.extractionCoordinator.latest()
+                await self.refreshCaptureMetrics()
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
     }
 
-    func pauseObserver() async {
-        await observer.pause()
-        await extractionCoordinator.pause()
-        observerMetrics = await observer.snapshot()
-        extractionMetrics = await extractionCoordinator.snapshot()
+    private func stopMetricsPolling() {
         observerPollingTask?.cancel()
         observerPollingTask = nil
     }

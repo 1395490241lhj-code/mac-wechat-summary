@@ -32,14 +32,6 @@ struct ContentView: View {
 private struct OverviewView: View {
     @Bindable var model: AppModel
 
-    /// Aggregate-only failure summary: counts and a timestamp, never an error message.
-    private var observerFailureSummary: String {
-        let metrics = model.observerMetrics
-        guard let lastFailureAt = metrics.lastCaptureFailureAt else { return "None" }
-        return "\(metrics.consecutiveCaptureFailures) consecutive · "
-            + "\(metrics.captureFailures) total · last \(lastFailureAt.formatted(date: .omitted, time: .standard))"
-    }
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -72,55 +64,77 @@ private struct OverviewView: View {
                     }
                 }
 
-                GroupBox("Passive Observer") {
+                GroupBox("WeChat Window") {
                     VStack(spacing: 0) {
                         StatusRow(
                             label: "Status",
-                            value: model.observerMetrics.state.label,
-                            isPositive: model.observerMetrics.state == .observing
+                            value: model.captureMetrics.state.label,
+                            isPositive: model.captureMetrics.state == .observing
                         )
                         Divider()
-                        LabeledContent("Meaningful Frames") {
-                            Text(String(model.observerMetrics.meaningfulFramesObserved))
+                        LabeledContent("Selected Capture") {
+                            Text("System Window Share")
                                 .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        LabeledContent("Meaningful Frames") {
+                            Text(String(model.captureMetrics.meaningfulFramesObserved))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        LabeledContent("Duplicates Skipped") {
+                            Text(String(model.captureMetrics.duplicateFramesSkipped))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
                         .padding(.vertical, 10)
                         Divider()
                         LabeledContent("Last Observed") {
-                            Text(model.observerMetrics.lastCaptureAt?.formatted() ?? "Never")
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        LabeledContent("Capture Mode") {
-                            Text(model.observerMetrics.currentCaptureMode?.label ?? "Waiting")
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        LabeledContent("Capture Failures") {
-                            Text(observerFailureSummary)
+                            Text(model.captureMetrics.lastFrameAt?
+                                .formatted(date: .omitted, time: .standard) ?? "Never")
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 10)
                         Divider()
                         HStack {
-                            Button("Start Observer") {
-                                Task { await model.startObserver() }
+                            Button(model.needsWindowSelection
+                                ? "Select WeChat Window" : "Change Window") {
+                                Task { await model.selectWeChatWindow() }
                             }
-                            Button("Pause Observer") {
-                                Task { await model.pauseObserver() }
+                            .buttonStyle(.borderedProminent)
+
+                            if model.captureMetrics.state == .paused {
+                                Button("Resume") {
+                                    Task { await model.resumeObserving() }
+                                }
+                            } else {
+                                Button("Pause") {
+                                    Task { await model.pauseObserving() }
+                                }
+                                .disabled(model.captureMetrics.state != .observing)
                             }
+                            Button("Stop Observing") {
+                                Task { await model.stopObserving() }
+                            }
+                            .disabled(model.needsWindowSelection)
                             Spacer()
-                            Text(
-                                "\(model.observerMetrics.framesSampled) sampled · "
-                                    + "\(model.observerMetrics.duplicateFramesSkipped) duplicates skipped"
-                            )
-                            .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 10)
+                        if model.captureMetrics.state == .selectionLost {
+                            Divider()
+                            Text("The selected window is no longer available. "
+                                + "Select it again to resume observing.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 10)
+                        }
                     }
                 }
+
+                CapturePreviewSection(model: model)
 
                 GroupBox("Diagnostics") {
                     VStack(spacing: 0) {
@@ -163,6 +177,54 @@ private struct OverviewView: View {
             .frame(maxWidth: 720, alignment: .leading)
         }
         .navigationTitle("Overview")
+    }
+}
+
+/// Development preview of the exact frame handed to extraction. Memory only:
+/// no save, export, copy, or pasteboard action exists.
+private struct CapturePreviewSection: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        GroupBox("Capture Preview") {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Label("Memory only — never saved", systemImage: "eye.slash")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear Preview") {
+                        Task { await model.clearCapturePreview() }
+                    }
+                    .disabled(model.capturePreview == nil)
+                }
+                .padding(.vertical, 10)
+
+                if let preview = model.capturePreview {
+                    Divider()
+                    Image(decorative: preview.image, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: 420)
+                        .background(.quaternary)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(.vertical, 10)
+                    Divider()
+                    LabeledContent("Frame") {
+                        Text("\(preview.image.width) × \(preview.image.height) px · "
+                            + preview.captureMode.label)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
+                } else {
+                    Divider()
+                    Text("No meaningful frame yet.")
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 10)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
