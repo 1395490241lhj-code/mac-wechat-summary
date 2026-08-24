@@ -23,10 +23,20 @@ struct ExtractionMetrics: Codable, Equatable, Sendable {
     var framesReceived = 0
     var extractionsStarted = 0
     var extractionsSucceeded = 0
+    /// Genuine provider, network, or parse failures only. A cancelled
+    /// extraction is never counted here.
     var extractionsFailed = 0
+    /// Extractions abandoned because the work was cancelled, normally by
+    /// pausing. Expected lifecycle, not an error.
+    var extractionsCancelled = 0
     var framesDroppedWhileBusy = 0
     var framesWithheldPendingConsent = 0
+    /// Completion time of the last real attempt -- a success or a genuine
+    /// failure. Cancellations deliberately do not move it, so it never means
+    /// several different things at once.
     var lastExtractionAt: Date?
+    /// Time of the last cancelled extraction, tracked separately.
+    var lastCancellationAt: Date?
 }
 
 /// Consumes meaningful frames and runs at most one extraction at a time.
@@ -42,6 +52,9 @@ actor ExtractionCoordinator {
     private var metrics = ExtractionMetrics()
     private var pendingFrame: ObservedFrame?
     private var extractionTask: Task<Void, Never>?
+    /// Identifies the drain task that owns `extractionTask`, so a late
+    /// unwinding task cannot clear a newer one's reference.
+    private var extractionGeneration = 0
     private var consumeTask: Task<Void, Never>?
     private var isPaused = false
     /// Latest result, in memory only. Never written to disk in this phase.
@@ -82,8 +95,11 @@ actor ExtractionCoordinator {
         isPaused = true
         consumeTask?.cancel()
         consumeTask = nil
+        // Cancel but deliberately KEEP the reference. The task may still be
+        // unwinding inside the provider; clearing it here would let a resumed
+        // session start a second extraction alongside it. The task clears its
+        // own reference once it actually exits.
         extractionTask?.cancel()
-        extractionTask = nil
         pendingFrame = nil
     }
 
@@ -97,6 +113,10 @@ actor ExtractionCoordinator {
     func latest() -> ExtractedConversationFrame? { latestExtraction }
 
     var hasPendingFrame: Bool { pendingFrame != nil }
+
+    /// True while a drain task exists, including one that has been cancelled
+    /// but has not finished unwinding yet.
+    var hasActiveExtractionTask: Bool { extractionTask != nil }
 
     private var status: ExtractionStatus {
         if !extractor.isConfigured { return .notConfigured }
@@ -124,20 +144,26 @@ actor ExtractionCoordinator {
             pendingFrame = frame
             return
         }
+        extractionGeneration += 1
+        let generation = extractionGeneration
         extractionTask = Task { [weak self] in
-            await self?.drain(startingWith: frame)
+            await self?.drain(startingWith: frame, generation: generation)
         }
     }
 
-    private func drain(startingWith first: ObservedFrame) async {
+    private func drain(startingWith first: ObservedFrame, generation: Int) async {
         var next: ObservedFrame? = first
         while let frame = next {
             if Task.isCancelled { break }
             await runExtraction(frame)
+            // Do not consume a pending frame after cancellation: it belongs to
+            // whatever session comes next, not to this unwinding one.
+            if Task.isCancelled { break }
             next = pendingFrame
             pendingFrame = nil
         }
-        extractionTask = nil
+        // Only the owning generation may release the slot.
+        if generation == extractionGeneration { extractionTask = nil }
     }
 
     private func runExtraction(_ frame: ObservedFrame) async {
@@ -146,12 +172,27 @@ actor ExtractionCoordinator {
             let extracted = try await extractor.extract(from: frame)
             metrics.extractionsSucceeded += 1
             latestExtraction = extracted
+            metrics.lastExtractionAt = Date()
+        } catch is CancellationError {
+            recordCancellation()
+        } catch let error as URLError where error.code == .cancelled {
+            // Cancelling a task can surface through URLSession rather than as
+            // a CancellationError. Only this one code counts as cancellation:
+            // other network errors remain genuine failures.
+            recordCancellation()
         } catch {
             // Aggregate count only. The provider error is deliberately not
             // stored, logged, or surfaced, so no content can leak through it.
             metrics.extractionsFailed += 1
+            metrics.lastExtractionAt = Date()
         }
-        metrics.lastExtractionAt = Date()
+    }
+
+    /// A cancelled extraction produced no result, so it never replaces
+    /// `latestExtraction` and never moves `lastExtractionAt`.
+    private func recordCancellation() {
+        metrics.extractionsCancelled += 1
+        metrics.lastCancellationAt = Date()
     }
 
     /// Test seam: awaits any in-flight extraction so assertions are deterministic.

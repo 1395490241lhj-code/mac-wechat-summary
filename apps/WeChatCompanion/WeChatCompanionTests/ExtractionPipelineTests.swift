@@ -246,6 +246,183 @@ struct ExtractionPipelineTests {
         #expect(frame.messages.isEmpty)
     }
 
+    // MARK: - Cancellation is not failure
+
+    @Test
+    func cancellationErrorCountsAsCancelledNotFailed() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        await extractor.setError(CancellationError())
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+
+        let metrics = await coordinator.snapshot()
+        #expect(metrics.extractionsCancelled == 1)
+        #expect(metrics.extractionsFailed == 0)
+        #expect(metrics.extractionsSucceeded == 0)
+        // A cancellation produced no result, so these stay untouched.
+        #expect(metrics.lastExtractionAt == nil)
+        #expect(metrics.lastCancellationAt != nil)
+        #expect(await coordinator.latest() == nil)
+    }
+
+    @Test
+    func urlSessionCancellationCountsAsCancelledNotFailed() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        await extractor.setError(URLError(.cancelled))
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+
+        let metrics = await coordinator.snapshot()
+        #expect(metrics.extractionsCancelled == 1)
+        #expect(metrics.extractionsFailed == 0)
+    }
+
+    /// Only URLError.cancelled is cancellation; other network errors are real
+    /// failures and must not be laundered into the cancelled bucket.
+    @Test
+    func otherNetworkErrorsRemainFailures() async {
+        for code in [URLError.timedOut, .notConnectedToInternet, .badServerResponse] {
+            let extractor = GatedExtractor(openImmediately: true)
+            await extractor.setError(URLError(code))
+            let coordinator = ExtractionCoordinator(extractor: extractor)
+
+            await coordinator.submit(.synthetic(secondsFromNow: 0))
+            await coordinator.waitUntilIdle()
+
+            let metrics = await coordinator.snapshot()
+            #expect(metrics.extractionsFailed == 1, "\(code) must count as a failure")
+            #expect(metrics.extractionsCancelled == 0)
+            #expect(metrics.lastExtractionAt != nil)
+        }
+    }
+
+    @Test
+    func genuineProviderErrorStillCountsAsFailure() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        await extractor.setShouldThrow(true)
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+
+        let metrics = await coordinator.snapshot()
+        #expect(metrics.extractionsFailed == 1)
+        #expect(metrics.extractionsCancelled == 0)
+    }
+
+    @Test
+    func successfulExtractionAccountingIsUnchanged() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+
+        let metrics = await coordinator.snapshot()
+        #expect(metrics.extractionsSucceeded == 1)
+        #expect(metrics.extractionsFailed == 0)
+        #expect(metrics.extractionsCancelled == 0)
+        #expect(metrics.lastExtractionAt != nil)
+        #expect(metrics.lastCancellationAt == nil)
+        #expect(await coordinator.latest() != nil)
+    }
+
+    /// A cancelled extraction must not overwrite a previously good result.
+    @Test
+    func cancellationDoesNotReplaceLatestExtraction() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+        let good = await coordinator.latest()
+        #expect(good != nil)
+
+        await extractor.setError(CancellationError())
+        await coordinator.submit(.synthetic(secondsFromNow: 1))
+        await coordinator.waitUntilIdle()
+
+        #expect(await coordinator.latest() == good)
+        #expect(await coordinator.snapshot().extractionsCancelled == 1)
+    }
+
+    @Test
+    func pauseDuringExtractionRecordsCancellationRatherThanFailure() async {
+        let extractor = GatedExtractor(openImmediately: true)
+        await extractor.setError(CancellationError())
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+        await coordinator.pause()
+
+        let metrics = await coordinator.snapshot()
+        #expect(metrics.extractionsCancelled == 1)
+        #expect(metrics.extractionsFailed == 0)
+        #expect(metrics.status == .paused)
+    }
+
+    /// Pause used to clear the task reference immediately, so a resumed
+    /// session could start a second extraction beside the still-unwinding one.
+    @Test
+    func pauseKeepsTheSlotClaimedUntilTheCancelledTaskExits() async {
+        let extractor = GatedExtractor()
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+
+        // Wait until the provider call is genuinely in flight, so the pause
+        // below really does interrupt an unfinished extraction.
+        let entered = await waitUntil { await extractor.receivedTimestamps.count == 1 }
+        #expect(entered)
+        #expect(await coordinator.snapshot().extractionsStarted == 1)
+
+        await coordinator.pause()
+
+        // The slot stays claimed: this provider call has not returned yet.
+        #expect(await coordinator.hasActiveExtractionTask)
+        #expect(await coordinator.hasPendingFrame == false)
+
+        // Resuming and submitting must not start a second concurrent call.
+        await coordinator.start(frames: AsyncStream { $0.finish() })
+        await coordinator.submit(.synthetic(secondsFromNow: 1))
+
+        // With the old pause(), the freed slot let a second provider call start
+        // beside the still-blocked first one. Give that time to happen, then
+        // prove it did not.
+        let secondCallStarted = await waitUntil {
+            await extractor.receivedTimestamps.count > 1
+        }
+        #expect(!secondCallStarted)
+        #expect(await coordinator.snapshot().extractionsStarted == 1)
+        #expect(await extractor.maxConcurrent == 1)
+        // The new frame waits in the single pending slot instead.
+        #expect(await coordinator.hasPendingFrame)
+
+        await extractor.open()
+        await coordinator.waitUntilIdle()
+        #expect(await extractor.maxConcurrent == 1)
+    }
+
+    @Test
+    func cancellationTelemetryIsAggregateOnly() async throws {
+        let extractor = GatedExtractor(openImmediately: true)
+        await extractor.setError(CancellationError())
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+        await coordinator.submit(.synthetic(secondsFromNow: 0))
+        await coordinator.waitUntilIdle()
+
+        let metrics = await coordinator.snapshot()
+        let json = String(decoding: try JSONEncoder().encode(metrics), as: UTF8.self)
+        #expect(json.contains("extractionsCancelled"))
+        #expect(!json.contains("Cancellation error"))
+        #expect(!json.contains("reason"))
+        #expect(!json.contains("message"))
+        #expect(!json.contains(ExtractionTestError.secretMarker))
+    }
+
     // MARK: - Architectural guards
 
     /// Networking and base64 are legitimate inside a remote provider, and
@@ -305,7 +482,13 @@ private func appSourceText(excludingPathComponent excluded: String? = nil) throw
             guard let excluded else { return true }
             return !url.pathComponents.contains(excluded)
         } ?? []
-    return try files.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+    let joined = try files.map { try String(contentsOf: $0, encoding: .utf8) }
+        .joined(separator: "\n")
+    // Scan code only: comments legitimately name the APIs we forbid.
+    return joined
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        .joined(separator: "\n")
 }
 
 private func waitUntil(
@@ -337,6 +520,7 @@ private actor GatedExtractor: FrameExtracting {
     private var isOpen: Bool
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var shouldThrow = false
+    private var errorToThrow: (any Error)?
 
     init(
         openImmediately: Bool = false,
@@ -347,6 +531,9 @@ private actor GatedExtractor: FrameExtracting {
     }
 
     func setShouldThrow(_ value: Bool) { shouldThrow = value }
+
+    /// Throw a specific error, so cancellation types can be simulated exactly.
+    func setError(_ error: (any Error)?) { errorToThrow = error }
 
     func open() {
         isOpen = true
@@ -364,6 +551,7 @@ private actor GatedExtractor: FrameExtracting {
         if !isOpen {
             await withCheckedContinuation { waiters.append($0) }
         }
+        if let errorToThrow { throw errorToThrow }
         if shouldThrow {
             throw ExtractionTestError.providerFailed(detail: ExtractionTestError.secretMarker)
         }

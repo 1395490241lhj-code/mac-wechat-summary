@@ -431,6 +431,13 @@ private struct ChatsView: View {
                             value: model.extractionMetrics.extractionsFailed
                         )
                         Divider()
+                        // Shown separately: pausing cancels work, which is
+                        // expected lifecycle rather than an error.
+                        ExtractionMetric(
+                            label: "Cancelled",
+                            value: model.extractionMetrics.extractionsCancelled
+                        )
+                        Divider()
                         LabeledContent("Last Extraction") {
                             Text(
                                 model.extractionMetrics.lastExtractionAt?
