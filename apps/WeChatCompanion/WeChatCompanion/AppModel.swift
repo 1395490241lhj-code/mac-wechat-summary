@@ -10,11 +10,13 @@ final class AppModel {
     var isRunningDiagnostics = false
     var persistenceFailed = false
     var observerMetrics = PassiveObserverMetrics()
+    var extractionMetrics = ExtractionMetrics()
 
     @ObservationIgnored private let service: DiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
     @ObservationIgnored private let observer: PassiveObserver
     @ObservationIgnored private let observerStore: ObserverMetricsStore
+    @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
 
@@ -22,12 +24,14 @@ final class AppModel {
         service: DiagnosticsService = DiagnosticsService(),
         store: DiagnosticsStore = .applicationSupport,
         observer: PassiveObserver = PassiveObserver(),
-        observerStore: ObserverMetricsStore = .applicationSupport
+        observerStore: ObserverMetricsStore = .applicationSupport,
+        extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator()
     ) {
         self.service = service
         self.store = store
         self.observer = observer
         self.observerStore = observerStore
+        self.extractionCoordinator = extractionCoordinator
     }
 
     var lastDiagnosticStatus: DiagnosticStatus {
@@ -78,7 +82,9 @@ final class AppModel {
 
     func startObserver() async {
         await observer.start()
+        await extractionCoordinator.start(frames: await observer.meaningfulFrames())
         observerMetrics = await observer.snapshot()
+        extractionMetrics = await extractionCoordinator.snapshot()
         guard ObserverPollingPolicy.shouldStartPolling(
             isPolling: observerPollingTask != nil
         ) else { return }
@@ -86,6 +92,7 @@ final class AppModel {
             while !Task.isCancelled {
                 guard let self else { return }
                 self.observerMetrics = await self.observer.snapshot()
+                self.extractionMetrics = await self.extractionCoordinator.snapshot()
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }
@@ -93,7 +100,9 @@ final class AppModel {
 
     func pauseObserver() async {
         await observer.pause()
+        await extractionCoordinator.pause()
         observerMetrics = await observer.snapshot()
+        extractionMetrics = await extractionCoordinator.snapshot()
         observerPollingTask?.cancel()
         observerPollingTask = nil
     }

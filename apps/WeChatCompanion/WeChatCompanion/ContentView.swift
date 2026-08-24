@@ -16,6 +16,8 @@ struct ContentView: View {
             switch model.selectedDestination ?? .overview {
             case .overview:
                 OverviewView(model: model)
+            case .chats:
+                ChatsView(model: model)
             case .diagnostics:
                 DiagnosticsView(model: model)
             case let destination:
@@ -324,6 +326,87 @@ private struct DiagnosticMetric: View {
             Text(value)
                 .textSelection(.enabled)
         }
+    }
+}
+
+private struct ChatsView: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Chats")
+                    .font(.largeTitle.weight(.semibold))
+
+                GroupBox("Message Extraction") {
+                    VStack(spacing: 0) {
+                        StatusRow(
+                            label: "Status",
+                            value: model.extractionMetrics.status.label,
+                            isPositive: model.extractionMetrics.status == .ready
+                                || model.extractionMetrics.status == .processing
+                        )
+                        Divider()
+                        ExtractionMetric(
+                            label: "Meaningful Frames Received",
+                            value: model.extractionMetrics.framesReceived
+                        )
+                        Divider()
+                        ExtractionMetric(
+                            label: "Successful Extractions",
+                            value: model.extractionMetrics.extractionsSucceeded
+                        )
+                        Divider()
+                        ExtractionMetric(
+                            label: "Dropped While Busy",
+                            value: model.extractionMetrics.framesDroppedWhileBusy
+                        )
+                        Divider()
+                        ExtractionMetric(
+                            label: "Failures",
+                            value: model.extractionMetrics.extractionsFailed
+                        )
+                        Divider()
+                        LabeledContent("Last Extraction") {
+                            Text(
+                                model.extractionMetrics.lastExtractionAt?
+                                    .formatted(date: .omitted, time: .standard) ?? "Never"
+                            )
+                            .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                }
+
+                Text(
+                    model.extractionMetrics.status == .notConfigured
+                        ? "No extraction provider is configured, so no message content is read. "
+                            + "Frames are observed and released."
+                        : "Extracted message content stays in memory and is not stored yet."
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .navigationTitle("Chats")
+    }
+}
+
+private struct ExtractionMetric: View {
+    let label: String
+    let value: Int
+
+    var body: some View {
+        LabeledContent(label) {
+            Text(String(value))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 10)
     }
 }
 
