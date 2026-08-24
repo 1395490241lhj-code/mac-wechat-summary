@@ -36,8 +36,8 @@ struct ExtractionMetrics: Codable, Equatable, Sendable {
 /// frame replaces (and releases) the older one. There is no queue, so CGImages
 /// cannot accumulate no matter how slow the extractor is.
 actor ExtractionCoordinator {
-    private let extractor: any FrameExtracting
-    private let capability: ExtractionCapability
+    private var extractor: any FrameExtracting
+    private var capability: ExtractionCapability
 
     private var metrics = ExtractionMetrics()
     private var pendingFrame: ObservedFrame?
@@ -50,6 +50,16 @@ actor ExtractionCoordinator {
     init(
         extractor: any FrameExtracting = NoConfiguredExtractor(),
         capability: ExtractionCapability = .onDeviceOnly
+    ) {
+        self.extractor = extractor
+        self.capability = capability
+    }
+
+    /// Applies a settings change (credential added or removed, consent toggled)
+    /// without discarding accumulated metrics.
+    func updateConfiguration(
+        extractor: any FrameExtracting,
+        capability: ExtractionCapability
     ) {
         self.extractor = extractor
         self.capability = capability

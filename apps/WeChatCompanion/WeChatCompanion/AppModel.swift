@@ -11,12 +11,21 @@ final class AppModel {
     var persistenceFailed = false
     var observerMetrics = PassiveObserverMetrics()
     var extractionMetrics = ExtractionMetrics()
+    /// In-memory only. Cleared when the app exits; never written to disk.
+    var latestExtraction: ExtractedConversationFrame?
+    /// Transient text-field buffer, cleared as soon as the key reaches the Keychain.
+    var apiKeyInput = ""
+    private(set) var hasProviderCredential = false
+    private(set) var allowsRemoteProcessing = false
+    private(set) var credentialErrorOccurred = false
 
     @ObservationIgnored private let service: DiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
     @ObservationIgnored private let observer: PassiveObserver
     @ObservationIgnored private let observerStore: ObserverMetricsStore
     @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
+    @ObservationIgnored private let credentials: any CredentialStoring
+    @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     @ObservationIgnored private var didBootstrap = false
 
@@ -25,13 +34,70 @@ final class AppModel {
         store: DiagnosticsStore = .applicationSupport,
         observer: PassiveObserver = PassiveObserver(),
         observerStore: ObserverMetricsStore = .applicationSupport,
-        extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator()
+        extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator(),
+        credentials: any CredentialStoring = KeychainCredentialStore(),
+        consentDefaults: UserDefaults = .standard
     ) {
         self.service = service
         self.store = store
         self.observer = observer
         self.observerStore = observerStore
         self.extractionCoordinator = extractionCoordinator
+        self.credentials = credentials
+        self.consentDefaults = consentDefaults
+        hasProviderCredential = credentials.hasSecret(
+            account: GeminiFrameExtractor.credentialAccount
+        )
+        allowsRemoteProcessing = consentDefaults.bool(forKey: Self.remoteConsentKey)
+    }
+
+    /// Only a boolean consent flag is stored here. The API key lives in the
+    /// Keychain and never touches UserDefaults.
+    static let remoteConsentKey = "extraction.allowsRemoteProcessing"
+
+    // MARK: - Extraction settings
+
+    func saveProviderAPIKey() async {
+        let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        credentialErrorOccurred = false
+        do {
+            try credentials.save(key, account: GeminiFrameExtractor.credentialAccount)
+            hasProviderCredential = true
+        } catch {
+            // Never surface or store the underlying error: it can reference the item.
+            credentialErrorOccurred = true
+        }
+        apiKeyInput = ""
+        await applyExtractionConfiguration()
+    }
+
+    func removeProviderAPIKey() async {
+        credentialErrorOccurred = false
+        do {
+            try credentials.remove(account: GeminiFrameExtractor.credentialAccount)
+            hasProviderCredential = false
+        } catch {
+            credentialErrorOccurred = true
+        }
+        apiKeyInput = ""
+        await applyExtractionConfiguration()
+    }
+
+    /// Saving a key never enables this. Remote processing requires both a
+    /// configured provider and this explicit user opt-in.
+    func setAllowsRemoteProcessing(_ isAllowed: Bool) async {
+        allowsRemoteProcessing = isAllowed
+        consentDefaults.set(isAllowed, forKey: Self.remoteConsentKey)
+        await applyExtractionConfiguration()
+    }
+
+    private func applyExtractionConfiguration() async {
+        await extractionCoordinator.updateConfiguration(
+            extractor: GeminiFrameExtractor(credentials: credentials),
+            capability: ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing)
+        )
+        extractionMetrics = await extractionCoordinator.snapshot()
     }
 
     var lastDiagnosticStatus: DiagnosticStatus {
@@ -81,6 +147,7 @@ final class AppModel {
     }
 
     func startObserver() async {
+        await applyExtractionConfiguration()
         await observer.start()
         await extractionCoordinator.start(frames: await observer.meaningfulFrames())
         observerMetrics = await observer.snapshot()
@@ -93,6 +160,7 @@ final class AppModel {
                 guard let self else { return }
                 self.observerMetrics = await self.observer.snapshot()
                 self.extractionMetrics = await self.extractionCoordinator.snapshot()
+                self.latestExtraction = await self.extractionCoordinator.latest()
                 try? await Task.sleep(for: .milliseconds(500))
             }
         }

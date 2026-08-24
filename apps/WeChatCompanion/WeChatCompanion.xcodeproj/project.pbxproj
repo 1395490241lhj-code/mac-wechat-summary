@@ -20,12 +20,16 @@
 		A0000000000000000000000D /* ExtractedConversationFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000E /* ExtractedConversationFrame.swift */; };
 		A0000000000000000000000E /* FrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000F /* FrameExtractor.swift */; };
 		A0000000000000000000000F /* ExtractionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000010 /* ExtractionCoordinator.swift */; };
+		A00000000000000000000010 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000019 /* CredentialStore.swift */; };
+		A00000000000000000000011 /* FrameImageEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001A /* FrameImageEncoder.swift */; };
+		A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001B /* GeminiFrameExtractor.swift */; };
 		B00000000000000000000001 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* DiagnosticPrivacyTests.swift */; };
 		B00000000000000000000002 /* DiagnosticsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* DiagnosticsStoreTests.swift */; };
 		B00000000000000000000003 /* StatusModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000013 /* StatusModelTests.swift */; };
 		B00000000000000000000006 /* PassiveCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000016 /* PassiveCaptureTests.swift */; };
 		B00000000000000000000007 /* PassiveObserverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000017 /* PassiveObserverTests.swift */; };
 		B00000000000000000000008 /* ExtractionPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000018 /* ExtractionPipelineTests.swift */; };
+		B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001C /* GeminiExtractionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -53,12 +57,16 @@
 		C0000000000000000000000E /* ExtractedConversationFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/ExtractedConversationFrame.swift; sourceTree = "<group>"; };
 		C0000000000000000000000F /* FrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/FrameExtractor.swift; sourceTree = "<group>"; };
 		C00000000000000000000010 /* ExtractionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/ExtractionCoordinator.swift; sourceTree = "<group>"; };
+		C00000000000000000000019 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/CredentialStore.swift; sourceTree = "<group>"; };
+		C0000000000000000000001A /* FrameImageEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/FrameImageEncoder.swift; sourceTree = "<group>"; };
+		C0000000000000000000001B /* GeminiFrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiFrameExtractor.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000012 /* DiagnosticsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsStoreTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000013 /* StatusModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusModelTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000016 /* PassiveCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassiveCaptureTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000017 /* PassiveObserverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassiveObserverTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000018 /* ExtractionPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionPipelineTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000001C /* GeminiExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiExtractionTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000021 /* WeChat Companion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "WeChat Companion.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000022 /* WeChatCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WeChatCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -106,6 +114,9 @@
 				C0000000000000000000000E /* ExtractedConversationFrame.swift */,
 				C0000000000000000000000F /* FrameExtractor.swift */,
 				C00000000000000000000010 /* ExtractionCoordinator.swift */,
+				C00000000000000000000019 /* CredentialStore.swift */,
+				C0000000000000000000001A /* FrameImageEncoder.swift */,
+				C0000000000000000000001B /* GeminiFrameExtractor.swift */,
 				C00000000000000000000007 /* Info.plist */,
 			);
 			path = WeChatCompanion;
@@ -120,6 +131,7 @@
 				C00000000000000000000016 /* PassiveCaptureTests.swift */,
 				C00000000000000000000017 /* PassiveObserverTests.swift */,
 				C00000000000000000000018 /* ExtractionPipelineTests.swift */,
+				C0000000000000000000001C /* GeminiExtractionTests.swift */,
 			);
 			path = WeChatCompanionTests;
 			sourceTree = "<group>";
@@ -244,6 +256,9 @@
 				A0000000000000000000000D /* ExtractedConversationFrame.swift in Sources */,
 				A0000000000000000000000E /* FrameExtractor.swift in Sources */,
 				A0000000000000000000000F /* ExtractionCoordinator.swift in Sources */,
+				A00000000000000000000010 /* CredentialStore.swift in Sources */,
+				A00000000000000000000011 /* FrameImageEncoder.swift in Sources */,
+				A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -257,6 +272,7 @@
 				B00000000000000000000006 /* PassiveCaptureTests.swift in Sources */,
 				B00000000000000000000007 /* PassiveObserverTests.swift in Sources */,
 				B00000000000000000000008 /* ExtractionPipelineTests.swift in Sources */,
+				B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

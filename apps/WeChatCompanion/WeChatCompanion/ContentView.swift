@@ -18,6 +18,8 @@ struct ContentView: View {
                 OverviewView(model: model)
             case .chats:
                 ChatsView(model: model)
+            case .settings:
+                SettingsView(model: model)
             case .diagnostics:
                 DiagnosticsView(model: model)
             case let destination:
@@ -387,12 +389,192 @@ private struct ChatsView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+                LatestExtractionSection(extraction: model.latestExtraction)
+
                 Spacer(minLength: 0)
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Chats")
+    }
+}
+
+/// Development-stage preview of the most recent extraction. Memory only:
+/// nothing here is written to disk, and it disappears when the app exits.
+private struct LatestExtractionSection: View {
+    let extraction: ExtractedConversationFrame?
+
+    var body: some View {
+        GroupBox("Latest Extraction") {
+            VStack(alignment: .leading, spacing: 0) {
+                Label("Not saved — live extraction preview", systemImage: "eye.trianglebadge.exclamationmark")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 10)
+
+                if let extraction {
+                    Divider()
+                    LabeledContent("Chat") {
+                        Text(extraction.chat?.title ?? "Unknown")
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 10)
+                    Divider()
+                    ExtractionMetric(
+                        label: "Visible Messages",
+                        value: extraction.messages.count
+                    )
+                    Divider()
+                    LabeledContent("Captured") {
+                        Text(extraction.capturedAt.formatted(date: .omitted, time: .standard))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
+
+                    if extraction.messages.isEmpty {
+                        Divider()
+                        Text("No legible messages in this frame.")
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                    } else {
+                        ForEach(Array(extraction.messages.enumerated()), id: \.offset) { _, message in
+                            Divider()
+                            ExtractedMessageRow(message: message)
+                        }
+                    }
+                } else {
+                    Divider()
+                    Text("No extraction yet.")
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 10)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct ExtractedMessageRow: View {
+    let message: ExtractedVisibleMessage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(message.sender ?? "Unknown sender")
+                    .font(.callout.weight(.medium))
+                Text(message.ownership.rawValue)
+                    .font(.caption)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+                Text(message.kind.rawValue)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(message.visibleTime ?? "—")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(message.text ?? "(no visible text)")
+                .font(.callout)
+                .foregroundStyle(message.text == nil ? .secondary : .primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct SettingsView: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Settings")
+                    .font(.largeTitle.weight(.semibold))
+
+                GroupBox("Gemini Extraction Provider") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        StatusRow(
+                            label: "API Key",
+                            value: model.hasProviderCredential
+                                ? "Stored in Keychain"
+                                : "Not configured",
+                            isPositive: model.hasProviderCredential
+                        )
+                        Divider()
+                        HStack {
+                            SecureField("Gemini API key", text: $model.apiKeyInput)
+                                .textFieldStyle(.roundedBorder)
+                            Button("Save to Keychain") {
+                                Task { await model.saveProviderAPIKey() }
+                            }
+                            .disabled(model.apiKeyInput.trimmingCharacters(
+                                in: .whitespacesAndNewlines
+                            ).isEmpty)
+                            Button("Remove") {
+                                Task { await model.removeProviderAPIKey() }
+                            }
+                            .disabled(!model.hasProviderCredential)
+                        }
+                        .padding(.vertical, 10)
+                        if model.credentialErrorOccurred {
+                            Divider()
+                            Text("The Keychain rejected that change. Nothing was stored.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .padding(.vertical, 10)
+                        }
+                        Divider()
+                        Text("The key is stored only in the macOS Keychain. It is never "
+                            + "written to preferences, files, or logs.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                GroupBox("Remote Processing") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Toggle(
+                            "Allow remote AI processing of visible WeChat frames",
+                            isOn: Binding(
+                                get: { model.allowsRemoteProcessing },
+                                set: { newValue in
+                                    Task { await model.setAllowsRemoteProcessing(newValue) }
+                                }
+                            )
+                        )
+                        .padding(.vertical, 10)
+                        Divider()
+                        Text("When enabled, meaningful WeChat frames may be sent to the "
+                            + "configured AI provider for message extraction. Off by "
+                            + "default. Saving an API key does not enable this.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                        Divider()
+                        StatusRow(
+                            label: "Extraction Status",
+                            value: model.extractionMetrics.status.label,
+                            isPositive: model.extractionMetrics.status == .ready
+                                || model.extractionMetrics.status == .processing
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .navigationTitle("Settings")
     }
 }
 

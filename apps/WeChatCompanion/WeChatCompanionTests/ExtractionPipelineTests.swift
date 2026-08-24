@@ -250,15 +250,28 @@ struct ExtractionPipelineTests {
 
     // MARK: - Architectural guards
 
+    /// Networking and base64 are legitimate inside a remote provider, and
+    /// nowhere else. Everything outside Extraction/Providers must stay offline.
     @Test
-    func extractionPhaseAddsNoNetworkingOrImagePersistence() throws {
+    func networkingIsConfinedToTheProviderDirectory() throws {
+        let nonProviderSource = try appSourceText(excludingPathComponent: "Providers")
+        for forbidden in ["URLSession", "URLRequest", "NWConnection", "base64Encoded"] {
+            #expect(
+                !nonProviderSource.contains(forbidden),
+                "\(forbidden) must stay inside Extraction/Providers"
+            )
+        }
+    }
+
+    /// Frames may be encoded in memory for a request, never written to a file.
+    @Test
+    func noImageIsEverWrittenToDisk() throws {
         let source = try appSourceText()
         for forbidden in [
-            "URLSession", "URLRequest", "NWConnection", "Network.framework",
-            "CGImageDestination", "NSBitmapImageRep", "tiffRepresentation",
-            "base64EncodedString", "base64EncodedData"
+            "CGImageDestinationCreateWithURL", "NSBitmapImageRep",
+            "tiffRepresentation", "pngData"
         ] {
-            #expect(!source.contains(forbidden), "\(forbidden) must not appear in this phase")
+            #expect(!source.contains(forbidden), "\(forbidden) would persist imagery")
         }
     }
 
@@ -284,11 +297,16 @@ private func appSourceDirectory() -> URL {
         .appendingPathComponent("WeChatCompanion")
 }
 
-private func appSourceText() throws -> String {
+private func appSourceText(excludingPathComponent excluded: String? = nil) throws -> String {
     let files = FileManager.default.enumerator(
         at: appSourceDirectory(),
         includingPropertiesForKeys: nil
-    )?.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" } ?? []
+    )?.compactMap { $0 as? URL }
+        .filter { $0.pathExtension == "swift" }
+        .filter { url in
+            guard let excluded else { return true }
+            return !url.pathComponents.contains(excluded)
+        } ?? []
     return try files.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
 }
 
