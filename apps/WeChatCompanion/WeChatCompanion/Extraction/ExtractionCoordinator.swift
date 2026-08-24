@@ -144,11 +144,35 @@ actor ExtractionCoordinator {
             pendingFrame = frame
             return
         }
+        startDrain(with: frame)
+    }
+
+    /// Claims the single extraction slot for `frame` under a fresh generation.
+    private func startDrain(with frame: ObservedFrame) {
         extractionGeneration += 1
         let generation = extractionGeneration
         extractionTask = Task { [weak self] in
             await self?.drain(startingWith: frame, generation: generation)
         }
+    }
+
+    /// Releases the slot and immediately promotes any frame that arrived while
+    /// this drain was running.
+    ///
+    /// A cancelled drain deliberately refuses to process the pending frame
+    /// itself -- that work belongs to the resumed session -- but the frame must
+    /// still be driven, and only once this drain's provider call has actually
+    /// exited. Without promotion here it would sit orphaned until some later
+    /// frame happened to arrive, and could then be processed *after* a newer
+    /// one, breaking newest-wins ordering.
+    private func finishDrain(generation: Int) {
+        // Generation ownership: an old drain must never disturb a newer task.
+        guard generation == extractionGeneration else { return }
+        extractionTask = nil
+
+        guard !isPaused, let promoted = pendingFrame else { return }
+        pendingFrame = nil
+        startDrain(with: promoted)
     }
 
     private func drain(startingWith first: ObservedFrame, generation: Int) async {
@@ -162,8 +186,7 @@ actor ExtractionCoordinator {
             next = pendingFrame
             pendingFrame = nil
         }
-        // Only the owning generation may release the slot.
-        if generation == extractionGeneration { extractionTask = nil }
+        finishDrain(generation: generation)
     }
 
     private func runExtraction(_ frame: ObservedFrame) async {
@@ -195,7 +218,9 @@ actor ExtractionCoordinator {
         metrics.lastCancellationAt = Date()
     }
 
-    /// Test seam: awaits any in-flight extraction so assertions are deterministic.
+    /// Test seam: awaits until no extraction is running and nothing is left
+    /// pending. Promotion happens before a drain's task completes, so the loop
+    /// picks up the promoted task on its next pass.
     func waitUntilIdle() async {
         while let task = extractionTask {
             await task.value

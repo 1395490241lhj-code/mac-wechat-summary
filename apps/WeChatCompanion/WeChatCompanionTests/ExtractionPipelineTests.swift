@@ -406,6 +406,64 @@ struct ExtractionPipelineTests {
         #expect(await extractor.maxConcurrent == 1)
     }
 
+    /// After a cancelled drain exits, a frame that arrived during the unwind
+    /// must be picked up on its own -- without another frame arriving to kick
+    /// the coordinator.
+    @Test
+    func pendingFrameIsPromotedAfterCancelledDrainExits() async {
+        let extractor = GatedExtractor()
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+        let frameA = ObservedFrame.synthetic(secondsFromNow: 0)
+        let frameB = ObservedFrame.synthetic(secondsFromNow: 1)
+
+        await coordinator.submit(frameA)
+        #expect(await waitUntil { await extractor.receivedTimestamps.count == 1 })
+
+        await coordinator.pause()
+        await coordinator.start(frames: AsyncStream { $0.finish() })
+        await coordinator.submit(frameB)
+        #expect(await coordinator.hasPendingFrame)
+
+        // Release A. No third frame is submitted.
+        await extractor.open()
+        await coordinator.waitUntilIdle()
+
+        let handled = await extractor.receivedTimestamps
+        #expect(handled == [frameA.capturedAt, frameB.capturedAt])
+        #expect(await coordinator.hasPendingFrame == false)
+        #expect(await extractor.maxConcurrent == 1)
+    }
+
+    /// Newest-wins must survive the pause/resume window: a stale pending frame
+    /// can never be processed after a newer one.
+    @Test
+    func newestPendingFrameWinsAcrossCancellationAndStaleFrameIsDropped() async {
+        let extractor = GatedExtractor()
+        let coordinator = ExtractionCoordinator(extractor: extractor)
+        let frameA = ObservedFrame.synthetic(secondsFromNow: 0)
+        let frameB = ObservedFrame.synthetic(secondsFromNow: 1)
+        let frameC = ObservedFrame.synthetic(secondsFromNow: 2)
+
+        await coordinator.submit(frameA)
+        #expect(await waitUntil { await extractor.receivedTimestamps.count == 1 })
+
+        await coordinator.pause()
+        await coordinator.start(frames: AsyncStream { $0.finish() })
+        await coordinator.submit(frameB)
+        await coordinator.submit(frameC)
+        // C replaced B in the single pending slot.
+        #expect(await coordinator.snapshot().framesDroppedWhileBusy == 1)
+
+        await extractor.open()
+        await coordinator.waitUntilIdle()
+
+        let handled = await extractor.receivedTimestamps
+        #expect(handled == [frameA.capturedAt, frameC.capturedAt])
+        #expect(!handled.contains(frameB.capturedAt))
+        #expect(await coordinator.hasPendingFrame == false)
+        #expect(await extractor.maxConcurrent == 1)
+    }
+
     @Test
     func cancellationTelemetryIsAggregateOnly() async throws {
         let extractor = GatedExtractor(openImmediately: true)
