@@ -37,6 +37,9 @@ struct ExtractionMetrics: Codable, Equatable, Sendable {
     var lastExtractionAt: Date?
     /// Time of the last cancelled extraction, tracked separately.
     var lastCancellationAt: Date?
+    /// Aggregate-only diagnosis of the most recent genuine failure. Provider
+    /// independent, and structurally incapable of holding response content.
+    var lastFailure: ExtractionFailureDiagnostics?
 }
 
 /// One consistent read of everything the extraction UI needs.
@@ -218,15 +221,26 @@ actor ExtractionCoordinator {
             // other network errors remain genuine failures.
             recordCancellation()
         } catch {
-            // Aggregate count only. The provider error is deliberately not
-            // stored, logged, or surfaced, so no content can leak through it.
+            // Aggregate count only. The provider error object is never stored;
+            // an error may however describe itself in content-free terms.
             metrics.extractionsFailed += 1
+            metrics.lastFailure = Self.diagnostics(for: error)
             metrics.lastExtractionAt = Date()
         }
     }
 
+    /// Classifies without knowing anything about a specific provider: an error
+    /// either describes itself through the shared seam, or it is `.other`.
+    private static func diagnostics(for error: any Error) -> ExtractionFailureDiagnostics {
+        var diagnostics = (error as? any ExtractionFailureDescribing)?.failureDiagnostics
+            ?? ExtractionFailureDiagnostics(category: .other)
+        diagnostics.occurredAt = Date()
+        return diagnostics
+    }
+
     /// A cancelled extraction produced no result, so it never replaces
-    /// `latestExtraction` and never moves `lastExtractionAt`.
+    /// `latestExtraction`, never moves `lastExtractionAt`, and never records a
+    /// failure diagnosis.
     private func recordCancellation() {
         metrics.extractionsCancelled += 1
         metrics.lastCancellationAt = Date()

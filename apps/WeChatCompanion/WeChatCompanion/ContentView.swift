@@ -471,6 +471,58 @@ private struct ChatsView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+                if let failure = model.extractionMetrics.lastFailure {
+                    GroupBox("Last Failure Diagnosis") {
+                        VStack(spacing: 0) {
+                            LabeledContent("Category") {
+                                Text(failure.category.label).foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 10)
+                            Divider()
+                            FailureDetail("HTTP Status", failure.httpStatus.map(String.init))
+                            Divider()
+                            FailureDetail("URL Error Code", failure.urlErrorCode.map(String.init))
+                            Divider()
+                            FailureDetail("Keychain Status", failure.keychainStatus.map(String.init))
+                            Divider()
+                            FailureDetail("Finish Reason", failure.finishReason?.label)
+                            Divider()
+                            FailureDetail("Block Reason", failure.blockReason?.label)
+                            Divider()
+                            FailureDetail(
+                                "Output Characters",
+                                failure.outputCharacterCount.map(String.init)
+                            )
+                            Divider()
+                            FailureDetail(
+                                "Prompt Tokens", failure.promptTokenCount.map(String.init)
+                            )
+                            Divider()
+                            FailureDetail(
+                                "Candidate Tokens", failure.candidatesTokenCount.map(String.init)
+                            )
+                            Divider()
+                            FailureDetail(
+                                "Thinking Tokens", failure.thoughtsTokenCount.map(String.init)
+                            )
+                            Divider()
+                            FailureDetail(
+                                "Total Tokens", failure.totalTokenCount.map(String.init)
+                            )
+                            Divider()
+                            FailureDetail(
+                                "Occurred",
+                                failure.occurredAt?.formatted(date: .omitted, time: .standard)
+                            )
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Text("Diagnosis is aggregate metadata only — no response body, "
+                        + "message text, or image data is recorded.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
                 LatestExtractionSection(extraction: model.latestExtraction)
 
                 Spacer(minLength: 0)
@@ -657,6 +709,26 @@ private struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Settings")
+    }
+}
+
+/// Shows an em dash when a diagnostic value is not applicable or absent.
+private struct FailureDetail: View {
+    let label: String
+    let value: String?
+
+    init(_ label: String, _ value: String?) {
+        self.label = label
+        self.value = value
+    }
+
+    var body: some View {
+        LabeledContent(label) {
+            Text(value ?? "—")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 10)
     }
 }
 

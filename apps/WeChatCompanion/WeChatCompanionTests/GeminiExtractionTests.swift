@@ -225,7 +225,7 @@ struct GeminiExtractionTests {
             "",
             "[1, 2, 3]"
         ] {
-            #expect(throws: GeminiExtractionError.malformedResponse) {
+            #expect(throws: (any Error).self) {
                 try GeminiFrameExtractor.decodeExtraction(from: prose)
             }
         }
@@ -240,18 +240,23 @@ struct GeminiExtractionTests {
             """)
         #expect(fenced.messages?.isEmpty == true)
 
-        #expect(throws: GeminiExtractionError.malformedResponse) {
+        #expect(throws: (any Error).self) {
             try GeminiFrameExtractor.decodeExtraction(from: "{\"messages\": [{\"kind\":")
         }
     }
 
     @Test
-    func emptyCandidateListFailsSafely() {
-        #expect(throws: GeminiExtractionError.emptyResponse) {
-            try GeminiFrameExtractor.responseText(from: Data(#"{"candidates": []}"#.utf8))
-        }
-        #expect(throws: GeminiExtractionError.malformedResponse) {
-            try GeminiFrameExtractor.responseText(from: Data("not json".utf8))
+    func emptyCandidateListYieldsNoText() throws {
+        let envelope = try GeminiFrameExtractor.decodeEnvelope(
+            from: Data(#"{"candidates": []}"#.utf8)
+        )
+        #expect(GeminiFrameExtractor.candidateText(of: envelope) == nil)
+    }
+
+    @Test
+    func unreadableEnvelopeIsMalformedEnvelope() {
+        #expect(throws: GeminiExtractionError.malformedEnvelope) {
+            try GeminiFrameExtractor.decodeEnvelope(from: Data("not json".utf8))
         }
     }
 

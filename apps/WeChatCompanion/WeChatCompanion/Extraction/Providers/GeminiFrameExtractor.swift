@@ -10,19 +10,89 @@ struct URLSessionGeminiTransport: GeminiTransporting {
     func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw GeminiExtractionError.malformedResponse
+            throw GeminiExtractionError.malformedEnvelope
         }
         return (data, http)
     }
 }
 
-/// Errors carry no request or response content -- at most an HTTP status code --
-/// so nothing that could echo a frame or a message can reach metrics or the UI.
-enum GeminiExtractionError: Error, Equatable {
+/// Content-free response metadata used purely for diagnosis.
+struct GeminiResponseMetadata: Equatable, Sendable {
+    var finishReason: ExtractionFinishReason?
+    var blockReason: ExtractionBlockReason?
+    var promptTokenCount: Int?
+    var candidatesTokenCount: Int?
+    var thoughtsTokenCount: Int?
+    var totalTokenCount: Int?
+}
+
+/// Errors carry no request or response content -- at most an HTTP status code,
+/// closed-set reason enums, and integer counts -- so nothing that could echo a
+/// frame or a message can reach metrics or the UI.
+///
+/// `malformedEnvelope` and `malformedExtractionJSON` are separate on purpose:
+/// one means the provider's response shape was unreadable, the other means the
+/// response was fine but the extraction payload inside it was not valid JSON.
+enum GeminiExtractionError: Error, Equatable, ExtractionFailureDescribing {
     case missingCredential
-    case malformedResponse
-    case emptyResponse
+    /// The Keychain read failed. Carries an OSStatus when one exists.
+    case credentialFailure(status: Int?)
+    case imageEncoding
+    /// Building the request body failed before anything left the machine.
+    case requestConstruction
+    /// The connection failed before any HTTP response existed.
+    case connectionFailure(urlErrorCode: Int)
     case transportFailure(status: Int)
+    case malformedEnvelope
+    case emptyResponse(GeminiResponseMetadata)
+    case blocked(GeminiResponseMetadata)
+    case malformedExtractionJSON(GeminiResponseMetadata, outputCharacterCount: Int)
+
+    var failureDiagnostics: ExtractionFailureDiagnostics {
+        switch self {
+        case .missingCredential:
+            ExtractionFailureDiagnostics(category: .missingCredential)
+        case let .credentialFailure(status):
+            ExtractionFailureDiagnostics(category: .credentialFailure, keychainStatus: status)
+        case .imageEncoding:
+            ExtractionFailureDiagnostics(category: .imageEncoding)
+        case .requestConstruction:
+            ExtractionFailureDiagnostics(category: .requestConstruction)
+        case let .connectionFailure(code):
+            ExtractionFailureDiagnostics(category: .transportFailure, urlErrorCode: code)
+        case let .transportFailure(status):
+            ExtractionFailureDiagnostics(category: .transportFailure, httpStatus: status)
+        case .malformedEnvelope:
+            ExtractionFailureDiagnostics(category: .malformedEnvelope)
+        case let .emptyResponse(metadata):
+            metadata.diagnostics(category: .emptyResponse)
+        case let .blocked(metadata):
+            metadata.diagnostics(category: .blocked)
+        case let .malformedExtractionJSON(metadata, characters):
+            metadata.diagnostics(
+                category: .malformedExtractionJSON,
+                outputCharacterCount: characters
+            )
+        }
+    }
+}
+
+extension GeminiResponseMetadata {
+    func diagnostics(
+        category: ExtractionFailureCategory,
+        outputCharacterCount: Int? = nil
+    ) -> ExtractionFailureDiagnostics {
+        ExtractionFailureDiagnostics(
+            category: category,
+            finishReason: finishReason,
+            blockReason: blockReason,
+            outputCharacterCount: outputCharacterCount,
+            promptTokenCount: promptTokenCount,
+            candidatesTokenCount: candidatesTokenCount,
+            thoughtsTokenCount: thoughtsTokenCount,
+            totalTokenCount: totalTokenCount
+        )
+    }
 }
 
 /// Gemini multimodal extraction behind the shared `FrameExtracting` seam.
@@ -56,25 +126,74 @@ struct GeminiFrameExtractor: FrameExtracting {
     }
 
     func extract(from frame: ObservedFrame) async throws -> ExtractedConversationFrame {
-        guard let key = try credentials.secret(account: Self.credentialAccount),
-              !key.isEmpty else {
+        let storedKey: String?
+        do {
+            storedKey = try credentials.secret(account: Self.credentialAccount)
+        } catch let error as CredentialStoreError {
+            // Numeric OSStatus only; never the key, account, service or text.
+            throw GeminiExtractionError.credentialFailure(status: error.osStatus)
+        } catch {
+            throw GeminiExtractionError.credentialFailure(status: nil)
+        }
+        guard let key = storedKey, !key.isEmpty else {
             throw GeminiExtractionError.missingCredential
         }
         try Task.checkCancellation()
 
-        let imageData = try FrameImageEncoder.encodedJPEG(from: frame.image)
+        let imageData: Data
+        do {
+            imageData = try FrameImageEncoder.encodedJPEG(from: frame.image)
+        } catch {
+            // Classified explicitly rather than falling into a generic bucket.
+            throw GeminiExtractionError.imageEncoding
+        }
         try Task.checkCancellation()
 
-        let request = try makeRequest(apiKey: key, imageData: imageData)
-        let (data, response) = try await transport.send(request)
+        let request: URLRequest
+        do {
+            request = try makeRequest(apiKey: key, imageData: imageData)
+        } catch {
+            throw GeminiExtractionError.requestConstruction
+        }
+
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.send(request)
+        } catch let error as GeminiExtractionError {
+            throw error
+        } catch is CancellationError {
+            // Cancellation must stay cancellation, never a transport failure.
+            throw CancellationError()
+        } catch let error as URLError {
+            guard error.code != .cancelled else { throw error }
+            throw GeminiExtractionError.connectionFailure(urlErrorCode: error.errorCode)
+        }
         try Task.checkCancellation()
 
         guard (200..<300).contains(response.statusCode) else {
             throw GeminiExtractionError.transportFailure(status: response.statusCode)
         }
-        let payload = try Self.responseText(from: data)
-        let dto = try Self.decodeExtraction(from: payload)
-        return dto.asExtractedConversationFrame(capturedAt: frame.capturedAt)
+        let envelope = try Self.decodeEnvelope(from: data)
+        let metadata = Self.metadata(of: envelope)
+
+        // A refusal is not a malformed response; classify it as blocked.
+        if metadata.blockReason != nil || metadata.finishReason?.indicatesRefusal == true {
+            throw GeminiExtractionError.blocked(metadata)
+        }
+        guard let payload = Self.candidateText(of: envelope) else {
+            throw GeminiExtractionError.emptyResponse(metadata)
+        }
+        do {
+            let dto = try Self.decodeExtraction(from: payload)
+            return dto.asExtractedConversationFrame(capturedAt: frame.capturedAt)
+        } catch {
+            // Only the LENGTH of the unusable output is retained, never the text.
+            throw GeminiExtractionError.malformedExtractionJSON(
+                metadata,
+                outputCharacterCount: payload.count
+            )
+        }
     }
 
     private func makeRequest(apiKey: String, imageData: Data) throws -> URLRequest {
@@ -109,19 +228,34 @@ struct GeminiFrameExtractor: FrameExtracting {
         return request
     }
 
-    static func responseText(from data: Data) throws -> String {
-        let envelope: GeminiResponseEnvelope
+    static func decodeEnvelope(from data: Data) throws -> GeminiResponseEnvelope {
         do {
-            envelope = try JSONDecoder().decode(GeminiResponseEnvelope.self, from: data)
+            return try JSONDecoder().decode(GeminiResponseEnvelope.self, from: data)
         } catch {
-            throw GeminiExtractionError.malformedResponse
+            throw GeminiExtractionError.malformedEnvelope
         }
-        guard let text = envelope.candidates?
-            .compactMap({ $0.content?.parts?.compactMap(\.text).joined() })
-            .first(where: { !$0.isEmpty }) else {
-            throw GeminiExtractionError.emptyResponse
-        }
-        return text
+    }
+
+    /// Content-free metadata only: closed-set reasons and integer token counts.
+    static func metadata(of envelope: GeminiResponseEnvelope) -> GeminiResponseMetadata {
+        GeminiResponseMetadata(
+            finishReason: ExtractionFinishReason.normalised(
+                envelope.candidates?.first?.finishReason
+            ),
+            blockReason: ExtractionBlockReason.normalised(
+                envelope.promptFeedback?.blockReason
+            ),
+            promptTokenCount: envelope.usageMetadata?.promptTokenCount,
+            candidatesTokenCount: envelope.usageMetadata?.candidatesTokenCount,
+            thoughtsTokenCount: envelope.usageMetadata?.thoughtsTokenCount,
+            totalTokenCount: envelope.usageMetadata?.totalTokenCount
+        )
+    }
+
+    static func candidateText(of envelope: GeminiResponseEnvelope) -> String? {
+        envelope.candidates?
+            .compactMap { $0.content?.parts?.compactMap(\.text).joined() }
+            .first(where: { !$0.isEmpty })
     }
 
     /// Strict: anything that is not the expected JSON object is rejected, so
@@ -129,12 +263,15 @@ struct GeminiFrameExtractor: FrameExtracting {
     static func decodeExtraction(from text: String) throws -> GeminiExtractionDTO {
         let trimmed = Self.strippingCodeFence(text)
         guard let data = trimmed.data(using: .utf8) else {
-            throw GeminiExtractionError.malformedResponse
+            throw GeminiExtractionError.malformedEnvelope
         }
         do {
             return try JSONDecoder().decode(GeminiExtractionDTO.self, from: data)
         } catch {
-            throw GeminiExtractionError.malformedResponse
+            throw GeminiExtractionError.malformedExtractionJSON(
+                GeminiResponseMetadata(),
+                outputCharacterCount: text.count
+            )
         }
     }
 
@@ -279,6 +416,8 @@ enum ExtractionValidation {
 
 // MARK: - Response envelope
 
+/// Only the fields needed for diagnosis are decoded. Safety-rating text and
+/// any other free-form provider strings are deliberately not modelled.
 struct GeminiResponseEnvelope: Decodable {
     struct Candidate: Decodable {
         struct Content: Decodable {
@@ -288,6 +427,21 @@ struct GeminiResponseEnvelope: Decodable {
             let parts: [Part]?
         }
         let content: Content?
+        let finishReason: String?
     }
+
+    struct PromptFeedback: Decodable {
+        let blockReason: String?
+    }
+
+    struct UsageMetadata: Decodable {
+        let promptTokenCount: Int?
+        let candidatesTokenCount: Int?
+        let thoughtsTokenCount: Int?
+        let totalTokenCount: Int?
+    }
+
     let candidates: [Candidate]?
+    let promptFeedback: PromptFeedback?
+    let usageMetadata: UsageMetadata?
 }

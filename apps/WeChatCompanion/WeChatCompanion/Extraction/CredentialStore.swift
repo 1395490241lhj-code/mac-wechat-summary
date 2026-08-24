@@ -20,6 +20,14 @@ enum CredentialStoreError: Error, Equatable {
     /// Carries only the OSStatus code, never the secret or its contents.
     case keychainFailure(status: Int32)
     case invalidSecretEncoding
+
+    /// Numeric status for diagnostics; nil when the failure has no OSStatus.
+    var osStatus: Int? {
+        switch self {
+        case let .keychainFailure(status): Int(status)
+        case .invalidSecretEncoding: nil
+        }
+    }
 }
 
 /// Keychain-backed storage. The secret is never copied into UserDefaults, a
