@@ -58,6 +58,11 @@ struct ExtractionState: Sendable {
 actor ExtractionCoordinator {
     private var extractor: any FrameExtracting
     private var capability: ExtractionCapability
+    /// Where successful extractions are reconciled into message-level rows.
+    /// Nil unless the user has turned local persistence on, so the default is
+    /// no persistence at all. The coordinator's own behaviour -- backpressure,
+    /// cancellation, metrics -- is identical either way.
+    private var ingestor: (any MessageIngesting)?
 
     private var metrics = ExtractionMetrics()
     private var pendingFrame: ObservedFrame?
@@ -72,21 +77,30 @@ actor ExtractionCoordinator {
 
     init(
         extractor: any FrameExtracting = NoConfiguredExtractor(),
-        capability: ExtractionCapability = .onDeviceOnly
+        capability: ExtractionCapability = .onDeviceOnly,
+        ingestor: (any MessageIngesting)? = nil
     ) {
         self.extractor = extractor
         self.capability = capability
+        self.ingestor = ingestor
     }
 
     /// Applies a settings change (credential added or removed, consent toggled)
     /// without discarding accumulated metrics.
+    /// `ingestor` is nil whenever local persistence consent is off, which
+    /// immediately stops all further writes without touching what is stored.
     func updateConfiguration(
         extractor: any FrameExtracting,
-        capability: ExtractionCapability
+        capability: ExtractionCapability,
+        ingestor: (any MessageIngesting)? = nil
     ) {
         self.extractor = extractor
         self.capability = capability
+        self.ingestor = ingestor
     }
+
+    /// True only while a persistence destination is attached.
+    var isPersisting: Bool { ingestor != nil }
 
     func start(frames: AsyncStream<ObservedFrame>) {
         isPaused = false
@@ -213,6 +227,9 @@ actor ExtractionCoordinator {
             metrics.extractionsSucceeded += 1
             latestExtraction = extracted
             metrics.lastExtractionAt = Date()
+            // Message-level structure only. The frame and its image are
+            // released immediately after this and never reach the store.
+            await ingestor?.ingest(extracted)
         } catch is CancellationError {
             recordCancellation()
         } catch let error as URLError where error.code == .cancelled {

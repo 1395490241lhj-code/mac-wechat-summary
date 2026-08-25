@@ -18,8 +18,14 @@ final class AppModel {
     var latestExtraction: ExtractedConversationFrame?
     /// Transient text-field buffer, cleared as soon as the key reaches the Keychain.
     var apiKeyInput = ""
+    /// Drives the destructive-deletion confirmation dialog.
+    var isConfirmingHistoryDeletion = false
     private(set) var hasProviderCredential = false
     private(set) var allowsRemoteProcessing = false
+    /// Independent of `allowsRemoteProcessing`: this one decides whether
+    /// extracted text is written to the local database. Off by default.
+    private(set) var allowsLocalPersistence = false
+    private(set) var retentionPolicy = RetentionPolicy.defaultPolicy
     private(set) var credentialErrorOccurred = false
 
     @ObservationIgnored private let service: DiagnosticsService
@@ -27,6 +33,7 @@ final class AppModel {
     @ObservationIgnored private let session: SystemWindowCaptureSession
     @ObservationIgnored private let observerStore: ObserverMetricsStore
     @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
+    @ObservationIgnored private let messageHistory: LocalMessageHistory
     @ObservationIgnored private let credentials: any CredentialStoring
     @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
@@ -41,6 +48,7 @@ final class AppModel {
         session: SystemWindowCaptureSession = SystemWindowCaptureSession(),
         observerStore: ObserverMetricsStore = .applicationSupport,
         extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator(),
+        messageHistory: LocalMessageHistory = .applicationSupport,
         credentials: any CredentialStoring = KeychainCredentialStore(),
         consentDefaults: UserDefaults = .standard
     ) {
@@ -49,17 +57,29 @@ final class AppModel {
         self.session = session
         self.observerStore = observerStore
         self.extractionCoordinator = extractionCoordinator
+        self.messageHistory = messageHistory
         self.credentials = credentials
         self.consentDefaults = consentDefaults
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
         )
         allowsRemoteProcessing = consentDefaults.bool(forKey: Self.remoteConsentKey)
+        // Absent key reads as false, so a fresh install never persists.
+        allowsLocalPersistence = consentDefaults.bool(forKey: Self.localPersistenceConsentKey)
+        retentionPolicy = RetentionPolicy.resolved(
+            fromStoredID: consentDefaults.string(forKey: Self.retentionPolicyKey)
+        )
     }
 
     /// Only a boolean consent flag is stored here. The API key lives in the
     /// Keychain and never touches UserDefaults.
     static let remoteConsentKey = "extraction.allowsRemoteProcessing"
+    /// Separate from `remoteConsentKey` on purpose. Remote consent governs
+    /// whether a frame may leave the Mac; this one governs whether extracted
+    /// text is written down here.
+    static let localPersistenceConsentKey = "persistence.allowsLocalMessageStorage"
+    /// Only the policy ID is stored. Never a date, a chat, or a message.
+    static let retentionPolicyKey = "persistence.retentionPolicy"
 
     // MARK: - Extraction settings
 
@@ -98,10 +118,47 @@ final class AppModel {
         await applyExtractionConfiguration()
     }
 
+    // MARK: - Local persistence settings
+
+    /// Turning this on opens (and if needed creates) the local database.
+    /// Turning it off detaches the ingestor so no further message is written,
+    /// and deliberately KEEPS what is already stored -- withdrawing consent for
+    /// future writes is not a request to delete. Use `deleteLocalMessageHistory`
+    /// for that.
+    func setAllowsLocalPersistence(_ isAllowed: Bool) async {
+        allowsLocalPersistence = isAllowed
+        consentDefaults.set(isAllowed, forKey: Self.localPersistenceConsentKey)
+        await messageHistory.setEnabled(isAllowed)
+        await applyExtractionConfiguration()
+    }
+
+    /// Applies immediately, including a sweep of anything the new policy has
+    /// already expired. Only meaningful while persistence is on.
+    func setRetentionPolicy(_ policy: RetentionPolicy) async {
+        guard policy != retentionPolicy else { return }
+        retentionPolicy = policy
+        consentDefaults.set(policy.rawValue, forKey: Self.retentionPolicyKey)
+        await messageHistory.setRetention(policy)
+    }
+
+    /// Destructive: removes every locally stored conversation and message,
+    /// including the database's write-ahead sidecar files.
+    ///
+    /// Scope is exactly that. The API key, the remote-processing consent, the
+    /// persistence consent, the retention choice and the diagnostics records
+    /// are all left alone.
+    func deleteLocalMessageHistory() async {
+        await messageHistory.deleteAllHistory()
+        await applyExtractionConfiguration()
+    }
+
     private func applyExtractionConfiguration() async {
         await extractionCoordinator.updateConfiguration(
             extractor: GeminiFrameExtractor(credentials: credentials),
-            capability: ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing)
+            capability: ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing),
+            // Nil unless the user consented, so the default build path writes
+            // nothing to disk.
+            ingestor: await messageHistory.ingestor()
         )
         await refreshExtractionState()
     }
@@ -133,6 +190,10 @@ final class AppModel {
         didBootstrap = true
         lastDiagnostic = try? store.load()
         await refreshSystemStatus()
+        // Restores the stored consent and retention choice. With consent off
+        // this opens nothing, so no database file is created at launch.
+        await messageHistory.setRetention(retentionPolicy)
+        await messageHistory.setEnabled(allowsLocalPersistence)
         await applyExtractionConfiguration()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()

@@ -703,6 +703,74 @@ private struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                GroupBox("Local Message Storage") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Toggle(
+                            "Save extracted message text on this Mac",
+                            isOn: Binding(
+                                get: { model.allowsLocalPersistence },
+                                set: { newValue in
+                                    Task { await model.setAllowsLocalPersistence(newValue) }
+                                }
+                            )
+                        )
+                        .padding(.vertical, 10)
+                        Divider()
+                        Text("Off by default, and separate from remote processing. When "
+                            + "off, extraction still runs and results are shown here, but "
+                            + "nothing is written to disk. Screenshots are never saved "
+                            + "either way.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                        Divider()
+                        Picker("Keep messages for", selection: Binding(
+                            get: { model.retentionPolicy },
+                            set: { newValue in
+                                Task { await model.setRetentionPolicy(newValue) }
+                            }
+                        )) {
+                            ForEach(RetentionPolicy.allCases) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        .disabled(!model.allowsLocalPersistence)
+                        .padding(.vertical, 10)
+                        Divider()
+                        Text("Older messages are removed based on when they were first "
+                            + "seen on screen.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                        Divider()
+                        HStack {
+                            Button("Delete Local Message History\u{2026}", role: .destructive) {
+                                model.isConfirmingHistoryDeletion = true
+                            }
+                            Text("Turning the setting off does not delete what is already "
+                                + "stored.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .confirmationDialog(
+                    "Delete all locally stored WeChat message history?",
+                    isPresented: $model.isConfirmingHistoryDeletion,
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Message History", role: .destructive) {
+                        Task { await model.deleteLocalMessageHistory() }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This permanently removes every stored conversation and message "
+                        + "from this Mac. Your API key, permissions, and diagnostics are "
+                        + "not affected.")
+                }
+
                 Spacer(minLength: 0)
             }
             .padding(24)
