@@ -1,0 +1,8 @@
+# Development artifacts that are not part of the installed skill.
+#
+# The synthetic evaluation fixtures deliberately contain instruction-shaped
+# payloads -- that is exactly what they test the skill's refusal against. They
+# are test data, never loaded as skill instructions, so they are excluded from
+# the skill security scan. SKILL.md itself is always scanned and cannot be
+# excluded here.
+evaluation/
