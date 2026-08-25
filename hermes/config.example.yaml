@@ -1,0 +1,52 @@
+# Example Hermes configuration for the read-only WeChat Companion MCP bridge.
+#
+# Copy this file, then replace every <placeholder>. Nothing here is a real
+# path, user name, or secret, and this example must never be committed with
+# real values filled in.
+#
+# The bridge refuses to read unless BOTH environment variables below are set:
+# the allow flag alone does nothing without an explicit database path, and
+# there is no default path, so the production store is never reachable by
+# accident.
+#
+# The database is the one the macOS app writes only while "Save extracted
+# message text on this Mac" is turned on in Settings. With that consent off
+# the file does not exist and the bridge reports `database_missing`.
+
+mcp_servers:
+  wechat_companion:
+    # Absolute path to the Python interpreter that has the `mcp` package.
+    command: "<python>"
+    args: ["<repo>/bridge/wechat_companion_mcp.py"]
+    env:
+      # Opt-in 1: allow an agent to read at all.
+      WECHAT_COMPANION_ALLOW_AGENT_READ: "1"
+      # Opt-in 2: which database. Point this at a copy or a synthetic database
+      # first; the app's own store lives under the user's Application Support
+      # directory, which this example deliberately does not spell out.
+      WECHAT_COMPANION_DB_PATH: "<path-to-messages.sqlite>"
+
+# The bridge exposes four read-only tools and no way to write, run SQL, or
+# name an arbitrary file:
+#   status()                                    readiness only, no chat content
+#   list_conversations(limit)                   ids, titles, observation times
+#   get_messages(conversation_id, limit, before_sequence)
+#   get_recent_messages(since_observed_at, limit)
+#
+# Hermes registers MCP tools as `mcp__<server>__<tool>` -- note the DOUBLE
+# underscore delimiter, which is what disambiguates the server/tool boundary
+# when either half contains underscores. With the server named
+# `wechat_companion` above, the agent-facing names are therefore:
+#
+#   mcp__wechat_companion__status
+#   mcp__wechat_companion__list_conversations
+#   mcp__wechat_companion__get_messages
+#   mcp__wechat_companion__get_recent_messages
+#
+# Verified against Hermes Agent v0.20.5 (mcp_prefixed_tool_name in
+# tools/mcp_tool.py). Renaming the server key above changes every tool name.
+#
+# Official commands to validate this file:
+#   hermes config check
+#   hermes mcp list
+#   hermes mcp test wechat_companion

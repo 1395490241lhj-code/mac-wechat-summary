@@ -303,6 +303,16 @@ struct MessageIngestionTests {
         #expect(await ingestor.snapshot().framesWithNothingNew == 1)
     }
 
+    // MARK: - Schema contract
+
+    @Test
+    func theDatabaseStampsItsSchemaVersion() async throws {
+        let store = try makeStore()
+        // Read-only consumers gate on this and fail closed when it is unknown.
+        #expect(try await store.storedSchemaVersion() == MessageStore.schemaVersion)
+        #expect(MessageStore.schemaVersion == 1)
+    }
+
     // MARK: - Persistence guards
 
     @Test

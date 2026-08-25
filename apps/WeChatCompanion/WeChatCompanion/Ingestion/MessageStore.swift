@@ -32,6 +32,14 @@ actor MessageStore {
     /// size of the conversation.
     static let reconciliationWindow = 120
 
+    /// The on-disk schema contract, published through SQLite's `user_version`.
+    ///
+    /// Read-only consumers outside this app -- the MCP bridge -- check it and
+    /// refuse to read anything they do not recognise, rather than inferring the
+    /// shape from the tables they happen to find. Bump it whenever a column is
+    /// added, removed, renamed, or changes meaning.
+    static let schemaVersion: Int32 = 1
+
     private let database: DatabaseHandle
     /// Every use is inside an actor-isolated method, so access is serialised.
     private var handle: OpaquePointer { database.pointer }
@@ -103,6 +111,14 @@ actor MessageStore {
             CREATE INDEX IF NOT EXISTS messages_by_position
                 ON messages(conversation_id, sequence);
             """)
+        // Stamped last, so a database only claims a version once every table
+        // that version promises actually exists.
+        try exec(handle, "PRAGMA user_version = \(schemaVersion);")
+    }
+
+    /// The schema version recorded in the database file itself.
+    func storedSchemaVersion() throws -> Int32 {
+        try query("PRAGMA user_version;") { Int32(sqlite3_column_int64($0, 0)) }.first ?? 0
     }
 
     // MARK: - Queries
