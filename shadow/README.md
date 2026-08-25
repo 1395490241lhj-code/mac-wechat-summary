@@ -95,13 +95,21 @@ environment explicitly.
 1. **Upstream** — PR #94339 is still open. Stock Hermes fails every stdio MCP
    call in a chat session, so the stock-runtime Scenario A + J smoke remains
    the prerequisite.
-2. **Provider transmission** — inference is Anthropic native, so real message
-   content necessarily leaves the machine on every digest. This is an explicit
-   privacy assumption requiring acceptance; local cleanup has no effect on
-   provider-side retention.
-3. **Digest retention decision** — output is derived real data. A synthetic run
-   showed the model reproducing a credential-like string verbatim in its
-   digest, so redaction cannot be assumed. Review-only is the default; any
-   on-disk retention needs an explicitly approved policy.
-4. **Deletion semantics** — cleanup is an application-level purge, verified by
+2. **Desktop UI path** — not validated; see `docs/v2/H5_UI_GATES_PENDING.md`.
+   The CLI runner is the only validated path.
+3. **Deletion semantics** — cleanup is an application-level purge, verified by
    content search. No forensic or physical erasure is claimed.
+
+## Accepted privacy boundaries
+
+Decided, not open questions — see `docs/v2/H5_PRIVACY_DECISIONS.md`:
+
+- **Provider transmission (accepted).** Real WeChat message content is
+  transmitted to Anthropic / Claude for inference. This is a standing privacy
+  boundary of the design, not local-only processing, and local cleanup has no
+  effect on provider-side retention. Scope is Anthropic only; changing provider
+  is a new decision.
+- **Digest retention: review-only.** Output is derived real data and is printed
+  to stdout, never written to a file. A synthetic run showed the model
+  reproducing a credential-like string verbatim, so redaction cannot be
+  assumed. On-disk retention needs a separately approved policy.
