@@ -1,3 +1,15 @@
+> **This README describes v1 only.**
+>
+> v1 is the historical Python generation: it decrypts the local WeChat database,
+> extracts keys from process memory, and **can actively send WeChat messages**.
+> It is **not** the current v2 architecture.
+>
+> Current work is the native SwiftUI read-only path (`apps/WeChatCompanion`):
+> read-only, Screen Recording only, never drives WeChat. It uses hosted
+> providers for extraction and digests, so it is **not local-only**.
+>
+> Agents: read [AGENTS.md](AGENTS.md) first.
+
 # 微信群聊 AI 总结
 
 macOS 菜单栏应用，一键总结微信群聊消息。

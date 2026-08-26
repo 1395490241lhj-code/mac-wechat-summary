@@ -15,6 +15,9 @@ build/
 .vscode/
 .idea/
 
+# Local agent settings (machine-local, not project configuration)
+.claude/settings.local.json
+
 # Xcode development builds
 /.build/
 *.xcuserstate
