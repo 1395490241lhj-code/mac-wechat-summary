@@ -1,6 +1,6 @@
 # H4.5 — Safety Precondition Gate (synthetic only)
 
-Gate between the sealed H4 evaluation (`1b94e4d`) and any real-data work.
+Gate between the sealed H4 evaluation (`61b229a`) and any real-data work.
 Two preconditions had to be **demonstrated**, not asserted:
 
 1. the H5 tool boundary is genuinely read-only;

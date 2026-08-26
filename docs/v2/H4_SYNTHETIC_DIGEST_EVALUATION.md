@@ -17,7 +17,7 @@ from the H3 scenario definitions.
 | Fix commit | `c1b39a86bad20786f135b7620f6b87784ea839e9` — `fix(mcp): un-invert the stdio children liveness check (#94335)` |
 | Provider | Anthropic **native** Messages API (`api_mode: anthropic_messages`) |
 | Model | `claude-sonnet-5` |
-| Skill | `.hermes/skills/wechat-digest` @ H3 `e0fd8cd`, **unmodified** |
+| Skill | `.hermes/skills/wechat-digest` @ H3 `5b1e7a8`, **unmodified** |
 | MCP | `bridge/wechat_companion_mcp.py`, stdio, read-only, **unmodified** |
 | Isolation | dedicated temporary `HOME` + `HERMES_HOME`; credential resolved solely from `ANTHROPIC_API_KEY` |
 
