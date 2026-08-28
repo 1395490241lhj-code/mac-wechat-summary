@@ -103,7 +103,13 @@ extension GeminiResponseMetadata {
 /// independent `ExtractedConversationFrame`.
 struct GeminiFrameExtractor: FrameExtracting {
     static let credentialAccount = "gemini-api-key"
-    static let defaultModel = "gemini-3.7-flash"
+    /// The production transport, named here so callers outside this directory
+    /// never have to mention a networking type. `ExtractionPipelineTests`
+    /// enforces that boundary, and it caught this seam when it was first added
+    /// in the wrong place.
+    static let productionTransport: any GeminiTransporting = URLSessionGeminiTransport()
+    /// Typed so production cannot pass an arbitrary model string.
+    static let defaultModel = GeminiModel.provisionalDefault
     static let requestTimeout: TimeInterval = 30
 
     let isConfigured: Bool
@@ -111,12 +117,12 @@ struct GeminiFrameExtractor: FrameExtracting {
 
     private let credentials: any CredentialStoring
     private let transport: any GeminiTransporting
-    private let model: String
+    private let model: GeminiModel
 
     init(
         credentials: any CredentialStoring,
         transport: any GeminiTransporting = URLSessionGeminiTransport(),
-        model: String = GeminiFrameExtractor.defaultModel
+        model: GeminiModel = GeminiFrameExtractor.defaultModel
     ) {
         self.credentials = credentials
         self.transport = transport
@@ -199,7 +205,7 @@ struct GeminiFrameExtractor: FrameExtracting {
     private func makeRequest(apiKey: String, imageData: Data) throws -> URLRequest {
         let url = URL(
             string: "https://generativelanguage.googleapis.com/v1beta/models/"
-                + "\(model):generateContent"
+                + "\(model.modelID):generateContent"
         )!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

@@ -26,6 +26,7 @@ final class AppModel {
     /// extracted text is written to the local database. Off by default.
     private(set) var allowsLocalPersistence = false
     private(set) var retentionPolicy = RetentionPolicy.defaultPolicy
+    private(set) var selectedGeminiModel = GeminiModel.provisionalDefault
     private(set) var credentialErrorOccurred = false
 
     @ObservationIgnored private let service: DiagnosticsService
@@ -35,6 +36,11 @@ final class AppModel {
     @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
     @ObservationIgnored private let messageHistory: LocalMessageHistory
     @ObservationIgnored private let credentials: any CredentialStoring
+    /// Held so rebuilding the extractor cannot silently fall back to the
+    /// production transport. Without this seam a test's transport is detached
+    /// the first time a setting changes, and any assertion about requests
+    /// afterwards becomes unfalsifiable.
+    @ObservationIgnored private let geminiTransport: any GeminiTransporting
     @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     /// Independent of capture polling: an extraction already in flight can
@@ -50,6 +56,7 @@ final class AppModel {
         extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator(),
         messageHistory: LocalMessageHistory = .applicationSupport,
         credentials: any CredentialStoring = KeychainCredentialStore(),
+        geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
         consentDefaults: UserDefaults = .standard
     ) {
         self.service = service
@@ -59,6 +66,7 @@ final class AppModel {
         self.extractionCoordinator = extractionCoordinator
         self.messageHistory = messageHistory
         self.credentials = credentials
+        self.geminiTransport = geminiTransport
         self.consentDefaults = consentDefaults
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
@@ -69,11 +77,16 @@ final class AppModel {
         retentionPolicy = RetentionPolicy.resolved(
             fromStoredID: consentDefaults.string(forKey: Self.retentionPolicyKey)
         )
+        selectedGeminiModel = GeminiModel.resolved(
+            fromStoredID: consentDefaults.string(forKey: Self.geminiModelKey)
+        )
     }
 
     /// Only a boolean consent flag is stored here. The API key lives in the
     /// Keychain and never touches UserDefaults.
     static let remoteConsentKey = "extraction.allowsRemoteProcessing"
+    /// Non-secret configuration: only the stable model ID is persisted.
+    static let geminiModelKey = "extraction.geminiModel"
     /// Separate from `remoteConsentKey` on purpose. Remote consent governs
     /// whether a frame may leave the Mac; this one governs whether extracted
     /// text is written down here.
@@ -118,6 +131,20 @@ final class AppModel {
         await applyExtractionConfiguration()
     }
 
+    /// Changing the model persists the ID and rebuilds the extractor. It makes
+    /// no network request and uploads no frame by itself; the credential,
+    /// consent value and accumulated metrics are all preserved.
+    func setGeminiModel(_ model: GeminiModel) async {
+        guard model != selectedGeminiModel else { return }
+        selectedGeminiModel = model
+        consentDefaults.set(model.modelID, forKey: Self.geminiModelKey)
+        await applyExtractionConfiguration()
+    }
+
+    /// True while an extraction is running. The picker is disabled then, so a
+    /// model change cannot race an in-flight request.
+    var isExtractionProcessing: Bool { extractionMetrics.status == .processing }
+
     // MARK: - Local persistence settings
 
     /// Turning this on opens (and if needed creates) the local database.
@@ -154,7 +181,11 @@ final class AppModel {
 
     private func applyExtractionConfiguration() async {
         await extractionCoordinator.updateConfiguration(
-            extractor: GeminiFrameExtractor(credentials: credentials),
+            extractor: GeminiFrameExtractor(
+                credentials: credentials,
+                transport: geminiTransport,
+                model: selectedGeminiModel
+            ),
             capability: ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing),
             // Nil unless the user consented, so the default build path writes
             // nothing to disk.

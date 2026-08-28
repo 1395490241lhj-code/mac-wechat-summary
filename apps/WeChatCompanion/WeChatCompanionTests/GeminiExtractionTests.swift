@@ -92,7 +92,9 @@ struct GeminiExtractionTests {
     /// constant must be the one that reaches the endpoint.
     @Test
     func defaultModelIsThePinnedSupportedModel() async throws {
-        #expect(GeminiFrameExtractor.defaultModel == "gemini-3.7-flash")
+        // 3.7 Flash, unchanged from what production shipped before model
+        // selection existed. 2.5 is unavailable to this project.
+        #expect(GeminiFrameExtractor.defaultModel == .gemini37Flash)
 
         let transport = StubTransport(responseJSON: Self.validResponseJSON)
         let extractor = try Self.configuredExtractor(transport: transport)
@@ -101,6 +103,7 @@ struct GeminiExtractionTests {
         let url = try #require(await transport.lastRequest?.url?.absoluteString)
         #expect(url.contains("/models/gemini-3.7-flash:generateContent"))
         #expect(!url.contains("gemini-2.5"))
+        #expect(!url.contains("latest"))
     }
 
     @Test

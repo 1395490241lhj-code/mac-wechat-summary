@@ -417,6 +417,14 @@ private struct ChatsView: View {
                             isPositive: model.allowsRemoteProcessing
                         )
                         Divider()
+                        // "Selected" on purpose: an older failure diagnosis may
+                        // belong to a previously selected model.
+                        LabeledContent("Selected Gemini Model") {
+                            Text(model.selectedGeminiModel.label)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
                         ExtractionMetric(
                             label: "Meaningful Frames Received",
                             value: model.extractionMetrics.framesReceived
@@ -663,6 +671,21 @@ private struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                                 .padding(.vertical, 10)
                         }
+                        Divider()
+                        Picker("Model", selection: Binding(
+                            get: { model.selectedGeminiModel },
+                            set: { newValue in
+                                Task { await model.setGeminiModel(newValue) }
+                            }
+                        )) {
+                            ForEach(GeminiModel.allCases) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        // Disabled mid-extraction so a model change cannot race
+                        // an in-flight request.
+                        .disabled(model.isExtractionProcessing)
+                        .padding(.vertical, 10)
                         Divider()
                         Text("The key is stored only in the macOS Keychain. It is never "
                             + "written to preferences, files, or logs.")

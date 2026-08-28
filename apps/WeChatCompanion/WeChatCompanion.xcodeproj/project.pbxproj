@@ -20,19 +20,20 @@
 		A0000000000000000000000D /* ExtractedConversationFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000E /* ExtractedConversationFrame.swift */; };
 		A0000000000000000000000E /* FrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000F /* FrameExtractor.swift */; };
 		A0000000000000000000000F /* ExtractionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000010 /* ExtractionCoordinator.swift */; };
-		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
-		A00000000000000000000092 /* FrameReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000092 /* FrameReconciler.swift */; };
-		A00000000000000000000093 /* MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000093 /* MessageStore.swift */; };
-		A00000000000000000000094 /* MessageIngestor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000094 /* MessageIngestor.swift */; };
-		A00000000000000000000097 /* RetentionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000097 /* RetentionPolicy.swift */; };
-		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
-		B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000095 /* FrameReconcilerTests.swift */; };
-		B00000000000000000000096 /* MessageIngestionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000096 /* MessageIngestionTests.swift */; };
-		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
 		A00000000000000000000010 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000019 /* CredentialStore.swift */; };
 		A00000000000000000000017 /* ExtractionFailureDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000051 /* ExtractionFailureDiagnostics.swift */; };
 		A00000000000000000000011 /* FrameImageEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001A /* FrameImageEncoder.swift */; };
 		A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001B /* GeminiFrameExtractor.swift */; };
+		A00000000000000000000097 /* RetentionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000097 /* RetentionPolicy.swift */; };
+		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
+		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
+		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
+		A00000000000000000000092 /* FrameReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000092 /* FrameReconciler.swift */; };
+		A00000000000000000000093 /* MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000093 /* MessageStore.swift */; };
+		A00000000000000000000094 /* MessageIngestor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000094 /* MessageIngestor.swift */; };
+		B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000095 /* FrameReconcilerTests.swift */; };
+		B00000000000000000000096 /* MessageIngestionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000096 /* MessageIngestionTests.swift */; };
+		A00000000000000000000018 /* GeminiModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000071 /* GeminiModel.swift */; };
 		B00000000000000000000001 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* DiagnosticPrivacyTests.swift */; };
 		B00000000000000000000002 /* DiagnosticsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000012 /* DiagnosticsStoreTests.swift */; };
 		B00000000000000000000003 /* StatusModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000013 /* StatusModelTests.swift */; };
@@ -42,6 +43,7 @@
 		B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001C /* GeminiExtractionTests.swift */; };
 		B0000000000000000000000B /* ExtractionUIStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000041 /* ExtractionUIStateTests.swift */; };
 		B0000000000000000000000C /* ExtractionFailureDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000061 /* ExtractionFailureDiagnosticsTests.swift */; };
+		B0000000000000000000000D /* GeminiModelSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000081 /* GeminiModelSelectionTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -69,19 +71,20 @@
 		C0000000000000000000000E /* ExtractedConversationFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/ExtractedConversationFrame.swift; sourceTree = "<group>"; };
 		C0000000000000000000000F /* FrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/FrameExtractor.swift; sourceTree = "<group>"; };
 		C00000000000000000000010 /* ExtractionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/ExtractionCoordinator.swift; sourceTree = "<group>"; };
-		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
-		C00000000000000000000092 /* FrameReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/FrameReconciler.swift; sourceTree = "<group>"; };
-		C00000000000000000000093 /* MessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageStore.swift; sourceTree = "<group>"; };
-		C00000000000000000000094 /* MessageIngestor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageIngestor.swift; sourceTree = "<group>"; };
-		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
-		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
-		C00000000000000000000095 /* FrameReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReconcilerTests.swift; sourceTree = "<group>"; };
-		C00000000000000000000096 /* MessageIngestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageIngestionTests.swift; sourceTree = "<group>"; };
-		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000019 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/CredentialStore.swift; sourceTree = "<group>"; };
 		C00000000000000000000051 /* ExtractionFailureDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/ExtractionFailureDiagnostics.swift; sourceTree = "<group>"; };
 		C0000000000000000000001A /* FrameImageEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/FrameImageEncoder.swift; sourceTree = "<group>"; };
 		C0000000000000000000001B /* GeminiFrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiFrameExtractor.swift; sourceTree = "<group>"; };
+		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
+		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
+		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
+		C00000000000000000000092 /* FrameReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/FrameReconciler.swift; sourceTree = "<group>"; };
+		C00000000000000000000093 /* MessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageStore.swift; sourceTree = "<group>"; };
+		C00000000000000000000094 /* MessageIngestor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageIngestor.swift; sourceTree = "<group>"; };
+		C00000000000000000000095 /* FrameReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReconcilerTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000096 /* MessageIngestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageIngestionTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000071 /* GeminiModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiModel.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000012 /* DiagnosticsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsStoreTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000013 /* StatusModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusModelTests.swift; sourceTree = "<group>"; };
@@ -91,6 +94,7 @@
 		C0000000000000000000001C /* GeminiExtractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiExtractionTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000041 /* ExtractionUIStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionUIStateTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000061 /* ExtractionFailureDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtractionFailureDiagnosticsTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000081 /* GeminiModelSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiModelSelectionTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000021 /* WeChat Companion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "WeChat Companion.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000022 /* WeChatCompanionTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WeChatCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -142,6 +146,7 @@
 				C00000000000000000000051 /* ExtractionFailureDiagnostics.swift */,
 				C0000000000000000000001A /* FrameImageEncoder.swift */,
 				C0000000000000000000001B /* GeminiFrameExtractor.swift */,
+				C00000000000000000000071 /* GeminiModel.swift */,
 				C00000000000000000000091 /* MessageRecords.swift */,
 				C00000000000000000000092 /* FrameReconciler.swift */,
 				C00000000000000000000093 /* MessageStore.swift */,
@@ -165,6 +170,7 @@
 				C0000000000000000000001C /* GeminiExtractionTests.swift */,
 				C00000000000000000000041 /* ExtractionUIStateTests.swift */,
 				C00000000000000000000061 /* ExtractionFailureDiagnosticsTests.swift */,
+				C00000000000000000000081 /* GeminiModelSelectionTests.swift */,
 				C00000000000000000000095 /* FrameReconcilerTests.swift */,
 				C00000000000000000000096 /* MessageIngestionTests.swift */,
 				C00000000000000000000099 /* LocalPersistenceConsentTests.swift */,
@@ -296,6 +302,7 @@
 				A00000000000000000000017 /* ExtractionFailureDiagnostics.swift in Sources */,
 				A00000000000000000000011 /* FrameImageEncoder.swift in Sources */,
 				A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */,
+				A00000000000000000000018 /* GeminiModel.swift in Sources */,
 				A00000000000000000000091 /* MessageRecords.swift in Sources */,
 				A00000000000000000000092 /* FrameReconciler.swift in Sources */,
 				A00000000000000000000093 /* MessageStore.swift in Sources */,
@@ -318,6 +325,7 @@
 				B00000000000000000000009 /* GeminiExtractionTests.swift in Sources */,
 				B0000000000000000000000B /* ExtractionUIStateTests.swift in Sources */,
 				B0000000000000000000000C /* ExtractionFailureDiagnosticsTests.swift in Sources */,
+				B0000000000000000000000D /* GeminiModelSelectionTests.swift in Sources */,
 				B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */,
 				B00000000000000000000096 /* MessageIngestionTests.swift in Sources */,
 				B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */,
