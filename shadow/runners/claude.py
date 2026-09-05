@@ -285,7 +285,12 @@ class ClaudeRunner:
                      "num_turns", "duration_api_ms", "stop_reason", "total_cost_usd")
 
     def digest(self) -> DigestResult:
-        out = self._claude(PROMPT)
+        try:
+            out = self._claude(PROMPT)
+        finally:
+            # The digest turn is the last spawn; drop credential references now.
+            for name in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+                self.cfg.extra_env.pop(name, None)
         text, run_id, rc = "", None, out.returncode
         diag: dict = {"returncode": out.returncode, "stdout_bytes": len(out.stdout or ""),
                       "stderr_bytes": len(out.stderr or "")}

@@ -35,8 +35,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_runner import (DEFAULT_TIMEOUT, PASS_ENV_ALLOWED, ShadowError,  # noqa: E402
-                          collect_pass_env, reject_secret_env_args, run_shadow)
+from agent_runner import (DEFAULT_TIMEOUT, KEYCHAIN_SERVICE, PASS_ENV_ALLOWED,  # noqa: E402
+                          ShadowError, collect_pass_env, read_keychain_token,
+                          reject_secret_env_args, run_shadow)
 from runners import BACKENDS  # noqa: E402
 
 # Re-exported for the Hermes gate documentation and older call sites.
@@ -62,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pass-env", action="append", default=[], metavar="NAME",
                     help="copy an allowlisted credential from the parent environment "
                          f"into the child by name ({', '.join(sorted(PASS_ENV_ALLOWED))})")
+    ap.add_argument("--claude-oauth-from-keychain", action="store_true",
+                    help=f"claude backend: read CLAUDE_CODE_OAUTH_TOKEN from the macOS keychain "
+                         f"item '{KEYCHAIN_SERVICE}' (current user) at runtime")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help="wall-clock bound for the digest turn, seconds")
 
@@ -96,6 +100,10 @@ def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
         reject_secret_env_args(args.env)
         extra = _parse_env(args.env)
         extra.update(collect_pass_env(args.pass_env, environ))
+        if args.claude_oauth_from_keychain:
+            if args.agent_backend != "claude":
+                raise ShadowError("--claude-oauth-from-keychain applies to the claude backend only")
+            extra.update(read_keychain_token())
     except ShadowError as exc:
         ap.error(str(exc))
     if args.agent_backend == "hermes":

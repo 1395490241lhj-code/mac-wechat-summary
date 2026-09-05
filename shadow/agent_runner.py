@@ -23,6 +23,7 @@ SKILL.md``, the single source every backend consumes unmodified.
 
 from __future__ import annotations
 
+import getpass
 import json
 import signal
 import subprocess
@@ -71,6 +72,35 @@ def collect_pass_env(names, environ) -> dict:
             raise ShadowError(f"--pass-env: {name} is not set in the parent environment")
         out[name] = value
     return out
+
+
+#: The one keychain item the Claude backend may read. Service, account and the
+#: destination variable are fixed here; a runner cannot ask for anything else.
+KEYCHAIN_SERVICE = "wechat-shadow-claude-oauth"
+KEYCHAIN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def read_keychain_token(*, run=subprocess.run, user: str | None = None) -> dict:
+    """Read the fixed keychain item into ``{KEYCHAIN_ENV: value}`` at runtime.
+
+    The value comes back on the pipe from ``security`` and lives only in the
+    returned dict. Failures raise a fixed-text ``ShadowError`` — the tool's
+    output is never included, since it could be the secret itself.
+    """
+    account = user or getpass.getuser()
+    try:
+        out = run(["/usr/bin/security", "find-generic-password", "-a", account,
+                   "-s", KEYCHAIN_SERVICE, "-w"],
+                  capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ShadowError(f"keychain: could not run security ({exc.__class__.__name__})") from None
+    if out.returncode != 0:
+        raise ShadowError(f"keychain: item '{KEYCHAIN_SERVICE}' for the current user is "
+                          "absent or access was denied")
+    value = (out.stdout or "").rstrip("\n")
+    if not value:
+        raise ShadowError(f"keychain: item '{KEYCHAIN_SERVICE}' is empty")
+    return {KEYCHAIN_ENV: value}
 
 
 def reject_secret_env_args(items) -> None:

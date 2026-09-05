@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 import wechat_shadow_run as cli
-from agent_runner import (PASS_ENV_ALLOWED, ShadowError, collect_pass_env,
-                          reject_secret_env_args, run_shadow)
+import subprocess
+
+from agent_runner import (KEYCHAIN_ENV, KEYCHAIN_SERVICE, PASS_ENV_ALLOWED, ShadowError,
+                          collect_pass_env, read_keychain_token, reject_secret_env_args,
+                          run_shadow)
 
 TOKEN = "sk-ant-oat01-FAKE-not-a-real-token-0123456789"
 
@@ -96,3 +99,73 @@ def test_no_output_stream_or_state_file_ever_carries_the_token(claude_args, tmp_
     blobs.append((tmp_path / "state.json").read_text())
     assert not any(TOKEN in b for b in blobs)
     assert TOKEN not in json.dumps(run.proxy.state.snapshot())
+
+
+# --- fixed keychain source ---------------------------------------------------
+
+def fake_security(rc=0, stdout=TOKEN + "\n"):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, rc, stdout, "")
+    run.calls = calls
+    return run
+
+
+def test_keychain_source_is_fixed_service_account_and_destination():
+    run = fake_security()
+    got = read_keychain_token(run=run, user="alice")
+    assert got == {KEYCHAIN_ENV: TOKEN} and KEYCHAIN_ENV == "CLAUDE_CODE_OAUTH_TOKEN"
+    assert run.calls == [["/usr/bin/security", "find-generic-password", "-a", "alice",
+                          "-s", "wechat-shadow-claude-oauth", "-w"]]
+    assert KEYCHAIN_SERVICE == "wechat-shadow-claude-oauth"
+
+
+def test_keychain_failures_are_fixed_text_never_tool_output():
+    with pytest.raises(ShadowError) as info:
+        read_keychain_token(run=fake_security(rc=44, stdout="SECRET-LEAK"), user="a")
+    assert "absent or access was denied" in str(info.value) and "SECRET-LEAK" not in str(info.value)
+    with pytest.raises(ShadowError, match="is empty"):
+        read_keychain_token(run=fake_security(stdout="\n"), user="a")
+
+    def boom(argv, **kw):
+        raise OSError("no such file: " + TOKEN)
+    with pytest.raises(ShadowError) as info:
+        read_keychain_token(run=boom, user="a")
+    assert TOKEN not in str(info.value)
+
+
+def test_cli_keychain_flag_is_claude_only_and_reaches_the_child_env(claude_args, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_keychain_token", lambda: {KEYCHAIN_ENV: TOKEN})
+    ap = cli.build_parser()
+    args = ap.parse_args(claude_args + ["--claude-oauth-from-keychain"])
+    runner = cli.make_runner(args, ap, environ={})
+    assert runner.cfg.extra_env == {KEYCHAIN_ENV: TOKEN}
+    assert TOKEN not in " ".join(runner.argv("boundary-probe"))
+    hermes = ["--agent-backend", "hermes", "--isolated-home", "/tmp/i", "--hermes-entry", "/x",
+              "--python", "/x", "--hermes-home", "/tmp/h", "--project-dir", "/tmp/p",
+              "--claude-oauth-from-keychain"]
+    with pytest.raises(SystemExit):
+        cli.make_runner(ap.parse_args(hermes), ap, environ={})
+    assert "claude backend only" in capsys.readouterr().err
+
+
+def test_credential_reference_is_dropped_after_the_digest_spawn(claude_args):
+    from test_claude_runner import FakeProxy, FakeRun
+    ap = cli.build_parser()
+    args = ap.parse_args(claude_args + ["--pass-env", "CLAUDE_CODE_OAUTH_TOKEN"])
+    runner = cli.make_runner(args, ap, environ={"CLAUDE_CODE_OAUTH_TOKEN": TOKEN})
+    run = FakeRun()
+
+    def factory(expected, **kw):
+        run.proxy = FakeProxy(expected, **kw)
+        return run.proxy
+    runner._run, runner._proxy_factory = run, factory
+    runner.preflight()
+    runner.assert_tool_boundary()
+    assert run.calls[0][1]["env"][KEYCHAIN_ENV] == TOKEN, "probe spawn carries it"
+    runner.digest()
+    assert run.calls[1][1]["env"][KEYCHAIN_ENV] == TOKEN, "digest spawn carries it"
+    assert KEYCHAIN_ENV not in runner.cfg.extra_env, "dropped once the last spawn returned"
+    assert KEYCHAIN_ENV not in runner.cfg.child_env("http://127.0.0.1:1")

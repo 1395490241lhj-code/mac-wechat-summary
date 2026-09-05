@@ -28,7 +28,7 @@ Usage
 -----
     python3 shadow/h6_synthetic_gate.py --claude-bin ~/.local/bin/claude \\
         --python <interpreter with mcp> --work <empty dir> --report <path.json> \\
-        [--pass-env CLAUDE_CODE_OAUTH_TOKEN] [--model claude-sonnet-5]
+        [--pass-env CLAUDE_CODE_OAUTH_TOKEN | --claude-oauth-from-keychain] [--model ...]
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / ".hermes" / "skills" / "wechat-digest" / "evaluation"))
 
-from agent_runner import (ShadowError, collect_pass_env, reject_secret_env_args,  # noqa: E402
-                          run_shadow)
+from agent_runner import (ShadowError, collect_pass_env, read_keychain_token,  # noqa: E402
+                          reject_secret_env_args, run_shadow)
 from runners.claude import DEFAULT_MODEL, DEFAULT_SKILL, ClaudeConfig, ClaudeRunner  # noqa: E402
 from scenarios import SCENARIOS_BY_KEY, build_database  # noqa: E402
 
@@ -76,10 +76,18 @@ def search(roots, token: bytes) -> list[str]:
     return hits
 
 
-def make_config(args, isolated_home: Path, db_path: Path) -> ClaudeConfig:
+def credentials(args) -> dict:
+    """Resolved once per gate run so the keychain is consulted a single time."""
     reject_secret_env_args(args.env)
     extra = dict(item.partition("=")[::2] for item in args.env)
     extra.update(collect_pass_env(args.pass_env, os.environ))
+    if args.claude_oauth_from_keychain:
+        extra.update(read_keychain_token())
+    return extra
+
+
+def make_config(args, isolated_home: Path, db_path: Path) -> ClaudeConfig:
+    extra = dict(args.credentials)
     return ClaudeConfig(
         claude_bin=args.claude_bin, python=args.python,
         bridge=REPO / "bridge" / "wechat_companion_mcp.py", db_path=db_path,
@@ -163,6 +171,8 @@ def main(argv=None) -> int:
     ap.add_argument("--env", action="append", default=[], help="never a credential")
     ap.add_argument("--pass-env", action="append", default=[], metavar="NAME",
                     help="copy an allowlisted credential from the parent environment by name")
+    ap.add_argument("--claude-oauth-from-keychain", action="store_true",
+                    help="read CLAUDE_CODE_OAUTH_TOKEN from the fixed macOS keychain item at runtime")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--proxy-port", type=int, default=8823)
     ap.add_argument("--timeout", type=int, default=600)
@@ -170,6 +180,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     args.work.mkdir(parents=True, exist_ok=True)
+    args.credentials = credentials(args)
     report = {"model": args.model, "runs": {}}
     statuses = []
     try:
