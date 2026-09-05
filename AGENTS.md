@@ -114,7 +114,9 @@ something memorised from a summary.
 2. Read the branch topology recorded in `Project.md` / `Current Status.md`.
 3. **Verify that topology against Git before acting on it** — commit counts and
    merge bases move.
-4. **Never assume the current HEAD contains the digest skill.**
+4. The digest skill lives at `.hermes/skills/wechat-digest` on `v2/rewrite`
+   since merge `fcbacbd` (provenance: `h3/wechat-digest` @ `5b1e7a8`). Read it
+   from HEAD; do not look to the `h3` branch for it.
 5. To inspect a file on another branch, prefer `git show <branch>:<path>`. Do
    not casually switch branches just to look at something.
 6. **Neither branch is automatically the merge winner.**
