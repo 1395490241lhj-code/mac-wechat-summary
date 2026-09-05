@@ -28,7 +28,7 @@ Usage
 -----
     python3 shadow/h6_synthetic_gate.py --claude-bin ~/.local/bin/claude \\
         --python <interpreter with mcp> --work <empty dir> --report <path.json> \\
-        [--env ANTHROPIC_API_KEY=...] [--model claude-sonnet-5]
+        [--pass-env CLAUDE_CODE_OAUTH_TOKEN] [--model claude-sonnet-5]
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import secrets
 import sqlite3
 import sys
@@ -46,7 +47,8 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / ".hermes" / "skills" / "wechat-digest" / "evaluation"))
 
-from agent_runner import ShadowError, run_shadow  # noqa: E402
+from agent_runner import (ShadowError, collect_pass_env, reject_secret_env_args,  # noqa: E402
+                          run_shadow)
 from runners.claude import DEFAULT_MODEL, DEFAULT_SKILL, ClaudeConfig, ClaudeRunner  # noqa: E402
 from scenarios import SCENARIOS_BY_KEY, build_database  # noqa: E402
 
@@ -75,7 +77,9 @@ def search(roots, token: bytes) -> list[str]:
 
 
 def make_config(args, isolated_home: Path, db_path: Path) -> ClaudeConfig:
+    reject_secret_env_args(args.env)
     extra = dict(item.partition("=")[::2] for item in args.env)
+    extra.update(collect_pass_env(args.pass_env, os.environ))
     return ClaudeConfig(
         claude_bin=args.claude_bin, python=args.python,
         bridge=REPO / "bridge" / "wechat_companion_mcp.py", db_path=db_path,
@@ -156,7 +160,9 @@ def main(argv=None) -> int:
     ap.add_argument("--python", required=True, type=Path, help="interpreter with `mcp`")
     ap.add_argument("--work", required=True, type=Path, help="empty scratch directory")
     ap.add_argument("--report", required=True, type=Path)
-    ap.add_argument("--env", action="append", default=[])
+    ap.add_argument("--env", action="append", default=[], help="never a credential")
+    ap.add_argument("--pass-env", action="append", default=[], metavar="NAME",
+                    help="copy an allowlisted credential from the parent environment by name")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--proxy-port", type=int, default=8823)
     ap.add_argument("--timeout", type=int, default=600)

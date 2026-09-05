@@ -49,6 +49,37 @@ class ShadowError(RuntimeError):
     """Aborts the run. The message is safe to print — never message content."""
 
 
+#: Credential variables a runner may take from the *parent* environment on
+#: explicit request (``--pass-env NAME``). Values are copied into the child
+#: environment and nowhere else: never argv, never logs, never reports.
+PASS_ENV_ALLOWED = frozenset({"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"})
+
+
+def collect_pass_env(names, environ) -> dict:
+    """Copy allowlisted credentials from ``environ`` by name.
+
+    Fails closed on a name outside the allowlist or on a missing value, so a
+    typo cannot silently produce an unauthenticated run.
+    """
+    out = {}
+    for name in names:
+        if name not in PASS_ENV_ALLOWED:
+            raise ShadowError(f"--pass-env: {name} is not an allowlisted credential variable")
+        value = environ.get(name)
+        if not value:
+            raise ShadowError(f"--pass-env: {name} is not set in the parent environment")
+        out[name] = value
+    return out
+
+
+def reject_secret_env_args(items) -> None:
+    """``--env NAME=value`` must never carry a credential (argv is not private)."""
+    for item in items:
+        name = item.partition("=")[0]
+        if name in PASS_ENV_ALLOWED:
+            raise ShadowError(f"--env: refusing {name} on the command line; use --pass-env {name}")
+
+
 @dataclass(frozen=True)
 class DigestResult:
     """What one digest turn produced. ``text`` is review-only."""

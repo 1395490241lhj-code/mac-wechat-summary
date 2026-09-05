@@ -50,10 +50,22 @@ Configuration: `--tools ""`, `--strict-mcp-config --mcp-config <isolated>`,
 `--no-session-persistence`, `--setting-sources ""`, empty working directory,
 `--output-format json`, `--model claude-sonnet-5` (pinned).
 
+Auth design (2026-09-05 follow-up): `--bare` is **not** used, because bare
+mode restricts auth to `ANTHROPIC_API_KEY` and ignores `CLAUDE_CODE_OAUTH_TOKEN`.
+Isolation is enforced flag by flag instead: `--setting-sources ""`,
+`--settings '{"autoMemoryEnabled":false}'`, `--disable-slash-commands`,
+`--strict-mcp-config`, `--tools ""`, `--no-session-persistence`, plus
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `_BUNDLED_SKILLS`, `_BACKGROUND_TASKS`,
+`_WORKFLOWS`. Credentials enter only via `--pass-env NAME` (allowlist:
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`), copied from the parent
+environment into the child by name; `--env` refuses credential names. The
+keychain login of the operator's `claude` is keyed per config directory and is
+therefore intentionally invisible to the isolated runner.
+
 Environment built from scratch: `HOME`, `CLAUDE_CONFIG_DIR` and cwd inside
 `--isolated-home`; `PATH=/usr/bin:/bin:/usr/sbin:/sbin`; `ANTHROPIC_BASE_URL`
 pointing at the in-process proxy; telemetry, error reporting, auto-update and
-non-essential traffic disabled. Credentials only via explicit `--env`.
+non-essential traffic disabled. Credentials only via `--pass-env NAME`.
 
 **Wire-verified tool boundary.** `shadow/tool_boundary_proxy.py` is the
 runtime-neutral exact-N verifier. `exact8_assertion_proxy.py` is now a thin
@@ -73,7 +85,7 @@ mismatch in either direction aborts before any message is read.
 | `.hermes/skills/wechat-digest/evaluation` | **39 passed**, including `test_skill_passes_the_hermes_security_scanner` |
 | Hermes `skills_guard.scan_skill` (direct) | verdict **safe**, 0 findings |
 | `SKILL.md` bytes | blob `81d276ea…` at HEAD before and after — **unchanged** |
-| `shadow/tests` (new) | **61 passed** — driver 12, HermesRunner 15, ClaudeRunner 24, proxy 10 |
+| `shadow/tests` (new) | **67 passed** — driver 12, HermesRunner 15, ClaudeRunner 24, proxy 10, credential transport 6 |
 | Synthetic Scenario A + J on Claude | **NOT RUN — blocked** (see below) |
 | Exact tool boundary on the wire (Claude) | **NOT VERIFIED — blocked** |
 | Canary persistence audit (Claude) | **NOT RUN — blocked** |
@@ -98,7 +110,7 @@ To run the gates once a credential exists:
 ```bash
 python3 shadow/h6_synthetic_gate.py --claude-bin ~/.local/bin/claude \
   --python <interpreter with mcp> --work <empty dir> --report <path.json> \
-  [--env ANTHROPIC_API_KEY=...]
+  --pass-env CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 Acceptance: both scenario runs exit `0` with digests matching their

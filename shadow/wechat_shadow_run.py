@@ -35,7 +35,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_runner import DEFAULT_TIMEOUT, run_shadow  # noqa: E402
+from agent_runner import (DEFAULT_TIMEOUT, PASS_ENV_ALLOWED, ShadowError,  # noqa: E402
+                          collect_pass_env, reject_secret_env_args, run_shadow)
 from runners import BACKENDS  # noqa: E402
 
 # Re-exported for the Hermes gate documentation and older call sites.
@@ -57,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--isolated-home", required=True, type=Path,
                     help="throwaway HOME for the child process")
     ap.add_argument("--env", action="append", default=[],
-                    help="extra child env as KEY=VALUE (repeatable)")
+                    help="extra child env as KEY=VALUE (repeatable; never a credential)")
+    ap.add_argument("--pass-env", action="append", default=[], metavar="NAME",
+                    help="copy an allowlisted credential from the parent environment "
+                         f"into the child by name ({', '.join(sorted(PASS_ENV_ALLOWED))})")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT,
                     help="wall-clock bound for the digest turn, seconds")
 
@@ -86,8 +90,14 @@ def _require(ap: argparse.ArgumentParser, args: argparse.Namespace, names: list[
                  + ", ".join(f"--{n}" for n in missing))
 
 
-def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser):
-    extra = _parse_env(args.env)
+def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
+                environ=os.environ):
+    try:
+        reject_secret_env_args(args.env)
+        extra = _parse_env(args.env)
+        extra.update(collect_pass_env(args.pass_env, environ))
+    except ShadowError as exc:
+        ap.error(str(exc))
     if args.agent_backend == "hermes":
         from runners.hermes import HermesConfig, HermesRunner
         _require(ap, args, ["hermes-entry", "python", "hermes-home", "project-dir"])

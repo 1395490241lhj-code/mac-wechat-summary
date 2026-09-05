@@ -132,15 +132,31 @@ python3 shadow/wechat_shadow_run.py --agent-backend claude \
   [--env ANTHROPIC_API_KEY=...]
 ```
 
-The child environment is built from scratch, so credentials must be passed
-explicitly with `--env`, or the CLI must be logged in through its own keychain
-credential. **No credential is read from the operator's shell.**
+The child environment is built from scratch, so the CLI's keychain login is
+**not** visible to it (Claude Code keys keychain credentials per config
+directory). Credentials enter by **name only**, through an allowlist:
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"   # in your own shell, never pasted anywhere
+python3 shadow/wechat_shadow_run.py --agent-backend claude ... --pass-env CLAUDE_CODE_OAUTH_TOKEN
+```
+
+`--pass-env` copies the named variable from the parent environment into the
+child environment and nowhere else. `--env NAME=value` refuses credential
+names, because argv and shell history are not private. The runner never logs,
+prints, persists or reports the value. `--bare` is deliberately **not** used:
+it would restrict auth to `ANTHROPIC_API_KEY`; the same isolation is enforced
+flag by flag (`--setting-sources ""`, `--settings '{"autoMemoryEnabled":false}'`,
+`--disable-slash-commands`, `--strict-mcp-config`, `--tools ""`, `--no-session-persistence`,
+`CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1`,
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_WORKFLOWS=1`).
 
 ### H6 gate
 
 ```bash
 python3 shadow/h6_synthetic_gate.py --claude-bin ~/.local/bin/claude \
-  --python <interpreter with mcp> --work <empty dir> --report <path.json>
+  --python <interpreter with mcp> --work <empty dir> --report <path.json> \
+  --pass-env CLAUDE_CODE_OAUTH_TOKEN
 ```
 
 Runs Scenario A and J from the skill's synthetic fixtures, then a canary run

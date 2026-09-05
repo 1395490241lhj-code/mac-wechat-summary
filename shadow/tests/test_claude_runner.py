@@ -124,12 +124,16 @@ def test_argv_is_the_narrowest_supported_configuration(cfg, runner_with):
     assert opt("--permission-mode") == "dontAsk"
     assert "--no-session-persistence" in argv
     assert opt("--setting-sources") == ""
+    assert json.loads(opt("--settings")) == {"autoMemoryEnabled": False}
+    assert "--disable-slash-commands" in argv
+    assert "--bare" not in argv, "bare mode would exclude subscription OAuth"
     assert opt("--output-format") == "json"
     assert opt("--model") == "claude-sonnet-5"
     assert set(opt("--allowedTools").split(",")) == set(CLAUDE_EXPECTED_TOOLS)
     assert argv[-1] == PROBE_PROMPT
     assert kw["cwd"] == str(cfg.workdir) and kw["timeout"] == 900
     assert kw["capture_output"] is True and kw["text"] is True
+    assert kw["stdin"] == subprocess.DEVNULL
     for forbidden in ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
                       "--add-dir", "--resume", "--continue", "bypassPermissions"):
         assert forbidden not in argv
@@ -171,6 +175,9 @@ def test_child_env_is_built_from_scratch_and_routes_through_the_proxy(cfg, monke
     assert env["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
     assert env["DISABLE_TELEMETRY"] == "1" and env["DISABLE_AUTOUPDATER"] == "1"
     assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    for knob in ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS",
+                 "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "CLAUDE_CODE_DISABLE_WORKFLOWS"):
+        assert env[knob] == "1"
     assert env["ANTHROPIC_API_KEY"] == "k"
     assert "CLAUDECODE" not in env
     assert os.environ["CLAUDE_CONFIG_DIR"] == "/real/.claude"

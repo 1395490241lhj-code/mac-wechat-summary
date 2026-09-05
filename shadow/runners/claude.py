@@ -12,8 +12,16 @@ installed CLI supports:
   that is not pre-allowed is denied, never asked about.
 * ``--allowedTools`` — only the bridge's tools are pre-allowed.
 * ``--no-session-persistence`` — the CLI is told not to save the session.
-* ``--setting-sources ""`` and an empty working directory — no user or project
-  settings, no ``CLAUDE.md``, no hooks, no plugins are discovered.
+* ``--setting-sources ""`` and an empty working directory — no user, project or
+  local settings, no ``CLAUDE.md``, no hooks, no plugins are discovered.
+  ``--settings '{"autoMemoryEnabled":false}'`` turns auto-memory off explicitly
+  and ``--disable-slash-commands`` disables skills discovery.
+* **No ``--bare``.** Bare mode would restrict auth to ``ANTHROPIC_API_KEY``; the
+  isolation above is enforced flag by flag instead, so a subscription OAuth
+  token (``CLAUDE_CODE_OAUTH_TOKEN`` from ``claude setup-token``) works.
+  Credentials enter only through the CLI's ``--pass-env NAME`` allowlist: read
+  from the parent environment, copied into the child environment, never on
+  argv, never logged, never persisted.
 * ``--system-prompt <SKILL.md bytes>`` — the digest policy is the skill file,
   read verbatim at launch and passed as the whole system prompt. This build
   has no ``--system-prompt-file`` flag, so the bytes travel on argv; nothing is
@@ -64,6 +72,9 @@ BRIDGE_TOOLS = ("status", "list_conversations", "get_messages", "get_recent_mess
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_SKILL = Path(".hermes/skills/wechat-digest/SKILL.md")
 PROBE_PROMPT = "boundary-probe"
+
+#: Explicit settings passed inline (not a settings *source*): auto-memory off.
+INLINE_SETTINGS = json.dumps({"autoMemoryEnabled": False}, separators=(",", ":"))
 
 
 def claude_wire_name(server: str, tool: str) -> str:
@@ -120,6 +131,10 @@ class ClaudeConfig:
             "DISABLE_ERROR_REPORTING": "1",
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+            "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": "1",
+            "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+            "CLAUDE_CODE_DISABLE_WORKFLOWS": "1",
         }
         env.update(self.extra_env)
         return env
@@ -173,6 +188,8 @@ class ClaudeRunner:
             "--permission-mode", "dontAsk",
             "--no-session-persistence",
             "--setting-sources", "",
+            "--settings", INLINE_SETTINGS,
+            "--disable-slash-commands",
             "--output-format", "json",
             "--model", cfg.model,
             "--system-prompt", self.skill_text(),
@@ -192,6 +209,7 @@ class ClaudeRunner:
         return self._run(
             self.argv(prompt), cwd=str(cfg.workdir),
             env=cfg.child_env(self._proxy.url),
+            stdin=subprocess.DEVNULL,  # the CLI otherwise waits 3 s for piped stdin
             capture_output=True, text=True, timeout=cfg.timeout,
         )
 
