@@ -23,10 +23,11 @@ SKILL.md``, the single source every backend consumes unmodified.
 
 from __future__ import annotations
 
+import json
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, TextIO
 
 #: The one user turn every backend sends. The policy is in the skill, not here.
@@ -87,6 +88,9 @@ class DigestResult:
     text: str
     run_id: str | None
     returncode: int
+    #: Sanitised failure evidence: exit codes, envelope keys, HTTP statuses,
+    #: counts, error categories. Never digest text, message content or secrets.
+    diagnostics: dict = field(default_factory=dict)
 
 
 class AgentRunner(Protocol):
@@ -161,7 +165,8 @@ def run_shadow(runner: AgentRunner, *, out: TextIO = sys.stdout,
         run_id = result.run_id
         if result.returncode != 0 or not result.text:
             status = 1
-            print("run failed — no digest produced", file=err)
+            print("run failed — no digest produced; diagnostics: "
+                  + json.dumps(result.diagnostics, ensure_ascii=False, sort_keys=True), file=err)
         else:
             # Review-only: stdout, never a file.
             print(result.text, file=out)

@@ -279,26 +279,44 @@ class ClaudeRunner:
         self._proxy.mode = "enforce"
         return tools
 
+    #: Envelope keys safe to keep. ``result`` is kept only when it is an error
+    #: string, truncated, never a digest.
+    ENVELOPE_KEYS = ("type", "subtype", "is_error", "terminal_reason", "api_error_status",
+                     "num_turns", "duration_api_ms", "stop_reason", "total_cost_usd")
+
     def digest(self) -> DigestResult:
         out = self._claude(PROMPT)
         text, run_id, rc = "", None, out.returncode
+        diag: dict = {"returncode": out.returncode, "stdout_bytes": len(out.stdout or ""),
+                      "stderr_bytes": len(out.stderr or "")}
         try:
             payload = json.loads(out.stdout or "{}")
+            diag["stdout_json"] = True
             run_id = payload.get("session_id")
+            diag.update({k: payload[k] for k in self.ENVELOPE_KEYS if k in payload})
+            diag["permission_denials"] = len(payload.get("permission_denials") or [])
             if payload.get("is_error"):
                 rc = rc or 1
+                diag["error_text"] = str(payload.get("result") or "")[:200]
             elif rc == 0:
                 text = (payload.get("result") or "").strip()
         except json.JSONDecodeError:
+            diag["stdout_json"] = False
             rc = rc or 1
+        if rc != 0:
+            diag["stderr_head"] = (out.stderr or "")[:300]
         assert self._proxy is not None
         state = self._proxy.state
+        diag["proxy"] = {"requests": state.requests, "tools_bearing": state.tools_bearing,
+                         "violations": state.violations,
+                         "upstream_status": list(getattr(state, "upstream_status", [])),
+                         "forward_errors": list(getattr(state, "forward_errors", []))}
         if state.violations:
             raise ShadowError(f"tool boundary: {state.violations} violating request(s) "
                               f"aborted on the wire during the digest")
         if state.tools_bearing < 1:
             raise ShadowError("tool boundary: the digest turn carried no tools")
-        return DigestResult(text=text, run_id=run_id, returncode=rc)
+        return DigestResult(text=text, run_id=run_id, returncode=rc, diagnostics=diag)
 
     def cleanup(self, run_id: str | None) -> None:
         self.purge()

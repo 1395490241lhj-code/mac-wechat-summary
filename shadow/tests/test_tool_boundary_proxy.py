@@ -175,3 +175,22 @@ def test_requests_without_tools_pass_through_and_get_is_forwarded(upstream, tmp_
 def test_invalid_mode_is_rejected():
     with pytest.raises(ValueError):
         ToolBoundaryProxy(FOUR, port=0, mode="observe")
+
+
+def test_upstream_status_is_recorded_and_network_failure_becomes_502(upstream, tmp_path):
+    proxy = ToolBoundaryProxy(FOUR, port=0, upstream=upstream.url).start()
+    try:
+        with post(proxy.url, FOUR):
+            pass
+        assert proxy.state.upstream_status == [200]
+    finally:
+        proxy.stop()
+    dead = ToolBoundaryProxy(FOUR, port=0, upstream="http://127.0.0.1:9").start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as info:
+            post(dead.url, FOUR)
+        assert info.value.code == 502
+        assert dead.state.forward_errors == ["URLError"]
+        assert json.loads(dead.state.snapshot() and json.dumps(dead.state.snapshot()))["forward_errors"] == ["URLError"]
+    finally:
+        dead.stop()

@@ -94,6 +94,8 @@ class Assertion:
         self.violations = 0
         self.observed: set[str] = set()
         self.checks: list[dict] = []
+        self.upstream_status: list[int] = []   # HTTP status of each forwarded request
+        self.forward_errors: list[str] = []    # exception class names, never messages
 
     @property
     def verdict(self) -> str:
@@ -115,6 +117,8 @@ class Assertion:
             "expected": sorted(self.expected),
             "observed": sorted(self.observed),
             "checks": self.checks,
+            "upstream_status": list(self.upstream_status),
+            "forward_errors": list(self.forward_errors),
         }
 
     def save(self) -> None:
@@ -174,6 +178,7 @@ def make_handler(state: Assertion, upstream: str, mode_ref: dict):
                 with urllib.request.urlopen(
                     request, context=ssl.create_default_context()
                 ) as response:
+                    state.upstream_status.append(response.status)
                     self.send_response(response.status)
                     for key, value in response.headers.items():
                         if key.lower() not in _SKIP_RESPONSE_HEADERS:
@@ -190,7 +195,15 @@ def make_handler(state: Assertion, upstream: str, mode_ref: dict):
                         self.wfile.flush()
                     self.wfile.write(b"0\r\n\r\n")
             except urllib.error.HTTPError as error:
+                state.upstream_status.append(error.code)
                 self._send(error.code, error.read())
+            except Exception as error:  # network/TLS/protocol failure: surface, never crash
+                state.forward_errors.append(error.__class__.__name__)
+                state.save()
+                self._send(502, json.dumps({"type": "error", "error": {
+                    "type": "api_error",
+                    "message": f"tool-boundary proxy could not reach upstream ({error.__class__.__name__})",
+                }}).encode())
 
         def do_GET(self):  # noqa: N802
             state.requests += 1

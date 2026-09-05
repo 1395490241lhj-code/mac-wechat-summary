@@ -316,3 +316,44 @@ def test_full_run_exit_zero_prints_digest_only(cfg, runner_with):
     status = run_shadow(runner_with(run), out=out, err=err, install_signals=False)
     assert status == 0 and out.getvalue().strip() == "微信摘要\n…"
     assert "verified 4 read-only tools (claude)" in err.getvalue()
+
+
+# --- diagnostics (sanitised) ------------------------------------------------
+
+OBSERVED_ERROR_ENVELOPE = {  # shape emitted by Claude Code 2.1.238 on an API error
+    "type": "result", "subtype": "success", "is_error": True, "duration_api_ms": 0,
+    "num_turns": 1, "stop_reason": "stop_sequence", "session_id": "s-err",
+    "total_cost_usd": 0, "terminal_reason": "api_error", "api_error_status": 401,
+    "permission_denials": [], "result": "Not logged in · Please run /login",
+}
+
+
+def test_api_error_envelope_yields_sanitised_diagnostics(cfg, runner_with):
+    runner = runner_with(FakeRun(raw_stdout=json.dumps(OBSERVED_ERROR_ENVELOPE), rc=1))
+    runner.assert_tool_boundary()
+    out = runner.digest()
+    assert out.returncode == 1 and out.text == ""
+    d = out.diagnostics
+    assert d["is_error"] is True and d["terminal_reason"] == "api_error"
+    assert d["api_error_status"] == 401 and d["num_turns"] == 1
+    assert d["error_text"].startswith("Not logged in") and d["stdout_json"] is True
+    assert d["proxy"]["tools_bearing"] == 1 and "upstream_status" in d["proxy"]
+    assert "session_id" not in d
+
+
+def test_success_diagnostics_never_carry_the_digest(cfg, runner_with):
+    runner = runner_with(FakeRun(result="微信摘要\n🔴 需要处理\n- 秘密"))
+    runner.assert_tool_boundary()
+    out = runner.digest()
+    assert out.text.startswith("微信摘要")
+    assert "秘密" not in json.dumps(out.diagnostics, ensure_ascii=False)
+    assert "error_text" not in out.diagnostics and "stderr_head" not in out.diagnostics
+
+
+def test_driver_prints_diagnostics_on_failure(cfg, runner_with):
+    runner = runner_with(FakeRun(raw_stdout=json.dumps(OBSERVED_ERROR_ENVELOPE), rc=1))
+    err = io.StringIO()
+    status = run_shadow(runner, out=io.StringIO(), err=err, install_signals=False)
+    assert status == 1
+    line = next(l for l in err.getvalue().splitlines() if l.startswith("run failed"))
+    assert '"api_error_status": 401' in line and '"terminal_reason": "api_error"' in line
