@@ -53,7 +53,7 @@ Then read only what the task needs. **Do not read all ten notes by default.**
 |---|---|
 | Capture / app / permissions / architecture | `Architecture.md`, `Constraints.md`, cited Decisions and Findings |
 | Experiment / R&D | `Experiments.md`, `Findings.md`, `Rejected Approaches.md`, `Constraints.md`, cited Decisions |
-| Hermes / MCP / agent safety | `Architecture.md`, `Findings.md`, `Constraints.md`, relevant Experiments and Decisions |
+| Agent backend (Hermes, Claude) / MCP / agent safety | `Architecture.md`, `Findings.md`, `Constraints.md`, relevant Experiments and Decisions |
 | Historical / provenance | `Sources.md` **as an index**, plus the specific `E-*` and commits it names |
 
 ### Reopening a previously closed route — mandatory reading
@@ -212,6 +212,9 @@ explicit new technical or product reason.**
   explicit reconsideration of that test and decision boundary.
 - **Hermes Desktop** — deferred, not rejected. Patched-clone evidence is
   provisional.
+- **Agent backend** — pluggable since H6 (`shadow/agent_runner.py`). Hermes is
+  an optional backend, not the critical path; the Claude backend is
+  synthetic-only until its gates in `docs/v2/H6_*.md` are sealed.
 - **Native `WeChatDataAdapter`** — option C remains open behind legal and
   provenance review.
 - **Coverage / history above the fold** — a major open R&D question. Do not
