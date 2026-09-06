@@ -23,6 +23,7 @@ Git history and the reports together — never one old phase report in isolation
 9. `H5A_REAL_DATA_CANARY.md` — first real-data canary
 10. `DB_READER_INTERFACE_GATE.md` — synthetic database-reader interface gate (counts only)
 11. `READER_BOUNDARY_INTEGRATION.md` — the runtime-neutral message-source boundary in the bridge
+12. `READER_SOURCE_ACTIVATION.md` — explicit source selection from the agent path
 
 ## Known supersessions
 
@@ -37,6 +38,10 @@ Verified from the documents themselves:
 - **`H4_7` is explicitly provisional.** Its own verdict is *"PROVISIONAL PASS —
   patched runtime only"*, produced on a disposable clone; it is not
   stock-runtime acceptance.
+- **The runner's source reachability changed.** `READER_BOUNDARY_INTEGRATION.md`
+  says the runner "needed no change and received none", which was correct at
+  `8c4138e`. `READER_SOURCE_ACTIVATION.md` records the change it then received:
+  the agent path can select a source, but only on an explicit, validated request.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

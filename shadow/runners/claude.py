@@ -69,6 +69,18 @@ from tool_boundary_proxy import ToolBoundaryProxy
 BRIDGE_SERVER = "wechat_companion"
 BRIDGE_TOOLS = ("status", "list_conversations", "get_messages", "get_recent_messages")
 
+#: The bridge's message-source activation variables, as it declares them in
+#: ``bridge/message_source.py``. They are repeated here rather than imported so
+#: that this runner keeps no import-time dependency on the bridge it launches
+#: as a subprocess; a test compares the two definitions and fails if they drift.
+SOURCE_VISUAL = "visual"
+SOURCE_DATABASE = "database"
+KNOWN_SOURCES = frozenset({SOURCE_VISUAL, SOURCE_DATABASE})
+MESSAGE_SOURCE_ENV = "WECHAT_COMPANION_MESSAGE_SOURCE"
+READER_BIN_ENV = "WECHAT_COMPANION_READER_BIN"
+READER_CONFIG_ENV = "WECHAT_COMPANION_READER_CONFIG"
+READER_TIMEOUT_ENV = "WECHAT_COMPANION_READER_TIMEOUT"
+
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_SKILL = Path(".hermes/skills/wechat-digest/SKILL.md")
 PROBE_PROMPT = "boundary-probe"
@@ -96,6 +108,18 @@ class ClaudeConfig:
     proxy_port: int = 8823
     extra_env: dict = field(default_factory=dict)
     timeout: int = 900
+
+    # --- Message-source activation, off unless asked for ---------------------
+    #
+    # ``None`` means the run says nothing about sources, so the bridge uses the
+    # visual store it has always used. Any other value is a deliberate request
+    # and is validated before the run starts, because the one outcome worse
+    # than refusing to run is running against a different source than the
+    # operator asked for.
+    message_source: str | None = None
+    reader_bin: Path | None = None       # injected; never searched for
+    reader_config: Path | None = None
+    reader_timeout: float | None = None
 
     @property
     def config_dir(self) -> Path:
@@ -139,6 +163,46 @@ class ClaudeConfig:
         env.update(self.extra_env)
         return env
 
+    def source_env(self) -> dict:
+        """Activation variables for a deliberately selected source.
+
+        Empty unless a source was requested, which is what keeps the visual
+        store the default: a run that says nothing adds nothing, and the bridge
+        falls back to nothing because there is nothing to fall back from.
+
+        A request that cannot be honoured raises here, before the run starts.
+        Omitting the variables instead would launch a run that reads the visual
+        store while the operator believes they selected another source, and a
+        silent substitution of one reader's coverage for another's is the exact
+        failure the source boundary exists to prevent.
+        """
+        if self.message_source is None:
+            return {}
+        selected = self.message_source.strip().lower()
+        if selected not in KNOWN_SOURCES:
+            raise ShadowError(
+                f"unknown message source {selected!r}; "
+                f"expected one of {sorted(KNOWN_SOURCES)}"
+            )
+        if selected == SOURCE_VISUAL:
+            # Naming the default explicitly is allowed and is not the same as
+            # saying nothing: it pins the source against a changed default.
+            return {MESSAGE_SOURCE_ENV: SOURCE_VISUAL}
+        if self.reader_bin is None:
+            raise ShadowError(
+                "the database message source requires an explicit reader "
+                "executable; it is never searched for or discovered"
+            )
+        env = {
+            MESSAGE_SOURCE_ENV: SOURCE_DATABASE,
+            READER_BIN_ENV: str(self.reader_bin),
+        }
+        if self.reader_config is not None:
+            env[READER_CONFIG_ENV] = str(self.reader_config)
+        if self.reader_timeout is not None:
+            env[READER_TIMEOUT_ENV] = str(self.reader_timeout)
+        return env
+
     def mcp_config_document(self) -> dict:
         """Exactly one server. Its env carries the bridge's double opt-in."""
         return {"mcpServers": {BRIDGE_SERVER: {
@@ -148,6 +212,7 @@ class ClaudeConfig:
             "env": {
                 "WECHAT_COMPANION_ALLOW_AGENT_READ": "1",
                 "WECHAT_COMPANION_DB_PATH": str(self.db_path),
+                **self.source_env(),
             },
         }}}
 

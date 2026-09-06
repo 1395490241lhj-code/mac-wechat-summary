@@ -39,6 +39,10 @@ from typing import Any, Final
 
 try:
     from message_source import (
+        MESSAGE_SOURCE_ENV as _MESSAGE_SOURCE_ENV,
+        READER_BIN_ENV as _READER_BIN_ENV,
+        READER_CONFIG_ENV as _READER_CONFIG_ENV,
+        READER_TIMEOUT_ENV as _READER_TIMEOUT_ENV,
         SOURCE_DATABASE,
         SOURCE_VISUAL,
         MessageSource,
@@ -50,6 +54,10 @@ try:
 except ImportError:  # pragma: no cover - launched by path from another cwd
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from message_source import (
+        MESSAGE_SOURCE_ENV as _MESSAGE_SOURCE_ENV,
+        READER_BIN_ENV as _READER_BIN_ENV,
+        READER_CONFIG_ENV as _READER_CONFIG_ENV,
+        READER_TIMEOUT_ENV as _READER_TIMEOUT_ENV,
         SOURCE_DATABASE,
         SOURCE_VISUAL,
         MessageSource,
@@ -79,19 +87,18 @@ ALLOW_READ_ENV: Final = "WECHAT_COMPANION_ALLOW_AGENT_READ"
 DB_PATH_ENV: Final = "WECHAT_COMPANION_DB_PATH"
 
 # --- Source selection --------------------------------------------------------
+#
+# The variable names come from ``message_source`` so that this reader and any
+# launcher that activates a source cannot drift apart. Absent selection keeps
+# the historical behaviour: the store the macOS app fills from the visual
+# capture path. Selecting the database source requires its own explicit
+# configuration; there is no automatic selection, no discovery, and no fallback
+# in either direction.
 
-#: Which reader answers. Absent or ``visual`` keeps the historical behaviour:
-#: the store the macOS app fills from the visual capture path. ``database``
-#: selects an external reader and requires its own explicit configuration.
-#: There is no automatic selection and no fallback in either direction.
-MESSAGE_SOURCE_ENV: Final = "WECHAT_COMPANION_MESSAGE_SOURCE"
-
-#: Configuration for the external reader, used only when the database source is
-#: selected. The executable is never searched for: an absent path means the
-#: database source is unavailable, and the visual path is unaffected.
-READER_BIN_ENV: Final = "WECHAT_COMPANION_READER_BIN"
-READER_CONFIG_ENV: Final = "WECHAT_COMPANION_READER_CONFIG"
-READER_TIMEOUT_ENV: Final = "WECHAT_COMPANION_READER_TIMEOUT"
+MESSAGE_SOURCE_ENV: Final = _MESSAGE_SOURCE_ENV
+READER_BIN_ENV: Final = _READER_BIN_ENV
+READER_CONFIG_ENV: Final = _READER_CONFIG_ENV
+READER_TIMEOUT_ENV: Final = _READER_TIMEOUT_ENV
 DEFAULT_READER_TIMEOUT: Final = 30.0
 
 # --- Limits ------------------------------------------------------------------
@@ -444,7 +451,11 @@ def status() -> dict[str, Any]:
         "agent_read_enabled": os.environ.get(ALLOW_READ_ENV) == "1",
         "database_configured": bool(os.environ.get(DB_PATH_ENV, "").strip()),
         "supported_schema_versions": sorted(SUPPORTED_SCHEMA_VERSIONS),
+        # Which reader is selected, and whether each one's configuration is
+        # present at all. Both are booleans and a name: a configured location
+        # is never disclosed, only the fact that one was supplied.
         "source": selected_source_name(),
+        "reader_configured": bool(os.environ.get(READER_BIN_ENV, "").strip()),
     }
     try:
         report = active_source().status()

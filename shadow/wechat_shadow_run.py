@@ -84,6 +84,21 @@ def build_parser() -> argparse.ArgumentParser:
     claude.add_argument("--skill", type=Path)
     claude.add_argument("--model")
     claude.add_argument("--proxy-port", type=int, default=8823)
+
+    source = ap.add_argument_group(
+        "message source (claude backend)",
+        "Off unless asked for. Without these the bridge reads the visual "
+        "capture store, exactly as it always has.")
+    source.add_argument("--message-source", choices=["visual", "database"],
+                        help="select the bridge's reader explicitly; omitted "
+                             "means the visual store")
+    source.add_argument("--reader-bin", type=Path,
+                        help="external reader executable, required by "
+                             "--message-source database; never searched for")
+    source.add_argument("--reader-config", type=Path,
+                        help="optional configuration file for the reader")
+    source.add_argument("--reader-timeout", type=float,
+                        help="optional reader timeout in seconds")
     return ap
 
 
@@ -104,6 +119,14 @@ def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
             if args.agent_backend != "claude":
                 raise ShadowError("--claude-oauth-from-keychain applies to the claude backend only")
             extra.update(read_keychain_token())
+        source_flags = (args.message_source, args.reader_bin, args.reader_config,
+                        args.reader_timeout)
+        if any(flag is not None for flag in source_flags) and args.agent_backend != "claude":
+            raise ShadowError("--message-source and --reader-* apply to the claude backend only")
+        if args.message_source is None and args.reader_bin is not None:
+            # Configuring a reader without selecting it would read the visual
+            # store while looking like it had been asked not to.
+            raise ShadowError("--reader-bin requires --message-source database")
     except ShadowError as exc:
         ap.error(str(exc))
     if args.agent_backend == "hermes":
@@ -126,7 +149,15 @@ def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
         db_path=args.db_path, skill=skill, isolated_home=args.isolated_home,
         model=args.model or DEFAULT_MODEL, proxy_port=args.proxy_port,
         extra_env=extra, timeout=args.timeout,
+        message_source=args.message_source, reader_bin=args.reader_bin,
+        reader_config=args.reader_config, reader_timeout=args.reader_timeout,
     )
+    try:
+        # Validate the request now: a run must never start believing it
+        # selected one reader while the bridge would use another.
+        cfg.source_env()
+    except ShadowError as exc:
+        ap.error(str(exc))
     return ClaudeRunner(cfg)
 
 

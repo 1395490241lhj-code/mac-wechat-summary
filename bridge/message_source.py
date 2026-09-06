@@ -41,6 +41,37 @@ SOURCE_DATABASE: str = "database"
 
 SOURCE_NAMES: frozenset[str] = frozenset({SOURCE_VISUAL, SOURCE_DATABASE})
 
+# --- Activation ---------------------------------------------------------------
+#
+# The names of the variables that select and configure a source live here, in
+# the one module that depends on nothing, so that the bridge which reads them
+# and any launcher which writes them agree by construction rather than by two
+# copies of a string. A launcher that cannot import this module keeps its own
+# copy and a test compares the two.
+
+#: Selects the source. Absent or ``visual`` is the default and is the only
+#: value that needs no further configuration.
+MESSAGE_SOURCE_ENV: str = "WECHAT_COMPANION_MESSAGE_SOURCE"
+
+#: The external reader executable. Always injected, never discovered: there is
+#: no search path, no default location, and no candidate list anywhere.
+READER_BIN_ENV: str = "WECHAT_COMPANION_READER_BIN"
+
+#: Optional configuration file handed to the external reader.
+READER_CONFIG_ENV: str = "WECHAT_COMPANION_READER_CONFIG"
+
+#: Optional per-call timeout in seconds for the external reader.
+READER_TIMEOUT_ENV: str = "WECHAT_COMPANION_READER_TIMEOUT"
+
+#: Every variable that selects or configures a non-default source. A launcher
+#: that passes none of these gets the visual store, which is the point.
+ACTIVATION_ENV_NAMES: frozenset[str] = frozenset({
+    MESSAGE_SOURCE_ENV,
+    READER_BIN_ENV,
+    READER_CONFIG_ENV,
+    READER_TIMEOUT_ENV,
+})
+
 
 class MessageSourceError(Exception):
     """A source cannot answer, and will not guess.

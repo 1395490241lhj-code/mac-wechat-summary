@@ -427,6 +427,103 @@ def test_an_unrecognised_source_fails_closed(monkeypatch):
     assert result["state"] == "source_unknown"
 
 
+def make_store(tmp_path: Path) -> Path:
+    """A populated synthetic store, so a fallback would be visible if it happened."""
+    import sqlite3
+
+    path = tmp_path / "messages.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "title TEXT NOT NULL UNIQUE, first_seen_at REAL NOT NULL, "
+        "last_seen_at REAL NOT NULL);"
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "conversation_id INTEGER NOT NULL, sequence INTEGER NOT NULL, "
+        "sender TEXT, ownership TEXT NOT NULL, visible_time TEXT, text TEXT, "
+        "kind TEXT NOT NULL, confidence REAL NOT NULL, "
+        "first_observed_at REAL NOT NULL);"
+        "INSERT INTO conversations (title, first_seen_at, last_seen_at) "
+        "VALUES ('store fixture chat', 1.0, 2.0);"
+        "INSERT INTO messages (conversation_id, sequence, sender, ownership, "
+        "visible_time, text, kind, confidence, first_observed_at) "
+        "VALUES (1, 1, 'store fixture sender', 'other', '09:00', "
+        "'store fixture message', 'text', 0.9, 1.0);"
+    )
+    connection.execute("PRAGMA user_version = 1;")
+    connection.commit()
+    connection.close()
+    return path
+
+
+@pytest.mark.parametrize("broken", ["absent", "malformed", "failing"])
+def test_a_failing_database_source_is_never_served_by_the_store(
+    tmp_path, monkeypatch, broken
+):
+    """The load-bearing test: no silent fallback, even with a working store.
+
+    Both sources are fully configured and the store has content. If a failure
+    on the selected source were ever answered by the other one, these reads
+    would succeed and quietly carry visual rows under a database selection.
+    """
+    if broken == "absent":
+        reader = tmp_path / "not-installed"
+    elif broken == "malformed":
+        reader = make_reader(tmp_path, {"doctor": "{", "sessions": "{",
+                                        "history": "{"})
+    else:
+        reader = make_reader(tmp_path, {
+            "doctor": json.dumps({"ok": False, "error": {"code": "not_ready"}}),
+            "sessions": json.dumps({"ok": False, "error": {"code": "not_ready"}}),
+            "history": json.dumps({"ok": False, "error": {"code": "not_ready"}}),
+        }, exit_code=1)
+
+    monkeypatch.setenv(bridge.ALLOW_READ_ENV, "1")
+    monkeypatch.setenv(bridge.DB_PATH_ENV, str(make_store(tmp_path)))
+    monkeypatch.setenv(bridge.MESSAGE_SOURCE_ENV, ms.SOURCE_DATABASE)
+    monkeypatch.setenv(bridge.READER_BIN_ENV, str(reader))
+
+    conversations = call(bridge.list_conversations)
+    recent = call(bridge.get_recent_messages, since_observed_at=0)
+    reported = call(bridge.status)
+
+    for result in (conversations, recent):
+        assert result["ok"] is False
+        assert result["source"] == ms.SOURCE_DATABASE
+        assert "conversations" not in result and "messages" not in result
+        assert "store fixture" not in repr(result)
+    # status reports the failure against the selected source, not the store's.
+    assert reported["ok"] is False
+    assert reported["source"] == ms.SOURCE_DATABASE
+    assert "conversation_count" not in reported
+    assert "store fixture" not in repr(reported)
+
+
+def test_status_names_the_active_source_without_exposing_a_path(tmp_path, monkeypatch):
+    reader = make_reader(tmp_path, READY_REPLIES)
+    monkeypatch.setenv(bridge.ALLOW_READ_ENV, "1")
+    monkeypatch.setenv(bridge.MESSAGE_SOURCE_ENV, ms.SOURCE_DATABASE)
+    monkeypatch.setenv(bridge.READER_BIN_ENV, str(reader))
+
+    reported = call(bridge.status)
+
+    assert reported["ok"] is True
+    assert reported["source"] == ms.SOURCE_DATABASE
+    assert reported["reader_configured"] is True
+    # Availability is a boolean and a name. No location is ever disclosed.
+    serialized = repr(reported)
+    assert str(reader) not in serialized
+    assert str(tmp_path) not in serialized
+
+
+def test_status_on_the_default_path_reports_no_reader_configured(monkeypatch):
+    monkeypatch.setenv(bridge.ALLOW_READ_ENV, "1")
+
+    reported = call(bridge.status)
+
+    assert reported["source"] == ms.SOURCE_VISUAL
+    assert reported["reader_configured"] is False
+
+
 def test_a_missing_reader_does_not_disturb_the_visual_path(tmp_path, monkeypatch):
     """The database source being broken must not degrade the store path."""
     monkeypatch.setenv(bridge.ALLOW_READ_ENV, "1")
