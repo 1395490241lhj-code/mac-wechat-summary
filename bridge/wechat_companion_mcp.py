@@ -18,6 +18,15 @@ strictly a reader:
 Privacy: stdout belongs to the MCP protocol alone. Diagnostics go to stderr and
 are limited to counts, states and error categories -- never a chat title, a
 sender, or message text.
+
+The four tools no longer read SQLite directly. They ask a ``MessageSource``,
+and the store this file has always read is one such source. A second source can
+therefore exist without any tool, the agent runner, or the skill changing: the
+tool names, their arguments and the shape of a message are identical whichever
+source answered. Which source answered is reported on the response envelope,
+because a coverage difference between readers must never be silent. Selection
+is explicit and there is no fallback between sources: if the selected one
+cannot answer, the request fails rather than being quietly served by the other.
 """
 
 from __future__ import annotations
@@ -27,6 +36,28 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from typing import Any, Final
+
+try:
+    from message_source import (
+        SOURCE_DATABASE,
+        SOURCE_VISUAL,
+        MessageSource,
+        MessageSourceError,
+        NormalizedConversation,
+        NormalizedMessage,
+        SourceStatus,
+    )
+except ImportError:  # pragma: no cover - launched by path from another cwd
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from message_source import (
+        SOURCE_DATABASE,
+        SOURCE_VISUAL,
+        MessageSource,
+        MessageSourceError,
+        NormalizedConversation,
+        NormalizedMessage,
+        SourceStatus,
+    )
 
 try:  # MCP SDK >= 2.0
     from mcp.server import MCPServer as _Server
@@ -46,6 +77,22 @@ REQUIRED_TABLES: Final[frozenset[str]] = frozenset({"conversations", "messages"}
 
 ALLOW_READ_ENV: Final = "WECHAT_COMPANION_ALLOW_AGENT_READ"
 DB_PATH_ENV: Final = "WECHAT_COMPANION_DB_PATH"
+
+# --- Source selection --------------------------------------------------------
+
+#: Which reader answers. Absent or ``visual`` keeps the historical behaviour:
+#: the store the macOS app fills from the visual capture path. ``database``
+#: selects an external reader and requires its own explicit configuration.
+#: There is no automatic selection and no fallback in either direction.
+MESSAGE_SOURCE_ENV: Final = "WECHAT_COMPANION_MESSAGE_SOURCE"
+
+#: Configuration for the external reader, used only when the database source is
+#: selected. The executable is never searched for: an absent path means the
+#: database source is unavailable, and the visual path is unaffected.
+READER_BIN_ENV: Final = "WECHAT_COMPANION_READER_BIN"
+READER_CONFIG_ENV: Final = "WECHAT_COMPANION_READER_CONFIG"
+READER_TIMEOUT_ENV: Final = "WECHAT_COMPANION_READER_TIMEOUT"
+DEFAULT_READER_TIMEOUT: Final = 30.0
 
 # --- Limits ------------------------------------------------------------------
 
@@ -67,17 +114,14 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
-class BridgeUnavailable(Exception):
+class BridgeUnavailable(MessageSourceError):
     """Raised when the bridge may not or cannot read.
 
     The message is a fixed, content-free explanation, safe to return to a
-    client and safe to log.
+    client and safe to log. It is a ``MessageSourceError`` so that a refusal
+    from the store and a refusal from any other source are handled by one
+    path and reported to a client identically.
     """
-
-    def __init__(self, state: str, detail: str) -> None:
-        super().__init__(detail)
-        self.state = state
-        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -172,9 +216,216 @@ def clamp(value: int | None, default: int, maximum: int) -> int:
     return max(1, min(value, maximum))
 
 
-def unavailable(error: BridgeUnavailable) -> dict[str, Any]:
+def unavailable(error: MessageSourceError) -> dict[str, Any]:
     log(f"request refused: {error.state}")
-    return {"ok": False, "state": error.state, "detail": error.detail}
+    return {
+        "ok": False,
+        "source": selected_source_name(),
+        "state": error.state,
+        "detail": error.detail,
+    }
+
+
+# --- Sources -----------------------------------------------------------------
+
+
+class StoreMessageSource:
+    """The store the macOS app fills from the visual capture path.
+
+    This is the reader this bridge has always been. The statements, the
+    ordering, the clamping and the two opt-ins are unchanged; they have only
+    moved behind the same interface every other source implements.
+    """
+
+    name = SOURCE_VISUAL
+
+    def status(self) -> SourceStatus:
+        try:
+            connection, version = open_verified()
+        except BridgeUnavailable as error:
+            return SourceStatus(
+                source=self.name, ready=False, state=error.state, detail=error.detail
+            )
+        try:
+            conversations = connection.execute(
+                "SELECT COUNT(*) FROM conversations;"
+            ).fetchone()[0]
+            messages = connection.execute(
+                "SELECT COUNT(*) FROM messages;"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        return SourceStatus(
+            source=self.name,
+            ready=True,
+            state="ready",
+            schema_version=version,
+            conversation_count=int(conversations),
+            message_count=int(messages),
+        )
+
+    def list_conversations(self, limit: int) -> list[NormalizedConversation]:
+        connection, _ = open_verified()
+        try:
+            rows = connection.execute(
+                """
+                SELECT id, title, first_seen_at, last_seen_at
+                FROM conversations
+                ORDER BY last_seen_at DESC, id DESC
+                LIMIT ?;
+                """,
+                (limit,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            NormalizedConversation(
+                id=row["id"],
+                title=row["title"],
+                first_seen_at=row["first_seen_at"],
+                last_seen_at=row["last_seen_at"],
+                source=self.name,
+            )
+            for row in rows
+        ]
+
+    def _message(self, row: sqlite3.Row) -> NormalizedMessage:
+        """Only the stored structured fields.
+
+        There is deliberately no image, no bubble geometry, no provider detail
+        and no SQLite internal here; `normalizedBounds` is not even persisted.
+        """
+        return NormalizedMessage(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            sequence=row["sequence"],
+            sender=row["sender"],
+            ownership=row["ownership"],
+            # The string WeChat displayed. Not a timestamp; never filtered on.
+            visible_time=row["visible_time"],
+            text=row["text"],
+            kind=row["kind"],
+            confidence=row["confidence"],
+            # When the message was first seen on screen, not when it was sent.
+            first_observed_at=row["first_observed_at"],
+            source=self.name,
+        )
+
+    def get_messages(
+        self,
+        conversation_id: int,
+        limit: int,
+        before_sequence: int | None = None,
+    ) -> list[NormalizedMessage]:
+        connection, _ = open_verified()
+        try:
+            # Newest-first with the cap applied, then reversed, so a limited
+            # read returns the most recent window rather than the oldest one.
+            if before_sequence is None:
+                rows = connection.execute(
+                    """
+                    SELECT id, conversation_id, sequence, sender, ownership,
+                           visible_time, text, kind, confidence, first_observed_at
+                    FROM messages WHERE conversation_id = ?
+                    ORDER BY sequence DESC LIMIT ?;
+                    """,
+                    (conversation_id, limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT id, conversation_id, sequence, sender, ownership,
+                           visible_time, text, kind, confidence, first_observed_at
+                    FROM messages WHERE conversation_id = ? AND sequence < ?
+                    ORDER BY sequence DESC LIMIT ?;
+                    """,
+                    (conversation_id, int(before_sequence), limit),
+                ).fetchall()
+        finally:
+            connection.close()
+        return [self._message(row) for row in reversed(rows)]
+
+    def get_recent_messages(
+        self, since_observed_at: float, limit: int
+    ) -> list[NormalizedMessage]:
+        connection, _ = open_verified()
+        try:
+            rows = connection.execute(
+                """
+                SELECT id, conversation_id, sequence, sender, ownership,
+                       visible_time, text, kind, confidence, first_observed_at
+                FROM messages WHERE first_observed_at >= ?
+                ORDER BY first_observed_at ASC, conversation_id ASC, sequence ASC
+                LIMIT ?;
+                """,
+                (since_observed_at, limit),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [self._message(row) for row in rows]
+
+
+def selected_source_name() -> str:
+    """Which source is configured, without constructing or contacting it."""
+    configured = os.environ.get(MESSAGE_SOURCE_ENV, "").strip().lower()
+    return configured or SOURCE_VISUAL
+
+
+def build_database_source() -> MessageSource:
+    """Constructs the external reader source from explicit configuration.
+
+    The adapter is imported here rather than at module scope so that the
+    visual path never depends on it being present or importable.
+    """
+    executable = os.environ.get(READER_BIN_ENV, "").strip()
+    if not executable:
+        raise BridgeUnavailable(
+            "reader_not_configured",
+            f"No external reader configured. Set {READER_BIN_ENV} to an explicit path.",
+        )
+    raw_timeout = os.environ.get(READER_TIMEOUT_ENV, "").strip()
+    try:
+        timeout = float(raw_timeout) if raw_timeout else DEFAULT_READER_TIMEOUT
+    except ValueError:
+        timeout = DEFAULT_READER_TIMEOUT
+    try:
+        from rion_reader_adapter import RionReaderAdapter, RionReaderConfig
+    except ImportError as error:  # pragma: no cover - adapter absent
+        raise BridgeUnavailable(
+            "reader_unavailable", "The external reader adapter is not installed."
+        ) from error
+    configuration = os.environ.get(READER_CONFIG_ENV, "").strip() or None
+    return RionReaderAdapter(
+        RionReaderConfig(
+            executable=executable,
+            config_path=configuration,
+            timeout_seconds=max(1.0, timeout),
+        )
+    )
+
+
+def active_source() -> MessageSource:
+    """The one source that will answer this request.
+
+    Selection is explicit. An unrecognised selection fails closed rather than
+    resolving to a default, and no source is ever tried after another one has
+    refused: a silent substitution would present one reader's coverage as the
+    other's.
+    """
+    selected = selected_source_name()
+    if selected == SOURCE_VISUAL:
+        return StoreMessageSource()
+    if selected == SOURCE_DATABASE:
+        # The agent-read opt-in gates every source, not just the store.
+        if os.environ.get(ALLOW_READ_ENV) != "1":
+            raise BridgeUnavailable(
+                "agent_read_disabled",
+                f"Agent read access is off. Set {ALLOW_READ_ENV}=1 to enable it.",
+            )
+        return build_database_source()
+    raise BridgeUnavailable(
+        "source_unknown", "The configured message source is not recognised."
+    )
 
 
 # --- Tools -------------------------------------------------------------------
@@ -193,30 +444,22 @@ def status() -> dict[str, Any]:
         "agent_read_enabled": os.environ.get(ALLOW_READ_ENV) == "1",
         "database_configured": bool(os.environ.get(DB_PATH_ENV, "").strip()),
         "supported_schema_versions": sorted(SUPPORTED_SCHEMA_VERSIONS),
+        "source": selected_source_name(),
     }
     try:
-        connection, version = open_verified()
-    except BridgeUnavailable as error:
+        report = active_source().status()
+    except MessageSourceError as error:
         log(f"status: not ready ({error.state})")
         result.update({"ok": False, "state": error.state, "detail": error.detail})
         return result
-    try:
-        conversations = connection.execute(
-            "SELECT COUNT(*) FROM conversations;"
-        ).fetchone()[0]
-        messages = connection.execute("SELECT COUNT(*) FROM messages;").fetchone()[0]
-    finally:
-        connection.close()
-    result.update(
-        {
-            "ok": True,
-            "state": "ready",
-            "schema_version": version,
-            "conversation_count": int(conversations),
-            "message_count": int(messages),
-        }
-    )
-    log(f"status: ready, {conversations} conversations, {messages} messages")
+    if not report.ready:
+        log(f"status: not ready ({report.state})")
+        result.update(
+            {"ok": False, "state": report.state, "detail": report.detail}
+        )
+        return result
+    result.update({"ok": True, **report.payload()})
+    log(f"status: ready, source {report.source}")
     return result
 
 
@@ -227,58 +470,18 @@ def list_conversations(limit: int | None = None) -> dict[str, Any]:
     Returns identity and observation metadata only. `limit` is clamped to a
     hard cap.
     """
-    try:
-        connection, _ = open_verified()
-    except BridgeUnavailable as error:
-        return unavailable(error)
     capped = clamp(limit, DEFAULT_CONVERSATIONS, MAX_CONVERSATIONS)
     try:
-        rows = connection.execute(
-            """
-            SELECT id, title, first_seen_at, last_seen_at
-            FROM conversations
-            ORDER BY last_seen_at DESC, id DESC
-            LIMIT ?;
-            """,
-            (capped,),
-        ).fetchall()
-    finally:
-        connection.close()
-    log(f"list_conversations: returned {len(rows)} rows (limit {capped})")
+        source = active_source()
+        conversations = source.list_conversations(capped)
+    except MessageSourceError as error:
+        return unavailable(error)
+    log(f"list_conversations: returned {len(conversations)} rows (limit {capped})")
     return {
         "ok": True,
+        "source": source.name,
         "limit": capped,
-        "conversations": [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "first_seen_at": row["first_seen_at"],
-                "last_seen_at": row["last_seen_at"],
-            }
-            for row in rows
-        ],
-    }
-
-
-def _message_payload(row: sqlite3.Row) -> dict[str, Any]:
-    """Only the stored structured fields.
-
-    There is deliberately no image, no bubble geometry, no provider detail and
-    no SQLite internal here; `normalizedBounds` is not even persisted.
-    """
-    return {
-        "id": row["id"],
-        "conversation_id": row["conversation_id"],
-        "sequence": row["sequence"],
-        "sender": row["sender"],
-        "ownership": row["ownership"],
-        # The string WeChat displayed. Not a timestamp; never used for filtering.
-        "visible_time": row["visible_time"],
-        "text": row["text"],
-        "kind": row["kind"],
-        "confidence": row["confidence"],
-        # When the message was first seen on screen, not when it was sent.
-        "first_observed_at": row["first_observed_at"],
+        "conversations": [item.payload() for item in conversations],
     }
 
 
@@ -294,50 +497,26 @@ def get_messages(
     Pass `before_sequence` to page backwards into older messages. Accepts no
     SQL and no filter expression.
     """
-    try:
-        connection, _ = open_verified()
-    except BridgeUnavailable as error:
-        return unavailable(error)
     capped = clamp(limit, DEFAULT_MESSAGES, MAX_MESSAGES)
     try:
         conversation_id = int(conversation_id)
     except (TypeError, ValueError):
-        connection.close()
-        return {"ok": False, "state": "invalid_argument",
+        return {"ok": False, "source": selected_source_name(),
+                "state": "invalid_argument",
                 "detail": "conversation_id must be an integer."}
     try:
-        # Newest-first with the cap applied, then reversed, so a limited read
-        # returns the most recent window rather than the oldest one.
-        if before_sequence is None:
-            rows = connection.execute(
-                """
-                SELECT id, conversation_id, sequence, sender, ownership,
-                       visible_time, text, kind, confidence, first_observed_at
-                FROM messages WHERE conversation_id = ?
-                ORDER BY sequence DESC LIMIT ?;
-                """,
-                (conversation_id, capped),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                """
-                SELECT id, conversation_id, sequence, sender, ownership,
-                       visible_time, text, kind, confidence, first_observed_at
-                FROM messages WHERE conversation_id = ? AND sequence < ?
-                ORDER BY sequence DESC LIMIT ?;
-                """,
-                (conversation_id, int(before_sequence), capped),
-            ).fetchall()
-    finally:
-        connection.close()
-    ordered = list(reversed(rows))
+        source = active_source()
+        ordered = source.get_messages(conversation_id, capped, before_sequence)
+    except MessageSourceError as error:
+        return unavailable(error)
     log(f"get_messages: returned {len(ordered)} rows (limit {capped})")
     return {
         "ok": True,
+        "source": source.name,
         "conversation_id": conversation_id,
         "limit": capped,
-        "next_before_sequence": ordered[0]["sequence"] if ordered else None,
-        "messages": [_message_payload(row) for row in ordered],
+        "next_before_sequence": ordered[0].sequence if ordered else None,
+        "messages": [item.payload() for item in ordered],
     }
 
 
@@ -351,36 +530,25 @@ def get_recent_messages(
     screen. It deliberately never filters on `visible_time`, which is a display
     string like "昨天 14:30" and carries no reliable date.
     """
-    try:
-        connection, _ = open_verified()
-    except BridgeUnavailable as error:
-        return unavailable(error)
     capped = clamp(limit, DEFAULT_MESSAGES, MAX_MESSAGES)
     try:
         since = float(since_observed_at)
     except (TypeError, ValueError):
-        connection.close()
-        return {"ok": False, "state": "invalid_argument",
+        return {"ok": False, "source": selected_source_name(),
+                "state": "invalid_argument",
                 "detail": "since_observed_at must be a Unix timestamp."}
     try:
-        rows = connection.execute(
-            """
-            SELECT id, conversation_id, sequence, sender, ownership,
-                   visible_time, text, kind, confidence, first_observed_at
-            FROM messages WHERE first_observed_at >= ?
-            ORDER BY first_observed_at ASC, conversation_id ASC, sequence ASC
-            LIMIT ?;
-            """,
-            (since, capped),
-        ).fetchall()
-    finally:
-        connection.close()
+        source = active_source()
+        rows = source.get_recent_messages(since, capped)
+    except MessageSourceError as error:
+        return unavailable(error)
     log(f"get_recent_messages: returned {len(rows)} rows (limit {capped})")
     return {
         "ok": True,
+        "source": source.name,
         "since_observed_at": since,
         "limit": capped,
-        "messages": [_message_payload(row) for row in rows],
+        "messages": [item.payload() for item in rows],
     }
 
 

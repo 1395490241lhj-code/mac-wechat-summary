@@ -22,6 +22,7 @@ Git history and the reports together — never one old phase report in isolation
 8. `H6_AGENT_RUNNER_DECOUPLING.md` — pluggable agent runtime
 9. `H5A_REAL_DATA_CANARY.md` — first real-data canary
 10. `DB_READER_INTERFACE_GATE.md` — synthetic database-reader interface gate (counts only)
+11. `READER_BOUNDARY_INTEGRATION.md` — the runtime-neutral message-source boundary in the bridge
 
 ## Known supersessions
 
