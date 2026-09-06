@@ -19,6 +19,9 @@ Git history and the reports together — never one old phase report in isolation
 5. `H4_7_DESKTOP_SECURITY_REPORT.md` — Desktop security report
 6. `H5_UI_GATES_PENDING.md` — pending Desktop UI gates
 7. `H5_PRIVACY_DECISIONS.md` — accepted privacy decisions
+8. `H6_AGENT_RUNNER_DECOUPLING.md` — pluggable agent runtime
+9. `H5A_REAL_DATA_CANARY.md` — first real-data canary
+10. `DB_READER_INTERFACE_GATE.md` — synthetic database-reader interface gate (counts only)
 
 ## Known supersessions
 
