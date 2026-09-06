@@ -24,6 +24,7 @@ Git history and the reports together — never one old phase report in isolation
 10. `DB_READER_INTERFACE_GATE.md` — synthetic database-reader interface gate (counts only)
 11. `READER_BOUNDARY_INTEGRATION.md` — the runtime-neutral message-source boundary in the bridge
 12. `READER_SOURCE_ACTIVATION.md` — explicit source selection from the agent path
+13. `M1_MEMORY_FOUNDATION.md` — source-neutral local memory store, coverage model and FTS index (adds no MCP tool)
 
 ## Known supersessions
 
