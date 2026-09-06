@@ -25,6 +25,7 @@ Git history and the reports together — never one old phase report in isolation
 11. `READER_BOUNDARY_INTEGRATION.md` — the runtime-neutral message-source boundary in the bridge
 12. `READER_SOURCE_ACTIVATION.md` — explicit source selection from the agent path
 13. `M1_MEMORY_FOUNDATION.md` — source-neutral local memory store, coverage model and FTS index (adds no MCP tool)
+14. `M1_1_MEMORY_HARDENING.md` — logical identity over source observations (schema v2), the app-owned consent state, and the multi-source coverage composition rule
 
 ## Known supersessions
 
@@ -43,6 +44,11 @@ Verified from the documents themselves:
   says the runner "needed no change and received none", which was correct at
   `8c4138e`. `READER_SOURCE_ACTIVATION.md` records the change it then received:
   the agent path can select a source, but only on an explicit, validated request.
+- **The M1 consent gap is closed by M1.1.** `M1_MEMORY_FOUNDATION.md` §7
+  records that a Python process could only see a bare preference flag and
+  refused when it was unobservable. `M1_1_MEMORY_HARDENING.md` replaces that
+  with an app-written, versioned consent state; the refusal on absence stands,
+  but absence is now "no", not "unknown".
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

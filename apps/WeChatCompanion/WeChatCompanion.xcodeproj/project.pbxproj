@@ -25,6 +25,7 @@
 		A00000000000000000000011 /* FrameImageEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001A /* FrameImageEncoder.swift */; };
 		A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001B /* GeminiFrameExtractor.swift */; };
 		A00000000000000000000097 /* RetentionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000097 /* RetentionPolicy.swift */; };
+		A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009A /* LocalPersistenceConsentState.swift */; };
 		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
 		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
 		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
@@ -76,6 +77,7 @@
 		C0000000000000000000001A /* FrameImageEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/FrameImageEncoder.swift; sourceTree = "<group>"; };
 		C0000000000000000000001B /* GeminiFrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiFrameExtractor.swift; sourceTree = "<group>"; };
 		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
+		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
 		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
 		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
@@ -152,6 +154,7 @@
 				C00000000000000000000093 /* MessageStore.swift */,
 				C00000000000000000000094 /* MessageIngestor.swift */,
 				C00000000000000000000097 /* RetentionPolicy.swift */,
+				C0000000000000000000009A /* LocalPersistenceConsentState.swift */,
 				C00000000000000000000098 /* LocalMessageHistory.swift */,
 				C00000000000000000000007 /* Info.plist */,
 			);
@@ -308,6 +311,7 @@
 				A00000000000000000000093 /* MessageStore.swift in Sources */,
 				A00000000000000000000094 /* MessageIngestor.swift in Sources */,
 				A00000000000000000000097 /* RetentionPolicy.swift in Sources */,
+				A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */,
 				A00000000000000000000098 /* LocalMessageHistory.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

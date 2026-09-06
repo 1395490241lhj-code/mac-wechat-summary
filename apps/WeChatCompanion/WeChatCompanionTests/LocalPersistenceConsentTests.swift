@@ -536,3 +536,103 @@ private extension ObservedFrame {
         )
     }
 }
+
+/// The app-owned consent state another local process reads (M1.1).
+///
+/// The state is the app's assertion of the consent, so these tests check that
+/// it is always present once the app has run, always well-formed, always in
+/// step with the flag, and never anything but denial when nothing has been
+/// written. Every defaults suite here is isolated; nothing touches the real
+/// preference domain.
+struct LocalPersistenceConsentStateTests {
+    @Test
+    func absenceIsDenialNotUnknown() {
+        #expect(LocalPersistenceConsentState.load(from: makeDefaults()) == nil)
+    }
+
+    @Test @MainActor
+    func aFreshInstallRecordsAnExplicitNo() {
+        let defaults = makeDefaults()
+        _ = AppModel(consentDefaults: defaults)
+        let state = LocalPersistenceConsentState.load(from: defaults)
+        #expect(state?.allowsLocalMessageStorage == false)
+        #expect(state?.allowsMemoryStorage == false)
+        #expect(state?.generation == 1)
+    }
+
+    @Test @MainActor
+    func grantingWritesTheStateAndAdvancesTheGeneration() async {
+        let defaults = makeDefaults()
+        let model = AppModel(consentDefaults: defaults)
+        await model.setAllowsLocalPersistence(true)
+        let state = LocalPersistenceConsentState.load(from: defaults)
+        #expect(state?.allowsLocalMessageStorage == true)
+        #expect(state?.allowsMemoryStorage == true)
+        #expect(state?.generation == 2)
+    }
+
+    @Test @MainActor
+    func revokingTakesEffectInTheState() async {
+        let defaults = makeDefaults()
+        let model = AppModel(consentDefaults: defaults)
+        await model.setAllowsLocalPersistence(true)
+        await model.setAllowsLocalPersistence(false)
+        let state = LocalPersistenceConsentState.load(from: defaults)
+        #expect(state?.allowsLocalMessageStorage == false)
+        #expect(state?.allowsMemoryStorage == false)
+        #expect(state?.generation == 3)
+        // The flag the app itself reads agrees.
+        #expect(defaults.bool(forKey: AppModel.localPersistenceConsentKey) == false)
+    }
+
+    @Test @MainActor
+    func aStateWrittenByAnOlderBuildIsBroughtUpToDateFromTheFlag() {
+        let defaults = makeDefaults()
+        // An older build stored only the flag.
+        defaults.set(true, forKey: AppModel.localPersistenceConsentKey)
+        _ = AppModel(consentDefaults: defaults)
+        let state = LocalPersistenceConsentState.load(from: defaults)
+        #expect(state?.allowsLocalMessageStorage == true)
+        #expect(state?.generation == 1)
+    }
+
+    @Test
+    func aMalformedStateIsRejectedWholesale() {
+        let missingField: [String: Any] = [
+            "version": 1, "allowsLocalMessageStorage": true, "generation": 1, "updatedAt": 1.0,
+        ]
+        #expect(LocalPersistenceConsentState(dictionary: missingField) == nil)
+        let wrongType: [String: Any] = [
+            "version": 1, "allowsLocalMessageStorage": "yes", "allowsMemoryStorage": true,
+            "generation": 1, "updatedAt": 1.0,
+        ]
+        #expect(LocalPersistenceConsentState(dictionary: wrongType) == nil)
+        let unknownVersion: [String: Any] = [
+            "version": 2, "allowsLocalMessageStorage": true, "allowsMemoryStorage": true,
+            "generation": 1, "updatedAt": 1.0,
+        ]
+        #expect(LocalPersistenceConsentState(dictionary: unknownVersion) == nil)
+        let negativeGeneration: [String: Any] = [
+            "version": 1, "allowsLocalMessageStorage": true, "allowsMemoryStorage": true,
+            "generation": -1, "updatedAt": 1.0,
+        ]
+        #expect(LocalPersistenceConsentState(dictionary: negativeGeneration) == nil)
+    }
+
+    @Test
+    func aMalformedStoredStateIsReplacedByTheNextWrite() {
+        let defaults = makeDefaults()
+        defaults.set(["version": 1, "garbage": true], forKey: LocalPersistenceConsentState.key)
+        let written = LocalPersistenceConsentState.record(allowsLocalMessageStorage: false, in: defaults)
+        #expect(written.generation == 1)
+        #expect(LocalPersistenceConsentState.load(from: defaults) == written)
+    }
+
+    @Test
+    func theStateCarriesNothingButTheContract() {
+        let state = LocalPersistenceConsentState.record(allowsLocalMessageStorage: true, in: makeDefaults())
+        #expect(Set(state.dictionary.keys) == [
+            "version", "allowsLocalMessageStorage", "allowsMemoryStorage", "generation", "updatedAt",
+        ])
+    }
+}

@@ -30,6 +30,7 @@ from typing import Any, Literal
 
 from memory_store import (
     COVERAGE_COMPLETE,
+    ComposedCoverage,
     CoverageVerdict,
     MemoryStore,
     MemoryStoreError,
@@ -87,6 +88,11 @@ class MemoryHit:
     last_observed_at: float
     observation_count: int
     rank: float | None = None
+    #: The logical object this observation was explicitly linked to, or
+    #: ``None`` -- which means "equivalence unknown", not "unique". Kept off
+    #: ``citation()``: a citation points at the observation, and the
+    #: observation is what was actually read.
+    logical_message_id: str | None = None
 
     def citation(self) -> dict[str, Any]:
         """The minimum needed to point back at the original message.
@@ -111,9 +117,15 @@ class MemoryResult:
     """Hits plus what the store is entitled to claim about them."""
 
     hits: tuple[MemoryHit, ...]
+    #: The aggregate verdict. When the query named no source this is composed
+    #: from every source the store knows, and ``source`` is then ``None``.
     coverage: CoverageVerdict
     truncated: bool = False
     query: MemoryQuery | None = field(default=None)
+    #: The per-source evidence behind ``coverage``. Never collapsed: a source
+    #: that covered the window completely is listed as such here even when the
+    #: aggregate is partial because another source was not.
+    coverage_by_source: ComposedCoverage | None = field(default=None)
 
     @property
     def is_empty_and_trustworthy(self) -> bool:
@@ -121,9 +133,14 @@ class MemoryResult:
 
         The one question a caller must ask before writing "no messages". Any
         coverage state other than complete makes an empty result a statement
-        about *us*, not about the conversation.
+        about *us*, not about the conversation -- and when several sources
+        were consulted, every one of them must have covered the window.
         """
-        return not self.hits and self.coverage.status == COVERAGE_COMPLETE
+        if self.hits:
+            return False
+        if self.coverage_by_source is not None:
+            return self.coverage_by_source.trustworthy_empty_possible
+        return self.coverage.status == COVERAGE_COMPLETE
 
 
 class MemoryRetriever:
@@ -182,14 +199,18 @@ class MemoryRetriever:
         ).fetchall()
         truncated = len(rows) > limit
         hits = tuple(_hit(row) for row in rows[:limit])
-        coverage = self._store.assess_coverage(
+        composed = self._store.assess_coverage_composed(
             source=query.source,
             conversation_canonical_id=query.conversation_canonical_id,
             start=query.start,
             end=query.end,
         )
         return MemoryResult(
-            hits=hits, coverage=coverage, truncated=truncated, query=query
+            hits=hits,
+            coverage=composed.as_verdict(),
+            truncated=truncated,
+            query=query,
+            coverage_by_source=composed,
         )
 
     def conversation_messages(
@@ -252,6 +273,7 @@ def _hit(row: Any) -> MemoryHit:
         last_observed_at=row["last_observed_at"],
         observation_count=row["observation_count"],
         rank=row["rank"],
+        logical_message_id=row["logical_message_id"],
     )
 
 

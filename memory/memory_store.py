@@ -60,7 +60,7 @@ from memory_consent import ConsentDecision, MemoryConsentError
 #: Published through SQLite's ``user_version``, the same contract the app store
 #: and the bridge use. An unrecognised version fails closed; the shape is never
 #: inferred from whichever tables happen to exist.
-MEMORY_SCHEMA_VERSION: int = 1
+MEMORY_SCHEMA_VERSION: int = 2
 
 # --- Coverage vocabulary -----------------------------------------------------
 #
@@ -109,7 +109,7 @@ RUN_RUNNING: str = "running"
 RUN_SUCCEEDED: str = "succeeded"
 RUN_FAILED: str = "failed"
 
-_SCHEMA: tuple[str, ...] = (
+_SCHEMA_V1: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS conversations (
         canonical_id            TEXT PRIMARY KEY,
@@ -220,6 +220,76 @@ _SCHEMA: tuple[str, ...] = (
     );
     """,
 )
+
+# --- Version 2: logical identity above source observations -------------------
+#
+# Every row in ``conversations`` and ``messages`` is a *source observation*: one
+# reader's account of one object, identified within that reader. Version 2
+# adds the layer that can say two observations are the same WeChat object --
+# and, far more often, leaves that unsaid. A NULL logical id means "equivalence
+# unknown", which is the default and the honest state for every observation
+# nobody has explicitly linked. Nothing in the migration populates it.
+
+_MIGRATION_1_TO_2: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS logical_conversations (
+        logical_id  TEXT PRIMARY KEY,
+        created_at  REAL NOT NULL,
+        display_name TEXT
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS logical_messages (
+        logical_id              TEXT PRIMARY KEY,
+        logical_conversation_id TEXT REFERENCES logical_conversations (logical_id),
+        created_at              REAL NOT NULL
+    );
+    """,
+    # One row per explicit assertion that an observation belongs to a logical
+    # object. `basis` is fixed vocabulary from LINK_BASES; a link with a basis
+    # the store does not accept is refused, which is how "no text-similarity
+    # merging" is enforced rather than hoped for.
+    """
+    CREATE TABLE IF NOT EXISTS equivalence_links (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind                     TEXT NOT NULL,
+        logical_id               TEXT NOT NULL,
+        observation_canonical_id TEXT NOT NULL,
+        basis                    TEXT NOT NULL,
+        asserted_by              TEXT NOT NULL,
+        asserted_at              REAL NOT NULL,
+        UNIQUE (kind, observation_canonical_id)
+    );
+    """,
+    "ALTER TABLE conversations ADD COLUMN logical_conversation_id TEXT;",
+    "ALTER TABLE messages ADD COLUMN logical_message_id TEXT;",
+    """
+    CREATE INDEX IF NOT EXISTS conversations_by_logical
+        ON conversations (logical_conversation_id);
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS messages_by_logical
+        ON messages (logical_message_id);
+    """,
+)
+
+#: Ordered migrations. ``_MIGRATIONS[n]`` takes a store at version ``n`` to
+#: ``n + 1``. A fresh store runs the v1 schema and then every migration, so
+#: there is exactly one path to the current shape and it is the one an
+#: existing store takes.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {1: _MIGRATION_1_TO_2}
+
+#: Why two observations may be linked. Deliberately short, and deliberately
+#: missing the bases that are tempting and wrong: ``text_similarity``,
+#: ``fingerprint`` and ``timestamp_sender_text`` are not here because none of
+#: them is conclusive, and a merge on any of them would present a guess as an
+#: identity.
+LINK_OPERATOR: str = "operator"
+LINK_SOURCE_PROVIDED: str = "source_provided"
+LINK_BASES: frozenset[str] = frozenset({LINK_OPERATOR, LINK_SOURCE_PROVIDED})
+
+LINK_KIND_CONVERSATION: str = "conversation"
+LINK_KIND_MESSAGE: str = "message"
 
 # Codepoint ranges whose characters are indexed one token per character.
 # Han, Hiragana, Katakana, Hangul syllables, CJK compatibility and the
@@ -333,6 +403,101 @@ class CoverageVerdict:
         return self.status == COVERAGE_COMPLETE
 
 
+@dataclass(frozen=True)
+class ComposedCoverage:
+    """Several sources' verdicts about one window, and what they add up to.
+
+    The per-source verdicts are the evidence and are never collapsed away:
+    ``complete_sources`` names exactly the sources whose word can be taken
+    for the window, whatever the others did. ``status`` is the *aggregate*,
+    and it is the most cautious reading the evidence supports.
+
+    ``trustworthy_empty_possible`` is the only field a caller needs before
+    writing "no messages": it is true when every source consulted covered the
+    window completely, and false the moment any consulted source did not --
+    including when *no* source is complete, however many were partial.
+    """
+
+    status: str
+    per_source: dict[str, CoverageVerdict]
+    complete_sources: tuple[str, ...]
+    partial_sources: tuple[str, ...]
+    unavailable_sources: tuple[str, ...]
+    not_observed_sources: tuple[str, ...]
+
+    @property
+    def trustworthy_empty_possible(self) -> bool:
+        return bool(self.per_source) and len(self.complete_sources) == len(self.per_source)
+
+    @property
+    def is_complete(self) -> bool:
+        return self.status == COVERAGE_COMPLETE
+
+    def as_verdict(self) -> CoverageVerdict:
+        """The aggregate in the single-source shape, for callers that carry one.
+
+        ``source`` is ``None`` when more than one source was consulted -- an
+        aggregate has no single provenance and must not pretend to.
+        """
+        names = tuple(self.per_source)
+        reasons: list[str] = []
+        for name in self.partial_sources + self.unavailable_sources:
+            reasons.extend(f"{name}:{reason}" for reason in self.per_source[name].reasons)
+        for name in self.not_observed_sources:
+            reasons.append(f"{name}:{COVERAGE_NOT_OBSERVED}")
+        return CoverageVerdict(
+            status=self.status,
+            source=names[0] if len(names) == 1 else None,
+            reasons=tuple(dict.fromkeys(reasons)),
+        )
+
+
+def compose_coverage(per_source: dict[str, CoverageVerdict]) -> ComposedCoverage:
+    """The rule for one window observed by several sources.
+
+    Three principles, in order of priority:
+
+    1. **Evidence is never erased.** A source that covered the window
+       completely stays listed as complete no matter what any other source
+       did. An optional reader being partial or unavailable does not make the
+       shipped reader's complete read less complete.
+    2. **The aggregate is the most cautious reading.** It is ``complete`` only
+       when every consulted source is complete; ``partial`` when at least one
+       source actually observed the window (complete or partial) and at least
+       one did not fully; ``unavailable`` when every source that was consulted
+       refused; ``not_observed`` when nothing observed anything.
+    3. **No complete source, no trustworthy empty.** An empty result can only
+       be read as "there are no messages" when every source consulted says it
+       looked and the window was fully within what it saw. Two partial sources
+       do not add up to one complete one.
+
+    There is no fallback here: a source's verdict is its own, and composition
+    never substitutes one source's coverage for another's.
+    """
+    complete = tuple(n for n, v in per_source.items() if v.status == COVERAGE_COMPLETE)
+    partial = tuple(n for n, v in per_source.items() if v.status == COVERAGE_PARTIAL)
+    unavailable = tuple(n for n, v in per_source.items() if v.status == COVERAGE_UNAVAILABLE)
+    not_observed = tuple(n for n, v in per_source.items() if v.status == COVERAGE_NOT_OBSERVED)
+    if not per_source:
+        status = COVERAGE_NOT_OBSERVED
+    elif len(complete) == len(per_source):
+        status = COVERAGE_COMPLETE
+    elif complete or partial:
+        status = COVERAGE_PARTIAL
+    elif unavailable:
+        status = COVERAGE_UNAVAILABLE
+    else:
+        status = COVERAGE_NOT_OBSERVED
+    return ComposedCoverage(
+        status=status,
+        per_source=dict(per_source),
+        complete_sources=complete,
+        partial_sources=partial,
+        unavailable_sources=unavailable,
+        not_observed_sources=not_observed,
+    )
+
+
 @dataclass
 class MemoryStore:
     """An open, consented memory database.
@@ -377,28 +542,40 @@ class MemoryStore:
         return store
 
     def migrate(self) -> int:
-        """Creates the schema, or accepts an existing recognised one.
+        """Brings the file to the current version, or refuses.
 
-        Version 0 means an empty file and is migrated to the current version.
-        The current version is accepted as-is. Anything else fails closed
-        rather than guessing what the shape might be -- the same rule the
-        bridge applies to the app's store.
+        Version 0 is an empty file. Every known version below the current one
+        is stepped forward in order, each step in its own transaction, so an
+        interrupted migration leaves a file at a known version rather than
+        between two. A version above the current one, or a gap in the chain,
+        fails closed rather than guessing what the shape might be -- the same
+        rule the bridge applies to the app's store.
         """
         version = int(self.connection.execute("PRAGMA user_version;").fetchone()[0])
-        if version == MEMORY_SCHEMA_VERSION:
-            return version
-        if version != 0:
+        if version > MEMORY_SCHEMA_VERSION:
             raise MemoryStoreError(
                 "schema_unsupported",
-                "The memory database was written by a different schema version.",
+                "The memory database was written by a newer schema version.",
             )
         try:
-            with self.transaction():
-                for statement in _SCHEMA:
-                    self.connection.execute(statement)
-                self.connection.execute(
-                    f"PRAGMA user_version = {MEMORY_SCHEMA_VERSION};"
-                )
+            if version == 0:
+                with self.transaction():
+                    for statement in _SCHEMA_V1:
+                        self.connection.execute(statement)
+                    self.connection.execute("PRAGMA user_version = 1;")
+                version = 1
+            while version < MEMORY_SCHEMA_VERSION:
+                steps = _MIGRATIONS.get(version)
+                if steps is None:
+                    raise MemoryStoreError(
+                        "schema_unsupported",
+                        "The memory database is at a version with no migration path.",
+                    )
+                with self.transaction():
+                    for statement in steps:
+                        self.connection.execute(statement)
+                    self.connection.execute(f"PRAGMA user_version = {version + 1};")
+                version += 1
         except sqlite3.OperationalError as error:
             # The one build-dependent requirement in this file. Say so plainly
             # instead of creating a store whose index cannot forget anything.
@@ -407,7 +584,7 @@ class MemoryStore:
                 "This SQLite build cannot create the required full-text index "
                 "(FTS5 with contentless_delete, SQLite 3.43 or newer).",
             ) from error
-        return MEMORY_SCHEMA_VERSION
+        return version
 
     @property
     def schema_version(self) -> int:
@@ -602,6 +779,113 @@ class MemoryStore:
             (rowid, canonical_id),
         )
 
+    # -- logical identity ----------------------------------------------------
+
+    def link_observation(
+        self,
+        *,
+        kind: str,
+        observation_canonical_id: str,
+        logical_id: str | None,
+        basis: str,
+        asserted_by: str,
+        now: float,
+    ) -> str:
+        """Asserts that one observation belongs to a logical object.
+
+        With ``logical_id`` ``None`` a new logical object is created for this
+        observation alone -- which changes nothing about what is known, but
+        gives later assertions something to join. With an existing
+        ``logical_id`` the observation joins it. An observation can belong to
+        one logical object; linking it again to a different one is refused
+        rather than silently moved, because that is a contradiction between two
+        explicit assertions and the store cannot pick a side.
+
+        ``basis`` must be one of :data:`LINK_BASES`. There is no basis for
+        "the text looked the same" and none for "same second, same sender,
+        same content", and this method is where that refusal lives.
+        """
+        if kind not in (LINK_KIND_CONVERSATION, LINK_KIND_MESSAGE):
+            raise MemoryStoreError("link_kind_unknown", "Unknown equivalence kind.")
+        if basis not in LINK_BASES:
+            raise MemoryStoreError(
+                "link_basis_refused",
+                "Observations may be linked only on an operator or source-provided "
+                "basis; content similarity is not an identity.",
+            )
+        table = "conversations" if kind == LINK_KIND_CONVERSATION else "messages"
+        column = (
+            "logical_conversation_id" if kind == LINK_KIND_CONVERSATION
+            else "logical_message_id"
+        )
+        row = self.connection.execute(
+            f"SELECT {column} AS current FROM {table} WHERE canonical_id = ?;",
+            (observation_canonical_id,),
+        ).fetchone()
+        if row is None:
+            raise MemoryStoreError(
+                "observation_unknown", "No such observation exists in the store."
+            )
+        if row["current"] is not None and logical_id is not None and row["current"] != logical_id:
+            raise MemoryStoreError(
+                "link_conflict",
+                "The observation is already linked to a different logical object.",
+            )
+        if row["current"] is not None:
+            return row["current"]
+        with self.transaction():
+            if logical_id is None:
+                logical_id = _logical_id(kind, observation_canonical_id)
+                if kind == LINK_KIND_CONVERSATION:
+                    self.connection.execute(
+                        "INSERT INTO logical_conversations (logical_id, created_at)"
+                        " VALUES (?, ?);",
+                        (logical_id, now),
+                    )
+                else:
+                    self.connection.execute(
+                        "INSERT INTO logical_messages (logical_id, created_at)"
+                        " VALUES (?, ?);",
+                        (logical_id, now),
+                    )
+            else:
+                logical_table = (
+                    "logical_conversations" if kind == LINK_KIND_CONVERSATION
+                    else "logical_messages"
+                )
+                exists = self.connection.execute(
+                    f"SELECT 1 FROM {logical_table} WHERE logical_id = ?;", (logical_id,)
+                ).fetchone()
+                if exists is None:
+                    raise MemoryStoreError(
+                        "logical_unknown", "No such logical object exists."
+                    )
+            self.connection.execute(
+                "INSERT INTO equivalence_links (kind, logical_id,"
+                " observation_canonical_id, basis, asserted_by, asserted_at)"
+                " VALUES (?, ?, ?, ?, ?, ?);",
+                (kind, logical_id, observation_canonical_id, basis, asserted_by, now),
+            )
+            self.connection.execute(
+                f"UPDATE {table} SET {column} = ? WHERE canonical_id = ?;",
+                (logical_id, observation_canonical_id),
+            )
+        return logical_id
+
+    def observations_of(self, kind: str, logical_id: str) -> list[sqlite3.Row]:
+        """Every source observation explicitly linked to one logical object."""
+        table = "conversations" if kind == LINK_KIND_CONVERSATION else "messages"
+        column = (
+            "logical_conversation_id" if kind == LINK_KIND_CONVERSATION
+            else "logical_message_id"
+        )
+        return list(
+            self.connection.execute(
+                f"SELECT * FROM {table} WHERE {column} = ? ORDER BY source, canonical_id;",
+                (logical_id,),
+            )
+        )
+
     # -- runs and coverage ---------------------------------------------------
 
     def begin_run(self, run_id: str, source: str, started_at: float) -> None:
@@ -739,6 +1023,44 @@ class MemoryStore:
             )
         return CoverageVerdict(status=COVERAGE_NOT_OBSERVED, source=source)
 
+    def coverage_sources(self) -> list[str]:
+        """Every source that has ever recorded coverage, in a fixed order."""
+        return [
+            row["source"]
+            for row in self.connection.execute(
+                "SELECT DISTINCT source FROM coverage ORDER BY source;"
+            )
+        ]
+
+    def assess_coverage_composed(
+        self,
+        *,
+        source: str | None = None,
+        conversation_canonical_id: str | None = None,
+        start: float | None = None,
+        end: float | None = None,
+    ) -> "ComposedCoverage":
+        """Per-source verdicts and the one aggregate they justify.
+
+        With a source named this is that source alone. Without one it is every
+        source that has ever recorded coverage, each assessed separately, and
+        composed by :func:`compose_coverage`. A source the store has never
+        heard of is not in the answer at all: the store cannot report on what
+        it does not know exists, and an "optional" source that never ran is,
+        to this store, indistinguishable from one that does not exist.
+        """
+        names = [source] if source is not None else self.coverage_sources()
+        per_source = {
+            name: self.assess_coverage(
+                source=name,
+                conversation_canonical_id=conversation_canonical_id,
+                start=start,
+                end=end,
+            )
+            for name in names
+        }
+        return compose_coverage(per_source)
+
     # -- small reads used by tests, retrieval and evidence -------------------
 
     def counts(self) -> dict[str, int]:
@@ -761,6 +1083,16 @@ class MemoryStore:
             "coverage_records": int(
                 self.connection.execute(
                     "SELECT COUNT(*) AS n FROM coverage;"
+                ).fetchone()["n"]
+            ),
+            "logical_conversations": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM logical_conversations;"
+                ).fetchone()["n"]
+            ),
+            "logical_messages": int(
+                self.connection.execute(
+                    "SELECT COUNT(*) AS n FROM logical_messages;"
                 ).fetchone()["n"]
             ),
         }
@@ -816,6 +1148,22 @@ def _windows_overlap(
     return True
 
 
+def _logical_id(kind: str, first_observation: str) -> str:
+    """A logical id seeded by the first observation that founded it.
+
+    Deterministic, so re-running the same explicit assertion on a rebuilt store
+    produces the same logical id. It carries no claim about which source is
+    "right": a logical object founded from a visual observation and one
+    founded from a database observation are equally logical.
+    """
+    import hashlib
+
+    digest = hashlib.blake2b(
+        f"{kind}\x1f{first_observation}".encode("utf-8"), digest_size=16
+    ).hexdigest()
+    return f"log{kind[0]}:{digest}"
+
+
 def new_run_id(now: float | None = None) -> str:
     """A run identifier that sorts by time and carries nothing else.
 
@@ -847,8 +1195,15 @@ __all__ = [
     "TIME_FIRST_OBSERVED",
     "TIME_SOURCE_CREATED",
     "TIME_SOURCE_REPORTED",
+    "LINK_BASES",
+    "LINK_KIND_CONVERSATION",
+    "LINK_KIND_MESSAGE",
+    "LINK_OPERATOR",
+    "LINK_SOURCE_PROVIDED",
+    "ComposedCoverage",
     "CoverageRecord",
     "CoverageVerdict",
+    "compose_coverage",
     "MemoryConsentError",
     "MemoryStore",
     "MemoryStoreError",

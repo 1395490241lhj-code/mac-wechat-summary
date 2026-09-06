@@ -24,6 +24,23 @@ from message_source import (  # noqa: E402
 )
 
 
+def app_state(allowed=True, *, generation=1, version=1, **overrides):
+    """The dictionary the macOS app writes under ``consent.state``.
+
+    Field names and types mirror ``LocalPersistenceConsentState.dictionary``
+    in the app, which is the only writer of the real thing.
+    """
+    state = {
+        "version": version,
+        "allowsLocalMessageStorage": allowed,
+        "allowsMemoryStorage": allowed,
+        "generation": generation,
+        "updatedAt": 1_700_000_000.0,
+    }
+    state.update(overrides)
+    return state
+
+
 def granted(tmp_path, *, flag=True):
     """A consent decision produced by the real gate, never hand-built.
 
@@ -36,7 +53,7 @@ def granted(tmp_path, *, flag=True):
             consent.MEMORY_ENABLED_ENV: "1",
             consent.MEMORY_DB_PATH_ENV: str(tmp_path / "memory.sqlite"),
         },
-        read_app_consent_flag=lambda: flag,
+        read_app_consent_state=lambda: app_state(flag),
     )
 
 

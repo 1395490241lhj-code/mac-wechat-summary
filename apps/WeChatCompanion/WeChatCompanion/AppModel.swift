@@ -80,6 +80,13 @@ final class AppModel {
         selectedGeminiModel = GeminiModel.resolved(
             fromStoredID: consentDefaults.string(forKey: Self.geminiModelKey)
         )
+        // The app is the authority on this consent, and it asserts that by
+        // always leaving a current, well-formed state behind: a fresh install
+        // records an explicit "no" rather than nothing, and a state written by
+        // an older build is brought up to date from the flag it mirrors.
+        LocalPersistenceConsentState.record(
+            allowsLocalMessageStorage: allowsLocalPersistence, in: consentDefaults
+        )
     }
 
     /// Only a boolean consent flag is stored here. The API key lives in the
@@ -155,6 +162,7 @@ final class AppModel {
     func setAllowsLocalPersistence(_ isAllowed: Bool) async {
         allowsLocalPersistence = isAllowed
         consentDefaults.set(isAllowed, forKey: Self.localPersistenceConsentKey)
+        LocalPersistenceConsentState.record(allowsLocalMessageStorage: isAllowed, in: consentDefaults)
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
     }

@@ -16,6 +16,21 @@ Both are deterministic: the same input produces the same identifier in every
 process, on every run, forever. Nothing here reads a clock, a random source, or
 a filesystem.
 
+Source observations, not logical objects
+----------------------------------------
+
+Everything derived here identifies a **source observation**: one reader's
+account of one WeChat object, stable *within that reader*. The visual store's
+row 17 and the database's local id 17 are two observations, and their canonical
+ids differ by construction. That difference is not a claim that they are two
+different messages; it is the absence of a claim either way.
+
+Whether two observations are the same logical object is a separate fact, held
+in the store's ``logical_*`` tables (schema v2) and written only by an explicit
+assertion with an accepted basis. Nothing in this module -- not a derived id,
+not a fingerprint -- is such an assertion. A fingerprint match means "these
+look alike"; the store reports it and refuses to merge on it.
+
 Identity modes
 --------------
 

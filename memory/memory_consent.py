@@ -14,23 +14,33 @@ Three conditions, all required:
 2. **The operator named the file.** ``WECHAT_COMPANION_MEMORY_DB_PATH``. There
    is no default location, so no store is ever created in a place nobody chose,
    and the memory store is never the app's own store.
-3. **The user's local-persistence consent is observed to be on.** This is the
-   authoritative flag, and it lives in the app's own preferences under
-   ``persistence.allowsLocalMessageStorage``. It is *read*, never written, and
-   never mirrored into a second copy that could drift.
+3. **The app's own consent state says yes.** The macOS app writes a small,
+   versioned, generation-counted dictionary under ``consent.state`` in its
+   preference domain every time the local-persistence consent is decided,
+   including the explicit "no" of a fresh install. It is *read* here, never
+   written, and never mirrored into a second copy that could drift.
 
 Fail closed, and say which condition failed
 -------------------------------------------
 
-If the app's flag cannot be observed at all — the app has never run, the
-preference domain does not exist, the platform is not the one the app runs on,
-the read failed — this module returns a refusal with the state
-``consent_unobservable``. It does **not** fall back to the operator's own
-assertion, because an operator asserting the user's consent is not the user's
-consent. That refusal is the documented gap: a Python process has no first-class
-channel to the app's consent, only its preferences, so a memory store cannot be
-opened on a machine where the app has never stored anything. Fixing that
-properly is app work, not something this package may paper over.
+The app is the authority. Three refusals follow from that, and none of them
+falls back to the operator's own assertion, because an operator asserting the
+user's consent is not the user's consent:
+
+* ``consent_state_missing`` — no state at all. A fresh install, or an app older
+  than the state format. Denied: absence is "no", not "unknown".
+* ``consent_state_malformed`` — a state exists but fails strict validation
+  (unknown version, missing field, wrong type, negative generation). Denied
+  wholesale; no field is picked out of a broken value.
+* ``consent_withheld`` — a well-formed state that says no.
+
+``consent_unobservable`` remains for the case where the preference domain
+could not be read at all (the read itself failed). It is also a refusal.
+
+Nothing here infers consent from the existence of a message database, from
+the age of a file, or from an environment variable: the two variables above
+are the operator's *activation* of this process, and activation is not
+consent.
 
 Withdrawal is honoured the same way the app honours it: a store that already
 exists is not deleted when consent goes off (withdrawal is not a delete
@@ -44,7 +54,7 @@ import os
 import plistlib
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
 #: The operator's explicit request for a memory store in this process.
 MEMORY_ENABLED_ENV: str = "WECHAT_COMPANION_MEMORY_ENABLED"
@@ -52,14 +62,19 @@ MEMORY_ENABLED_ENV: str = "WECHAT_COMPANION_MEMORY_ENABLED"
 #: The explicit path of the memory database. No default exists.
 MEMORY_DB_PATH_ENV: str = "WECHAT_COMPANION_MEMORY_DB_PATH"
 
-#: The macOS app's preference domain and the key inside it. Both are the app's,
-#: mirrored here as constants only so this module can read them; nothing in
-#: this package ever writes to that domain.
+#: The macOS app's preference domain and the key of its consent state. Both are
+#: the app's, mirrored here as constants only so this module can read them;
+#: nothing in this package ever writes to that domain.
 APP_PREFERENCE_DOMAIN: str = "com.lianghongjing.WeChatCompanion"
-LOCAL_PERSISTENCE_CONSENT_KEY: str = "persistence.allowsLocalMessageStorage"
+CONSENT_STATE_KEY: str = "consent.state"
 
-#: A reader answers ``True``, ``False``, or ``None`` for "not observable".
-ConsentFlagReader = Callable[[], bool | None]
+#: The one shape of state this reader understands. Must match
+#: ``LocalPersistenceConsentState.schemaVersion`` in the app.
+CONSENT_STATE_VERSION: int = 1
+
+#: A reader returns the raw stored dictionary, ``None`` when there is none,
+#: and raises when the domain could not be read at all.
+ConsentStateReader = Callable[[], Mapping[str, Any] | None]
 
 
 class MemoryConsentError(Exception):
@@ -77,6 +92,49 @@ class MemoryConsentError(Exception):
 
 
 @dataclass(frozen=True)
+class ConsentState:
+    """The app's consent state, after strict validation.
+
+    Every field is required and typed; a value that does not validate is not
+    partially trusted. Booleans are checked with ``is`` so a plist integer 1
+    is not mistaken for a decision.
+    """
+
+    allows_local_message_storage: bool
+    allows_memory_storage: bool
+    generation: int
+    updated_at: float
+
+    @classmethod
+    def parse(cls, raw: Mapping[str, Any]) -> "ConsentState | None":
+        version = raw.get("version")
+        if not _is_int(version) or version != CONSENT_STATE_VERSION:
+            return None
+        local = raw.get("allowsLocalMessageStorage")
+        memory = raw.get("allowsMemoryStorage")
+        generation = raw.get("generation")
+        updated = raw.get("updatedAt")
+        if local is not True and local is not False:
+            return None
+        if memory is not True and memory is not False:
+            return None
+        if not _is_int(generation) or generation < 0:
+            return None
+        if isinstance(updated, bool) or not isinstance(updated, (int, float)):
+            return None
+        return cls(
+            allows_local_message_storage=local,
+            allows_memory_storage=memory,
+            generation=int(generation),
+            updated_at=float(updated),
+        )
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+@dataclass(frozen=True)
 class ConsentDecision:
     """The outcome of the gate.
 
@@ -90,6 +148,9 @@ class ConsentDecision:
     #: What was actually checked, in fixed tokens, for evidence documents.
     evidence: tuple[str, ...] = ()
     database_path: str | None = None
+    #: The generation of the app state the decision was made against, when
+    #: one was read. Lets evidence say "generation 7 said yes" without a clock.
+    consent_generation: int | None = None
 
     def require(self) -> str:
         """The path, or the refusal as an exception. The only way in."""
@@ -98,56 +159,57 @@ class ConsentDecision:
         return self.database_path
 
 
-def read_app_consent_flag_macos() -> bool | None:
-    """Reads the app's local-persistence flag from its preference domain.
+def read_app_consent_state_macos() -> Mapping[str, Any] | None:
+    """Reads the app's consent state from its preference domain.
 
-    ``defaults`` is asked first because ``cfprefsd`` may be holding a value
-    that has not reached the plist yet, and the plist is read only if the tool
-    is unavailable. Any failure returns ``None`` — "not observable" — never a
-    guess in either direction.
+    ``defaults export`` is asked first because ``cfprefsd`` may hold a value
+    that has not reached the plist yet; the plist is read directly only when
+    the tool is unavailable. A domain that does not exist yields ``None`` (no
+    state -- a fresh install). A read that fails raises, which the gate
+    reports as unobservable. Neither path ever guesses.
     """
     try:
         completed = subprocess.run(
-            ["defaults", "read", APP_PREFERENCE_DOMAIN, LOCAL_PERSISTENCE_CONSENT_KEY],
+            ["defaults", "export", APP_PREFERENCE_DOMAIN, "-"],
             capture_output=True,
-            text=True,
             timeout=10,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         completed = None
-    if completed is not None and completed.returncode == 0:
-        value = completed.stdout.strip()
-        if value in {"1", "true", "YES"}:
-            return True
-        if value in {"0", "false", "NO"}:
-            return False
-        return None
-    return _read_app_consent_flag_plist()
+    if completed is not None and completed.returncode == 0 and completed.stdout.strip():
+        contents = plistlib.loads(completed.stdout)
+        return _state_from(contents)
+    return _read_app_consent_state_plist()
 
 
-def _read_app_consent_flag_plist() -> bool | None:
+def _read_app_consent_state_plist() -> Mapping[str, Any] | None:
     path = os.path.expanduser(
         f"~/Library/Preferences/{APP_PREFERENCE_DOMAIN}.plist"
     )
-    try:
-        with open(path, "rb") as handle:
-            contents = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    if not os.path.exists(path):
         return None
-    value = contents.get(LOCAL_PERSISTENCE_CONSENT_KEY)
-    return value if isinstance(value, bool) else None
+    with open(path, "rb") as handle:
+        contents = plistlib.load(handle)
+    return _state_from(contents)
+
+
+def _state_from(contents: Any) -> Mapping[str, Any] | None:
+    if not isinstance(contents, Mapping):
+        return None
+    value = contents.get(CONSENT_STATE_KEY)
+    return value if isinstance(value, Mapping) else None
 
 
 def resolve_consent(
     environment: Mapping[str, str] | None = None,
-    read_app_consent_flag: ConsentFlagReader = read_app_consent_flag_macos,
+    read_app_consent_state: ConsentStateReader = read_app_consent_state_macos,
 ) -> ConsentDecision:
     """Evaluates all three conditions, in the order that leaks least.
 
     The operator's own two conditions are checked first, so a machine that was
     never asked for a memory store is never asked about the user's consent
-    either.
+    either. They are an *activation* gate; the third condition is the consent.
     """
     environment = os.environ if environment is None else environment
     if environment.get(MEMORY_ENABLED_ENV) != "1":
@@ -171,22 +233,41 @@ def resolve_consent(
             ),
             evidence=("operator_opt_in:present", "path:absent"),
         )
+    checked = ("operator_opt_in:present", "path:present")
     try:
-        flag = read_app_consent_flag()
+        raw = read_app_consent_state()
     except Exception:  # noqa: BLE001 - any reader failure is unobservable
-        flag = None
-    if flag is None:
         return ConsentDecision(
             allowed=False,
             state="consent_unobservable",
             detail=(
-                "The local-persistence consent could not be observed, so no "
-                "message text may be written. This is a refusal, not a "
-                "default."
+                "The app's consent state could not be read, so no message text "
+                "may be written. This is a refusal, not a default."
             ),
-            evidence=("operator_opt_in:present", "path:present", "app_consent:unobservable"),
+            evidence=(*checked, "app_consent:unobservable"),
         )
-    if flag is False:
+    if raw is None:
+        return ConsentDecision(
+            allowed=False,
+            state="consent_state_missing",
+            detail=(
+                "WeChat Companion has not recorded a local-persistence decision, "
+                "so no message text may be written."
+            ),
+            evidence=(*checked, "app_consent:missing"),
+        )
+    state = ConsentState.parse(raw)
+    if state is None:
+        return ConsentDecision(
+            allowed=False,
+            state="consent_state_malformed",
+            detail=(
+                "The app's consent state is not in a form this process "
+                "understands, so no message text may be written."
+            ),
+            evidence=(*checked, "app_consent:malformed"),
+        )
+    if not state.allows_memory_storage:
         return ConsentDecision(
             allowed=False,
             state="consent_withheld",
@@ -194,12 +275,14 @@ def resolve_consent(
                 "Local persistence is off in WeChat Companion, so no message "
                 "text may be written down."
             ),
-            evidence=("operator_opt_in:present", "path:present", "app_consent:off"),
+            evidence=(*checked, "app_consent:off"),
+            consent_generation=state.generation,
         )
     return ConsentDecision(
         allowed=True,
         state="consented",
         detail="Local persistence is on and a memory store was explicitly requested.",
-        evidence=("operator_opt_in:present", "path:present", "app_consent:on"),
+        evidence=(*checked, "app_consent:on"),
         database_path=path,
+        consent_generation=state.generation,
     )

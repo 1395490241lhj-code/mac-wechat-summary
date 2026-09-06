@@ -99,12 +99,11 @@ def test_first_ingestion_writes_conversations_messages_and_a_run(store):
     )
     assert report.state == RUN_SUCCEEDED
     assert (report.messages_inserted, report.messages_updated) == (2, 0)
-    assert store.counts() == {
-        "conversations": 1,
-        "messages": 2,
-        "runs": 1,
-        "coverage_records": 1,
-    }
+    counts = store.counts()
+    assert (counts["conversations"], counts["messages"], counts["runs"],
+            counts["coverage_records"]) == (1, 2, 1, 1)
+    # Nothing links observations to logical objects on ingestion.
+    assert (counts["logical_conversations"], counts["logical_messages"]) == (0, 0)
     row = store.conversation(
         identity.conversation_canonical_id(SOURCE_VISUAL, "7")
     )
