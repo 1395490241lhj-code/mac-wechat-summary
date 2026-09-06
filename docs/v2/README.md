@@ -29,6 +29,7 @@ Git history and the reports together — never one old phase report in isolation
 15. `M2_MEMORY_RETRIEVAL.md` — the internal query service, non-droppable result envelope, stable citation, required/supplemental coverage, and the explicit foreground sync (no MCP tool)
 16. `M2_1_MEMORY_MCP_GATE.md` — the separate read-only memory MCP server, explicit activation from ClaudeRunner, and the 4-tool / 8-tool wire gate
 17. `M2_2A_LIVE_MEMORY_AGENT_GATE.md` — live Claude Code memory gate: harness, corpus, isolation and preflight refusal executed; **live half not run (no credential)**
+18. `M2_2A_LIVE_MEMORY_AGENT_GATE_COMPLETION.md` — the live half, run: exactly 4 / exactly 8 on a real Claude Code 2.1.238 process, four graded synthetic turns, **LIVE MEMORY AGENT GATE PASS**
 
 ## Known supersessions
 
@@ -55,9 +56,11 @@ Verified from the documents themselves:
 - **"No MCP tool" in the M1–M2 memory reports is superseded by M2.1.**
   `M2_1_MEMORY_MCP_GATE.md` adds a separate read-only memory server; it is
   off by default, so the four-tool default those reports describe still holds.
-- **`M2_2A` is a "not run", not a failure.** Its verdict line reads FAIL by
-  the gate's own binary rule, but the live half never executed for want of a
-  credential; nothing in it measures the memory boundary failing.
+- **`M2_2A` is a "not run", not a failure — and is completed by
+  `M2_2A_…_COMPLETION.md`.** The first report's verdict line reads FAIL by
+  the gate's binary rule because the live half never executed for want of a
+  credential; the completion report records the same harness run for real
+  with a PASS. The first report is preserved unchanged as sealed evidence.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 
