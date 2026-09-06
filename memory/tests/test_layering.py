@@ -23,19 +23,35 @@ def python_files(directory: Path):
     ]
 
 
-@pytest.mark.parametrize("directory", EXISTING)
-def test_no_existing_module_imports_the_memory_layer(directory):
-    """Nothing in the shipped path depends on M1 -- it is additive only."""
+MEMORY_MODULES = ("memory_store", "memory_ingest", "memory_retrieval", "memory_query",
+                  "memory_sync", "memory_consent", "wechat_memory_mcp")
+
+
+def test_the_bridge_never_references_the_memory_layer():
+    """The raw-message bridge and the memory server share nothing (M2.1)."""
     offenders = [
         path.relative_to(ROOT).as_posix()
-        for path in python_files(Path(directory))
-        if any(
-            name in path.read_text(encoding="utf-8")
-            for name in ("memory_store", "memory_ingest", "memory_retrieval",
-                         "memory_query", "memory_sync", "memory_consent")
-        )
+        for path in python_files(Path("bridge"))
+        if any(name in path.read_text(encoding="utf-8") for name in MEMORY_MODULES)
     ]
     assert offenders == []
+
+
+def test_nothing_in_shadow_imports_the_memory_layer():
+    """The shadow runner may *load* the consent gate by path, before a run, to
+    refuse a memory request it cannot honour -- and nothing in shadow/ may
+    import memory. The runner keeps no import-time dependency on what it
+    launches; the CLI merely names the server script in its help text."""
+    for path in python_files(Path("shadow")):
+        if "tests" in path.parts:
+            continue
+        assert imported_modules(path).isdisjoint(MEMORY_MODULES), path.name
+    loaders = [
+        path.relative_to(ROOT).as_posix()
+        for path in python_files(Path("shadow"))
+        if "tests" not in path.parts and "spec_from_file_location" in path.read_text(encoding="utf-8")
+    ]
+    assert loaders == ["shadow/runners/claude.py"]
 
 
 def test_the_memory_layer_does_not_redefine_the_normalised_shape():
@@ -70,10 +86,13 @@ def imported_modules(path: Path) -> set[str]:
 ALLOWED_IMPORTS = {
     "__future__", "argparse", "ast", "dataclasses", "hashlib", "os", "pathlib",
     "plistlib", "secrets", "sqlite3", "subprocess", "sys", "time", "typing",
-    "unicodedata",
+    "unicodedata", "urllib",
+    # The MCP SDK, used by the read-only memory server only (M2.1).
+    "mcp",
     "memory_consent", "memory_identity", "memory_ingest", "memory_query",
     "memory_retrieval", "memory_store", "memory_sync", "message_source",
-    # The bridge's own reader, imported lazily by the explicit sync CLI only.
+    # The bridge's own reader, imported lazily by the explicit sync CLI only
+    # (memory_sync.py); the memory MCP server must never import it.
     "wechat_companion_mcp",
 }
 
@@ -92,12 +111,23 @@ def test_the_memory_layer_imports_nothing_new():
         assert imported_modules(path) <= ALLOWED_IMPORTS, path.name
 
 
-def test_no_mcp_server_is_imported_or_declared_in_m1():
-    """The public memory surface is an M2 decision, not an M1 side effect."""
+def test_the_mcp_sdk_is_confined_to_the_memory_server_module():
+    """One file speaks MCP; the store, ingestor, query and sync never do."""
     for path in implementation_files():
-        assert "mcp" not in imported_modules(path)
+        if path.name == "wechat_memory_mcp.py":
+            assert "mcp" in imported_modules(path)
+            continue
+        assert "mcp" not in imported_modules(path), path.name
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 for decorator in node.decorator_list:
                     assert "tool" not in ast.dump(decorator)
+
+
+def test_the_memory_server_never_imports_the_bridge():
+    """Two servers, two processes, no shared code path (M2.1)."""
+    path = ROOT / "memory" / "wechat_memory_mcp.py"
+    assert "wechat_companion_mcp" not in imported_modules(path)
+    assert "rion_reader_adapter" not in imported_modules(path)
+    assert "message_source" not in imported_modules(path)

@@ -45,8 +45,18 @@ its contents and prove that. Whether Claude Code writes chat content anywhere
 inside it despite ``--no-session-persistence`` is the subject of the H6
 canary audit, not an assumption made here.
 
+**Memory MCP (M2.1).** Off by default. With ``memory_enabled`` the isolated
+MCP config names a second, separate read-only server over the memory store
+(``memory/wechat_memory_mcp.py``) and the expected wire set becomes exactly
+eight: the four bridge tools plus ``memory_search``, ``memory_timeline``,
+``memory_context``, ``memory_recent``. The request is validated before the
+run -- server present, database path given, the app's consent state
+allowing, the store readable at a supported version -- and refuses to start
+otherwise. The memory database path reaches the memory server's environment
+only.
+
 Not enabled, by construction: any built-in tool, cron, unattended execution,
-session resume, plugins, hooks, memory, skills discovery.
+session resume, plugins, hooks, Claude Code's own memory, skills discovery.
 """
 
 from __future__ import annotations
@@ -81,6 +91,15 @@ READER_BIN_ENV = "WECHAT_COMPANION_READER_BIN"
 READER_CONFIG_ENV = "WECHAT_COMPANION_READER_CONFIG"
 READER_TIMEOUT_ENV = "WECHAT_COMPANION_READER_TIMEOUT"
 
+#: The memory server's own names, as ``memory/wechat_memory_mcp.py`` declares
+#: them, and its activation variables as ``memory/memory_consent.py`` declares
+#: them. Repeated here for the same reason as the bridge's: the runner keeps no
+#: import-time dependency on what it launches, and a test compares the copies.
+MEMORY_SERVER = "wechat_memory"
+MEMORY_TOOLS = ("memory_search", "memory_timeline", "memory_context", "memory_recent")
+MEMORY_ENABLED_ENV = "WECHAT_COMPANION_MEMORY_ENABLED"
+MEMORY_DB_PATH_ENV = "WECHAT_COMPANION_MEMORY_DB_PATH"
+
 DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_SKILL = Path(".hermes/skills/wechat-digest/SKILL.md")
 PROBE_PROMPT = "boundary-probe"
@@ -94,6 +113,10 @@ def claude_wire_name(server: str, tool: str) -> str:
 
 
 CLAUDE_EXPECTED_TOOLS = frozenset(claude_wire_name(BRIDGE_SERVER, t) for t in BRIDGE_TOOLS)
+CLAUDE_MEMORY_TOOLS = frozenset(claude_wire_name(MEMORY_SERVER, t) for t in MEMORY_TOOLS)
+#: The whole surface with memory explicitly enabled: the four bridge tools
+#: plus the four memory tools, and nothing else. Exactly eight.
+CLAUDE_EXPECTED_TOOLS_WITH_MEMORY = CLAUDE_EXPECTED_TOOLS | CLAUDE_MEMORY_TOOLS
 
 
 @dataclass
@@ -120,6 +143,22 @@ class ClaudeConfig:
     reader_bin: Path | None = None       # injected; never searched for
     reader_config: Path | None = None
     reader_timeout: float | None = None
+
+    # --- Memory MCP, off unless asked for ------------------------------------
+    #
+    # A second, separate read-only server over the memory store. Off by
+    # default, and when off the run is exactly the four-tool run it has always
+    # been: no server, no variable, no expected tool. When on, everything it
+    # needs is validated before the run starts and the expected surface becomes
+    # exactly eight. A request that cannot be honoured refuses to start rather
+    # than quietly running with the four bridge tools alone.
+    memory_enabled: bool = False
+    memory_db_path: Path | None = None   # reaches the memory server env only
+    memory_server: Path | None = None    # memory/wechat_memory_mcp.py; injected
+    #: Reads the app's consent state for the pre-run check. Injectable so tests
+    #: never touch the real preference domain; the server itself always reads
+    #: the real one.
+    memory_consent_reader: Callable | None = None
 
     @property
     def config_dir(self) -> Path:
@@ -203,9 +242,71 @@ class ClaudeConfig:
             env[READER_TIMEOUT_ENV] = str(self.reader_timeout)
         return env
 
+    @property
+    def expected_tools(self) -> frozenset[str]:
+        """Exactly four, or exactly eight. Nothing in between."""
+        return CLAUDE_EXPECTED_TOOLS_WITH_MEMORY if self.memory_enabled else CLAUDE_EXPECTED_TOOLS
+
+    def memory_env(self) -> dict:
+        """Activation variables for the memory server, or nothing at all.
+
+        Validates the whole request first: the server file, the database
+        path, the app's consent state, and that the store can be opened
+        read-only at a supported schema version. Any failure raises here,
+        before the run starts. Continuing with the bridge alone would let the
+        operator believe memory was in the run when it was not, and a digest
+        that silently lacks the memory it was asked to use is the failure this
+        gate exists to prevent.
+        """
+        if not self.memory_enabled:
+            if self.memory_db_path is not None or self.memory_server is not None:
+                raise ShadowError("--memory-db-path and --memory-server require --memory")
+            return {}
+        if self.memory_server is None or not self.memory_server.is_file():
+            raise ShadowError("memory: the memory server script was not supplied or does not exist")
+        if self.memory_db_path is None:
+            raise ShadowError("memory: an explicit memory database path is required")
+        env = {MEMORY_ENABLED_ENV: "1", MEMORY_DB_PATH_ENV: str(self.memory_db_path)}
+        self._check_memory_available(env)
+        return env
+
+    def _check_memory_available(self, env: dict) -> None:
+        """Consent and readability, checked with the memory layer's own gate."""
+        import importlib.util
+
+        memory_dir = self.memory_server.resolve().parent
+        loaded = {}
+        for name in ("memory_consent", "memory_store"):
+            spec = importlib.util.spec_from_file_location(name, memory_dir / f"{name}.py")
+            if spec is None or spec.loader is None:
+                raise ShadowError("memory: the memory layer could not be loaded")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as exc:  # noqa: BLE001
+                sys.modules.pop(name, None)
+                raise ShadowError(f"memory: the memory layer could not be loaded "
+                                  f"({exc.__class__.__name__})") from exc
+            loaded[name] = module
+        consent, store = loaded["memory_consent"], loaded["memory_store"]
+        reader = self.memory_consent_reader or consent.read_app_consent_state_macos
+        decision = consent.resolve_consent(env, reader)
+        if not decision.allowed:
+            raise ShadowError(f"memory: refused before the run ({decision.state})")
+        try:
+            store.MemoryStore.open_read_only(decision).close()
+        except store.MemoryStoreError as exc:
+            raise ShadowError(f"memory: the store cannot be read ({exc.state})") from exc
+
     def mcp_config_document(self) -> dict:
-        """Exactly one server. Its env carries the bridge's double opt-in."""
-        return {"mcpServers": {BRIDGE_SERVER: {
+        """The bridge, and the memory server only when explicitly enabled.
+
+        Each server's environment carries its own opt-ins and nothing of the
+        other's: the memory database path is visible to the memory server
+        process alone, never to the bridge and never to Claude Code itself.
+        """
+        servers = {BRIDGE_SERVER: {
             "type": "stdio",
             "command": str(self.python),
             "args": [str(self.bridge)],
@@ -214,7 +315,16 @@ class ClaudeConfig:
                 "WECHAT_COMPANION_DB_PATH": str(self.db_path),
                 **self.source_env(),
             },
-        }}}
+        }}
+        memory_env = self.memory_env()
+        if memory_env:
+            servers[MEMORY_SERVER] = {
+                "type": "stdio",
+                "command": str(self.python),
+                "args": [str(self.memory_server)],
+                "env": memory_env,
+            }
+        return {"mcpServers": servers}
 
 
 class ClaudeRunner:
@@ -226,7 +336,10 @@ class ClaudeRunner:
     """
 
     backend = "claude"
-    expected_tools = CLAUDE_EXPECTED_TOOLS
+
+    @property
+    def expected_tools(self) -> frozenset[str]:
+        return self.cfg.expected_tools
 
     def __init__(self, cfg: ClaudeConfig, *, run: Callable = subprocess.run,
                  proxy_factory: Callable = ToolBoundaryProxy, err=sys.stderr) -> None:

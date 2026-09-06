@@ -2,7 +2,8 @@
 
 A source-neutral local memory layer between normalised messages and any future
 retrieval or intelligence feature. Local, deterministic, lexical. No embedding,
-no vector index, no network call, no new MCP tool.
+no vector index, no network call. Its only public surface is the separate,
+explicitly enabled, read-only memory MCP server (M2.1).
 
 ```
 MessageSource  (bridge/message_source.py)
@@ -18,6 +19,8 @@ MemoryStore             memory_store.py
 MemoryQueryService      memory_query.py       (M2 internal contract, not an MCP tool)
     ├─ search · timeline · context_around · recent_context
     └─ MemoryQueryResult { items, coverage, truncated, query_scope }
+wechat_memory_mcp.py    separate read-only MCP server (M2.1): memory_search · memory_timeline
+                        · memory_context · memory_recent — off by default, opened mode=ro
 memory_sync.py          explicit foreground sync (operator-run, consent-gated, no scheduler)
 memory_retrieval.py     M1 retrieval, kept intact, superseded by memory_query
 ```
@@ -34,8 +37,9 @@ Coverage from several sources is composed by `compose_coverage` in
 most cautious reading, and an empty result is "no messages" only when every
 consulted source covered the window.
 
-Nothing in `bridge/` or `shadow/` imports this package; the dependency runs one
-way only. See `docs/v2/M1_MEMORY_FOUNDATION.md` for the schema, the identity
+Nothing in `bridge/` imports this package and the memory server never imports
+the bridge; `shadow/runners/claude.py` loads the consent gate by path only to
+refuse a memory request before a run. See `docs/v2/M1_MEMORY_FOUNDATION.md` for the schema, the identity
 limitations, the coverage model, the consent gap, and the M1 → M4 layering.
 
 Sync (operator, foreground): `python3 memory/memory_sync.py`.

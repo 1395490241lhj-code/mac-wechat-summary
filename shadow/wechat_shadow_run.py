@@ -21,6 +21,8 @@ The orchestration lives in ``agent_runner.py``; each runtime lives in
 * ``hermes`` (default) — the original Hermes Agent CLI backend. Its flags and
   behaviour are unchanged from before H6.
 * ``claude`` — Claude Code headless. Synthetic-only until its gates are sealed.
+  ``--memory`` adds the separate read-only memory MCP server (exactly eight
+  tools on the wire instead of four); off by default.
 
 Not enabled, by construction: cron, unattended execution, messaging sends,
 terminal, filesystem, browser, computer use, memory, and skills runtime tools.
@@ -99,6 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="optional configuration file for the reader")
     source.add_argument("--reader-timeout", type=float,
                         help="optional reader timeout in seconds")
+    memory = ap.add_argument_group(
+        "memory MCP (claude backend)",
+        "Off unless asked for. Without --memory the run is exactly the "
+        "four-tool run; with it the surface is exactly eight read-only tools.")
+    memory.add_argument("--memory", action="store_true",
+                        help="enable the separate read-only memory MCP server")
+    memory.add_argument("--memory-db-path", type=Path,
+                        help="the memory store; reaches the memory server only")
+    memory.add_argument("--memory-server", type=Path,
+                        help="memory/wechat_memory_mcp.py; never searched for")
     return ap
 
 
@@ -127,6 +139,9 @@ def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
             # Configuring a reader without selecting it would read the visual
             # store while looking like it had been asked not to.
             raise ShadowError("--reader-bin requires --message-source database")
+        memory_flags = (args.memory, args.memory_db_path, args.memory_server)
+        if any(flag not in (None, False) for flag in memory_flags) and args.agent_backend != "claude":
+            raise ShadowError("--memory and --memory-* apply to the claude backend only")
     except ShadowError as exc:
         ap.error(str(exc))
     if args.agent_backend == "hermes":
@@ -151,11 +166,15 @@ def make_runner(args: argparse.Namespace, ap: argparse.ArgumentParser,
         extra_env=extra, timeout=args.timeout,
         message_source=args.message_source, reader_bin=args.reader_bin,
         reader_config=args.reader_config, reader_timeout=args.reader_timeout,
+        memory_enabled=args.memory, memory_db_path=args.memory_db_path,
+        memory_server=args.memory_server,
     )
     try:
         # Validate the request now: a run must never start believing it
-        # selected one reader while the bridge would use another.
+        # selected one reader while the bridge would use another, or that it
+        # has memory when the memory server would refuse.
         cfg.source_env()
+        cfg.memory_env()
     except ShadowError as exc:
         ap.error(str(exc))
     return ClaudeRunner(cfg)

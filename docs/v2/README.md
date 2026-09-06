@@ -27,6 +27,7 @@ Git history and the reports together — never one old phase report in isolation
 13. `M1_MEMORY_FOUNDATION.md` — source-neutral local memory store, coverage model and FTS index (adds no MCP tool)
 14. `M1_1_MEMORY_HARDENING.md` — logical identity over source observations (schema v2), the app-owned consent state, and the multi-source coverage composition rule
 15. `M2_MEMORY_RETRIEVAL.md` — the internal query service, non-droppable result envelope, stable citation, required/supplemental coverage, and the explicit foreground sync (no MCP tool)
+16. `M2_1_MEMORY_MCP_GATE.md` — the separate read-only memory MCP server, explicit activation from ClaudeRunner, and the 4-tool / 8-tool wire gate
 
 ## Known supersessions
 
@@ -50,6 +51,9 @@ Verified from the documents themselves:
   refused when it was unobservable. `M1_1_MEMORY_HARDENING.md` replaces that
   with an app-written, versioned consent state; the refusal on absence stands,
   but absence is now "no", not "unknown".
+- **"No MCP tool" in the M1–M2 memory reports is superseded by M2.1.**
+  `M2_1_MEMORY_MCP_GATE.md` adds a separate read-only memory server; it is
+  off by default, so the four-tool default those reports describe still holds.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

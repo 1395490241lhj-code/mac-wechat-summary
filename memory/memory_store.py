@@ -541,6 +541,61 @@ class MemoryStore:
             pass
         return store
 
+    @classmethod
+    def open_read_only(cls, decision: ConsentDecision) -> "MemoryStore":
+        """Opens an existing store for reading, and can do nothing else.
+
+        The connection is a ``mode=ro`` URI with ``PRAGMA query_only`` on top,
+        the same two locks the MCP bridge puts on the app's store: a write is
+        refused by the engine, not by convention. Nothing is created and
+        nothing is migrated -- a file that is missing, unreadable, or at any
+        version other than the current one is refused with a fixed state
+        rather than brought into being or brought up to date by a reader.
+        """
+        from urllib.parse import quote
+
+        path = decision.require()
+        if not os.path.isfile(path):
+            raise MemoryStoreError(
+                "memory_store_missing", "The configured memory store does not exist."
+            )
+        try:
+            connection = sqlite3.connect(
+                f"file:{quote(path)}?mode=ro", uri=True, timeout=5.0, isolation_level=None
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout = 5000;")
+            connection.execute("PRAGMA query_only = ON;")
+            version = int(connection.execute("PRAGMA user_version;").fetchone()[0])
+        except sqlite3.DatabaseError as error:
+            raise MemoryStoreError(
+                "memory_store_unreadable", "The memory store could not be read."
+            ) from error
+        if version != MEMORY_SCHEMA_VERSION:
+            connection.close()
+            raise MemoryStoreError(
+                "schema_unsupported",
+                "The memory store is not at the schema version this reader supports.",
+            )
+        try:
+            present = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table';"
+                )
+            }
+        except sqlite3.DatabaseError as error:
+            connection.close()
+            raise MemoryStoreError(
+                "memory_store_unreadable", "The memory store could not be read."
+            ) from error
+        if not {"conversations", "messages", "coverage", "messages_fts_map"} <= present:
+            connection.close()
+            raise MemoryStoreError(
+                "schema_incomplete", "The memory store is missing required tables."
+            )
+        return cls(connection=connection, path=path)
+
     def migrate(self) -> int:
         """Brings the file to the current version, or refuses.
 
