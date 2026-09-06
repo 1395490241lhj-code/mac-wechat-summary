@@ -3,7 +3,8 @@
 Produces one read-only digest from messages WeChat Companion has already
 stored, then removes every local trace of the run.
 
-**Status: synthetic-only.** No backend has been pointed at real WeChat data.
+**Status: synthetic-only; the Claude backend has passed its H6 synthetic gates
+and is eligible for H5.** No backend has been pointed at real WeChat data yet.
 See *Remaining gates* below.
 
 ## Layout (since H6)
@@ -13,7 +14,7 @@ See *Remaining gates* below.
 | `wechat_shadow_run.py` | CLI entry point. `--agent-backend hermes\|claude` |
 | `agent_runner.py` | Runtime-neutral orchestration: preflight → boundary → digest → cleanup, signals, timeout, exit codes, review-only stdout |
 | `runners/hermes.py` | `HermesRunner` — the original Hermes Agent CLI backend, behaviour-identical to the pre-H6 runner |
-| `runners/claude.py` | `ClaudeRunner` — Claude Code headless (`claude -p`), synthetic-only |
+| `runners/claude.py` | `ClaudeRunner` — Claude Code headless (`claude -p`); H6 gates passed, eligible for H5 |
 | `tool_boundary_proxy.py` | Exact-N wire verifier: every tools-bearing model request must carry exactly the expected tool names |
 | `exact8_assertion_proxy.py` | The Hermes instance of that verifier (the eight names Hermes v0.20.5 puts on the wire). Unchanged contract |
 | `h6_synthetic_gate.py` | H6 gate: Scenario A + J on the Claude backend, then a canary persistence audit |
@@ -92,7 +93,7 @@ A dedicated profile keeps shadow runs away from `default`:
 liveness check). Since H6 that no longer blocks the project: Hermes is an
 optional backend, re-validated if and when a fixed stock release ships.
 
-## Backend: claude (synthetic-only)
+## Backend: claude (H6 gates passed; eligible for H5)
 
 `claude -p` with the narrowest configuration the installed CLI (2.1.x) supports:
 `--tools ""` (no built-in tool), `--strict-mcp-config --mcp-config <isolated
@@ -141,6 +142,17 @@ export CLAUDE_CODE_OAUTH_TOKEN="$(claude setup-token)"   # in your own shell, ne
 python3 shadow/wechat_shadow_run.py --agent-backend claude ... --pass-env CLAUDE_CODE_OAUTH_TOKEN
 ```
 
+Or, for unattended-by-the-agent runs, store the token once in the macOS
+keychain with an interactive prompt (`-w` last, so it never enters argv or
+history) and let the runner read it at runtime:
+
+```bash
+security add-generic-password -a "$USER" -s wechat-shadow-claude-oauth -U -w
+python3 shadow/wechat_shadow_run.py --agent-backend claude ... --claude-oauth-from-keychain
+```
+
+The keychain source is fixed to that one service, the current user, and the
+`CLAUDE_CODE_OAUTH_TOKEN` destination; nothing else can be requested.
 `--pass-env` copies the named variable from the parent environment into the
 child environment and nowhere else. `--env NAME=value` refuses credential
 names, because argv and shell history are not private. The runner never logs,
@@ -166,9 +178,9 @@ clean. The report holds names, paths, byte counts and verdicts — never content
 
 ## Remaining gates before real data
 
-1. **Claude backend, live synthetic gates** — Scenario A + J green, exact
-   tool boundary verified on the wire, canary audit acceptable. Requires a
-   logged-in `claude` or an explicit API key. See `docs/v2/H6_*.md`.
+1. **Claude backend, live synthetic gates — passed** (Scenario A + J, exact
+   four-tool boundary on the wire, canary audit clean). See
+   `docs/v2/H6_AGENT_RUNNER_DECOUPLING.md`. Next is H5 on this backend.
 2. **Deletion semantics** — cleanup is an application-level purge, verified by
    content search. No forensic or physical erasure is claimed.
 3. Hermes: stock-release re-validation is now **optional**, not a gate.
