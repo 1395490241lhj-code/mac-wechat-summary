@@ -15,7 +15,11 @@ MemoryStore             memory_store.py
     ├─ coverage / provenance
     └─ FTS5 index
     ↓
-MemoryRetriever         memory_retrieval.py   (internal API, not an MCP tool)
+MemoryQueryService      memory_query.py       (M2 internal contract, not an MCP tool)
+    ├─ search · timeline · context_around · recent_context
+    └─ MemoryQueryResult { items, coverage, truncated, query_scope }
+memory_sync.py          explicit foreground sync (operator-run, consent-gated, no scheduler)
+memory_retrieval.py     M1 retrieval, kept intact, superseded by memory_query
 ```
 
 `memory_consent.py` is the gate every entry point passes through: it reads the
@@ -34,4 +38,5 @@ Nothing in `bridge/` or `shadow/` imports this package; the dependency runs one
 way only. See `docs/v2/M1_MEMORY_FOUNDATION.md` for the schema, the identity
 limitations, the coverage model, the consent gap, and the M1 → M4 layering.
 
+Sync (operator, foreground): `python3 memory/memory_sync.py`.
 Tests: `cd memory && python -m pytest`.

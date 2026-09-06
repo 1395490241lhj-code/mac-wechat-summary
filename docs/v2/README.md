@@ -26,6 +26,7 @@ Git history and the reports together — never one old phase report in isolation
 12. `READER_SOURCE_ACTIVATION.md` — explicit source selection from the agent path
 13. `M1_MEMORY_FOUNDATION.md` — source-neutral local memory store, coverage model and FTS index (adds no MCP tool)
 14. `M1_1_MEMORY_HARDENING.md` — logical identity over source observations (schema v2), the app-owned consent state, and the multi-source coverage composition rule
+15. `M2_MEMORY_RETRIEVAL.md` — the internal query service, non-droppable result envelope, stable citation, required/supplemental coverage, and the explicit foreground sync (no MCP tool)
 
 ## Known supersessions
 

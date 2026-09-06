@@ -1,6 +1,8 @@
-"""Deterministic local retrieval over the memory store.
+"""Deterministic local retrieval over the memory store (M1 contract).
 
-This is the internal API for M1. It is not exposed as an MCP tool and nothing
+Superseded for new callers by :mod:`memory_query` (M2), which returns the
+non-droppable envelope; this module is kept unchanged so the M1 contract and
+its tests continue to hold. This is the internal API for M1. It is not exposed as an MCP tool and nothing
 in ``bridge/`` or ``shadow/`` imports it: the public memory surface is an M2
 decision, and shipping one here would settle that question by accident.
 

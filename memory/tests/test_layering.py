@@ -29,9 +29,11 @@ def test_no_existing_module_imports_the_memory_layer(directory):
     offenders = [
         path.relative_to(ROOT).as_posix()
         for path in python_files(Path(directory))
-        if "memory_store" in path.read_text(encoding="utf-8")
-        or "memory_ingest" in path.read_text(encoding="utf-8")
-        or "memory_retrieval" in path.read_text(encoding="utf-8")
+        if any(
+            name in path.read_text(encoding="utf-8")
+            for name in ("memory_store", "memory_ingest", "memory_retrieval",
+                         "memory_query", "memory_sync", "memory_consent")
+        )
     ]
     assert offenders == []
 
@@ -66,10 +68,13 @@ def imported_modules(path: Path) -> set[str]:
 #: reader boundary, and itself. Anything else is a new dependency and should
 #: have to be argued for in review rather than appear.
 ALLOWED_IMPORTS = {
-    "__future__", "ast", "dataclasses", "hashlib", "os", "pathlib", "plistlib",
-    "secrets", "sqlite3", "subprocess", "sys", "time", "typing", "unicodedata",
-    "memory_consent", "memory_identity", "memory_ingest", "memory_retrieval",
-    "memory_store", "message_source",
+    "__future__", "argparse", "ast", "dataclasses", "hashlib", "os", "pathlib",
+    "plistlib", "secrets", "sqlite3", "subprocess", "sys", "time", "typing",
+    "unicodedata",
+    "memory_consent", "memory_identity", "memory_ingest", "memory_query",
+    "memory_retrieval", "memory_store", "memory_sync", "message_source",
+    # The bridge's own reader, imported lazily by the explicit sync CLI only.
+    "wechat_companion_mcp",
 }
 
 
