@@ -31,6 +31,16 @@ REQUIRED_TOOLS = [
     "mcp__wechat_companion__get_recent_messages",
 ]
 
+#: The optional second server (skill 1.1.0). Present only when a run enables
+#: Memory; the skill must work without them and must never invent others.
+MEMORY_TOOLS = [
+    "mcp__wechat_memory__memory_conversations",
+    "mcp__wechat_memory__memory_search",
+    "mcp__wechat_memory__memory_context",
+    "mcp__wechat_memory__memory_timeline",
+    "mcp__wechat_memory__memory_recent",
+]
+
 HEADINGS = ["微信摘要", "🔴 需要处理", "📅 时间与安排", "✅ 待办",
             "🟡 值得关注", "💬 其他讨论"]
 
@@ -100,22 +110,109 @@ def test_all_four_read_only_mcp_tools_are_named(skill_text):
         assert tool in skill_text, tool
 
 
+def test_the_memory_tools_are_named_when_the_skill_teaches_them(skill_text):
+    for tool in MEMORY_TOOLS:
+        assert tool in skill_text, tool
+
+
 def test_no_write_send_or_destructive_tool_is_referenced(skill_text):
     forbidden = [
         "mcp__wechat_companion__send", "mcp__wechat_companion__write",
         "mcp__wechat_companion__delete", "mcp__wechat_companion__update",
         "send_message", "write_file", "terminal(", "shell(", "subprocess",
         "os.system", "DELETE FROM", "INSERT INTO", "UPDATE ",
+        # Memory is read-only from the agent surface: none of these exist, and
+        # the skill must never imply one does.
+        "memory_sync", "memory_update", "memory_delete", "memory_link",
+        "memory_write", "memory_ingest",
     ]
     for token in forbidden:
         assert token not in skill_text, token
 
 
-def test_only_wechat_companion_mcp_tools_appear(skill_text):
-    for name in set(re.findall(r"mcp__[A-Za-z0-9_]+", skill_text)):
-        assert name.startswith("mcp__wechat_companion__"), name
-        assert name in REQUIRED_TOOLS, name
+def test_only_the_two_known_servers_tools_appear(skill_text):
+    """Exactly the nine, and nothing else the model might reach for.
 
+    The skill also writes the server prefixes as wildcards when it talks about
+    a *family* of tools ("no `mcp__wechat_memory__*` tool is available"). Those
+    are not tool names, so they are removed before the scan rather than
+    loosening what a real name is allowed to be.
+    """
+    prose_without_wildcards = re.sub(r"mcp__[A-Za-z0-9_]+__\*", "", skill_text)
+    named = set(re.findall(r"mcp__[A-Za-z0-9_]+", prose_without_wildcards))
+    allowed = set(REQUIRED_TOOLS) | set(MEMORY_TOOLS)
+    assert named <= allowed, sorted(named - allowed)
+    assert named == allowed, sorted(allowed - named)
+    assert len(allowed) == 9
+
+
+
+# --- Memory behaviour (skill 1.1.0) ------------------------------------------
+
+def test_memory_is_conditional_on_the_tools_being_present(prose):
+    """The same skill must still work as the pre-Memory four-tool skill."""
+    assert "only when its tools are present" in prose.lower()
+    assert "Check what you actually have" in prose
+    # It must say plainly what to do when Memory is absent.
+    assert "never mention, promise, or attempt a Memory tool" in prose
+
+
+def test_conversation_ambiguity_is_never_resolved_by_guessing(prose):
+    assert "do not pick one" in prose.lower()
+    assert "A matching name is not proof of identity" in prose
+    assert "never guess between them" in prose.lower()
+
+
+def test_coverage_governs_what_absence_may_mean(prose):
+    assert "trustworthy_empty" in prose
+    for forbidden_claim in ("it never happened", "nobody mentioned it"):
+        assert forbidden_claim in prose, forbidden_claim
+    assert "Two partial sources do not add up to a complete one" in prose
+
+
+def test_freshness_is_taught_as_distinct_from_coverage(prose):
+    for field in ("last_attempted_at", "last_succeeded_at", "observed_through",
+                  "complete_through", "latest_message_at"):
+        assert field in prose, field
+    assert "different question from coverage" in prose
+    assert "no staleness threshold" in prose.lower()
+    assert "must not invent one" in prose
+
+
+def test_the_latest_message_is_not_the_observed_boundary(prose):
+    """The confusion that would turn a quiet hour into an unobserved one."""
+    assert "This is not\n`observed_through`" in prose or "is not\n`observed_through`" in prose \
+        or "not `observed_through`" in prose
+
+
+def test_memory_is_read_only_and_sync_is_the_users_action(prose):
+    assert "no background refresh" in prose.lower()
+    assert "Never say or imply" in prose
+    assert "Sync Now" in prose
+
+
+def test_raw_tools_and_memory_stay_distinct(prose):
+    assert "does not make Memory complete" in prose
+    assert "never silently swap them" in prose.lower()
+
+
+def test_citation_rules_forbid_invention_and_reuse(prose):
+    assert "canonical_message_id" in prose
+    assert "Never invent one" in prose
+    assert "never cite an id you did not receive this run" in prose
+    assert "are not citations" in prose        # conversation discovery
+    assert "依据：" in prose
+
+
+def test_memory_content_is_untrusted_like_everything_else(prose):
+    assert "applies identically to anything read from Memory" in prose
+    assert "age does not make it trustworthy" in prose
+
+
+def test_efficiency_guidance_is_present(prose):
+    assert "Start narrow" in prose
+    assert "fewest calls" in prose
+    assert "Do not pull a whole history by default" in prose
 
 # --- Trust / injection rules -------------------------------------------------
 

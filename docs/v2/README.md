@@ -35,6 +35,7 @@ Git history and the reports together — never one old phase report in isolation
 21. `M2_2D_PACKAGED_MEMORY_RUNTIME.md` — the bundled memory worker, the app-owned store location, and Sync Now made real (no system Python; hardened runtime kept)
 22. `M2_2E_CANONICAL_MEMORY_ACTIVATION.md` — `--memory` alone finds the app-owned store, the real-user-data test guard, and the end-to-end product gate — **PASS**
 23. `M2_2F_RELEASE_PACKAGING_GATE.md` — Release signing of the nested helper **PASS**; notarization/stapling/Gatekeeper **NOT RUN** (no Developer ID identity or notary credential)
+24. `M2_3_MEMORY_SKILL_INTEGRATION.md` — the production skill learns Memory (v1.0.0 → v1.1.0); default 4-tool behaviour intact, 7/7 live Memory scenarios, citations validated — **PASS**
 
 ## Known supersessions
 
@@ -81,6 +82,11 @@ Verified from the documents themselves:
   M2.2f.** Release *configuration* signing of the nested helper now passes with
   hardened runtime intact; distribution signing, notarization and stapling
   remain NOT RUN for want of a Developer ID identity and a notary credential.
+- **"SKILL.md unchanged" is historical from M2.3 onward.** Every report up to
+  and including `M2_2F` states or assumes the skill was untouched; that was
+  true on its own date. `M2_3` is the first intentional change (v1.0.0 →
+  v1.1.0, blob `81d276ea` → `7c57580`), and the older statements are not
+  edited.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 
