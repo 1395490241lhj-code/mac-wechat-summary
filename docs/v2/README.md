@@ -32,6 +32,7 @@ Git history and the reports together — never one old phase report in isolation
 18. `M2_2A_LIVE_MEMORY_AGENT_GATE_COMPLETION.md` — the live half, run: exactly 4 / exactly 8 on a real Claude Code 2.1.238 process, four graded synthetic turns, **LIVE MEMORY AGENT GATE PASS**
 19. `M2_2B_CONVERSATION_DISCOVERY_GATE.md` — `memory_conversations` (exact-then-substring, never a guess), the boundary moved to exactly 4 / exactly 9, verified live: unique title resolved, ambiguous title kept as two candidates — **PASS**
 20. `M2_2C_MEMORY_SYNC_FRESHNESS.md` — freshness on every memory envelope (coverage ≠ freshness ≠ latest message), sync honours the selected source, app Sync Memory state + panel with the packaging gap stated, live freshness gate — **PASS**
+21. `M2_2D_PACKAGED_MEMORY_RUNTIME.md` — the bundled memory worker, the app-owned store location, and Sync Now made real (no system Python; hardened runtime kept)
 
 ## Known supersessions
 
@@ -66,6 +67,10 @@ Verified from the documents themselves:
 - **"Exactly eight" is superseded by "exactly nine" at M2.2b.** `M2_1`,
   `M2_2A` and its completion record eight memory-mode tools, correct as of
   their runs; `M2_2B` adds `memory_conversations` and re-verifies 4 / 9 live.
+- **M2.2c's packaging gap is closed by M2.2d.** `M2_2C` records that the app
+  shipped no runtime for the memory layer and its Sync Now reported that gap;
+  `M2_2D` bundles a self-contained helper, so Sync Now performs a real
+  foreground sync in a normal build.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

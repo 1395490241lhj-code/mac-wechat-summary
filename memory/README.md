@@ -55,4 +55,10 @@ newest stored message. No `is_fresh`, no staleness threshold.
 
 Sync (operator, foreground; honours `WECHAT_COMPANION_MESSAGE_SOURCE`, never
 substitutes a source): `python3 memory/memory_sync.py`.
+
+The app runs the same ingestion through `memory_worker.py`, frozen into a
+self-contained helper bundle (`scripts/build-memory-worker.sh`) that ships
+inside the app — so a normal install needs no Python. The store's one
+canonical location lives in `memory_paths.py`, matched by
+`MemoryStoreLocation.swift`.
 Tests: `cd memory && python -m pytest`.

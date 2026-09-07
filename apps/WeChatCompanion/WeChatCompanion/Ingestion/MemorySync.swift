@@ -61,7 +61,7 @@ struct MemorySyncCounts: Equatable, Sendable {
 /// Why a sync did not happen or did not finish. Fixed cases; the associated
 /// values are the memory layer's fixed state tokens, never message content,
 /// a path or an exception.
-enum MemorySyncFailure: Equatable, Sendable {
+enum MemorySyncFailure: Error, Equatable, Sendable {
     case consentWithheld
     case runnerUnavailable
     case sourceUnavailable(state: String)

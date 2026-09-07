@@ -84,16 +84,19 @@ def imported_modules(path: Path) -> set[str]:
 #: reader boundary, and itself. Anything else is a new dependency and should
 #: have to be argued for in review rather than appear.
 ALLOWED_IMPORTS = {
-    "__future__", "argparse", "ast", "dataclasses", "hashlib", "os", "pathlib",
+    "__future__", "argparse", "ast", "dataclasses", "hashlib", "json", "os", "pathlib",
     "plistlib", "secrets", "sqlite3", "subprocess", "sys", "time", "typing",
     "unicodedata", "urllib",
     # The MCP SDK, used by the read-only memory server only (M2.1).
     "mcp",
-    "memory_consent", "memory_freshness", "memory_identity", "memory_ingest", "memory_query",
-    "memory_retrieval", "memory_store", "memory_sync", "message_source",
-    # The bridge's own reader, imported lazily by the explicit sync CLI only
-    # (memory_sync.py); the memory MCP server must never import it.
-    "wechat_companion_mcp",
+    "memory_consent", "memory_freshness", "memory_identity", "memory_ingest", "memory_paths",
+    "memory_query", "memory_retrieval", "memory_store", "memory_sync", "memory_worker",
+    "message_source",
+    # The bridge's own source selection, imported lazily by the sync path only.
+    # Since M2.2d this is ``store_access``, which carries no MCP SDK, so the
+    # bundled worker can use the bridge's rule without the server's
+    # dependencies. The memory MCP server must still never import it.
+    "store_access",
 }
 
 
@@ -128,6 +131,6 @@ def test_the_mcp_sdk_is_confined_to_the_memory_server_module():
 def test_the_memory_server_never_imports_the_bridge():
     """Two servers, two processes, no shared code path (M2.1)."""
     path = ROOT / "memory" / "wechat_memory_mcp.py"
-    assert "wechat_companion_mcp" not in imported_modules(path)
-    assert "rion_reader_adapter" not in imported_modules(path)
-    assert "message_source" not in imported_modules(path)
+    for forbidden in ("wechat_companion_mcp", "store_access", "rion_reader_adapter",
+                      "message_source"):
+        assert forbidden not in imported_modules(path), forbidden

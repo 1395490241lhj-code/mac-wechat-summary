@@ -59,7 +59,7 @@ final class AppModel {
         credentials: any CredentialStoring = KeychainCredentialStore(),
         geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
         consentDefaults: UserDefaults = .standard,
-        memorySync: any MemorySyncRunning = UnavailableMemorySyncRunner()
+        memorySync: any MemorySyncRunning = AppModel.defaultMemorySyncRunner()
     ) {
         self.service = service
         self.store = store
@@ -155,7 +155,27 @@ final class AppModel {
     /// model change cannot race an in-flight request.
     var isExtractionProcessing: Bool { extractionMetrics.status == .processing }
 
-    // MARK: - Memory sync (M2.2c)
+    // MARK: - Memory sync (M2.2c, packaged in M2.2d)
+
+    /// The packaged worker when this build has one; otherwise the honest
+    /// runner that reports the packaging gap rather than faking a sync.
+    ///
+    /// A test host is an app bundle too, and since M2.2d it carries a real
+    /// worker pointed at the real store. Without this guard a test that built
+    /// an `AppModel` with default arguments would sync the user's own
+    /// messages into their own memory database as a side effect of running
+    /// the suite -- which it did, once, before the guard existed. Tests inject
+    /// the runner they mean to exercise; only a shipped app takes the
+    /// packaged one.
+    static func defaultMemorySyncRunner() -> any MemorySyncRunning {
+        let environment = ProcessInfo.processInfo.environment
+        let underTest = environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+        guard !underTest else { return UnavailableMemorySyncRunner() }
+        return PackagedMemorySyncRunner.bundled() ?? UnavailableMemorySyncRunner()
+    }
+
 
     /// The only source this app can offer: the store it fills itself. A
     /// database reader is an operator-side selection and is never substituted.

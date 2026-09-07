@@ -18,6 +18,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The bundled memory worker is nested code: `--deep` covers its signature,
+# but nothing else would notice if it were simply missing, so check that the
+# thing the app's Sync Now depends on is actually in the bundle.
+verify_memory_worker() {
+  local app="$1"
+  local worker="$app/Contents/Helpers/MemoryWorker.app/Contents/MacOS/MemoryWorker"
+
+  if [[ ! -x "$worker" ]]; then
+    echo "No bundled memory worker; Sync Now would report the packaging gap." >&2
+    echo "Run scripts/build-memory-worker.sh, then build again." >&2
+    return 1
+  fi
+  if ! codesign --verify --strict "$worker" >/dev/null 2>&1; then
+    echo "The bundled memory worker is not correctly signed." >&2
+    return 1
+  fi
+  if [[ "$(printf '{"op":"paths"}' | env -i "$worker")" != *"WeChatCompanion/memory.sqlite"* ]]; then
+    echo "The bundled memory worker did not answer its paths probe." >&2
+    return 1
+  fi
+}
+
 verify_signature() {
   local app="$1"
   local details identifier team
@@ -60,6 +82,7 @@ if ! xcodebuild \
 fi
 
 verify_signature "$BUILT_APP"
+verify_memory_worker "$BUILT_APP"
 
 mkdir -p "$INSTALL_DIR"
 STAGING_ROOT="$(mktemp -d "$INSTALL_DIR/.wechat-companion-dev.XXXXXX")"
@@ -83,4 +106,5 @@ else
 fi
 
 verify_signature "$INSTALL_APP"
+verify_memory_worker "$INSTALL_APP"
 printf '%s\n' "$INSTALL_APP"

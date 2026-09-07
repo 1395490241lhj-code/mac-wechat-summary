@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import store_access  # noqa: E402
 import wechat_companion_mcp as bridge  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -452,14 +453,26 @@ async def test_only_the_four_read_only_tools_are_exposed():
 
 # --- Source guards -----------------------------------------------------------
 
+def bridge_sources() -> list[Path]:
+    """Every file the bridge process is made of.
+
+    Store access and source selection moved into ``store_access`` so a process
+    without the MCP SDK can use the same code (M2.2d). These invariants are
+    about the bridge as a whole, so they follow the code into both files
+    rather than narrowing to whichever half kept them.
+    """
+    return [Path(bridge.__file__), Path(store_access.__file__)]
+
+
 def source_text() -> str:
-    """The bridge source with comment-only lines stripped.
+    """The bridge sources with comment-only lines stripped.
 
     Doc comments legitimately name the things the code must not do.
     """
-    source = Path(bridge.__file__).read_text(encoding="utf-8")
-    lines = [line for line in source.splitlines()
-             if not line.strip().startswith("#")]
+    lines: list[str] = []
+    for path in bridge_sources():
+        lines += [line for line in path.read_text(encoding="utf-8").splitlines()
+                  if not line.strip().startswith("#")]
     return "\n".join(lines)
 
 
@@ -481,7 +494,7 @@ def test_the_bridge_never_prints_content_to_stdout():
 
 def test_log_calls_never_interpolate_chat_content():
     """Every log(...) argument must be a fixed string or a count."""
-    source = Path(bridge.__file__).read_text(encoding="utf-8")
+    source = "\n".join(p.read_text(encoding="utf-8") for p in bridge_sources())
     for line in source.splitlines():
         stripped = line.strip()
         if not stripped.startswith("log("):
@@ -492,10 +505,10 @@ def test_log_calls_never_interpolate_chat_content():
 
 
 def test_no_home_directory_is_hardcoded():
-    source = Path(bridge.__file__).read_text(encoding="utf-8")
+    sources = [p.read_text(encoding="utf-8") for p in bridge_sources()]
     example = (Path(bridge.__file__).parents[1] / "hermes" / "config.example.yaml"
                ).read_text(encoding="utf-8")
-    for text in (source, example):
+    for text in (*sources, example):
         assert "/Users/" not in text
         assert "/home/" not in text
         assert "Application Support/WeChatCompanion" not in text

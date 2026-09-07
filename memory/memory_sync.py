@@ -95,20 +95,27 @@ def sync_from_source(
 def build_selected_source() -> MessageSource:
     """The source the environment selects, through the bridge's own resolver.
 
-    Imported lazily so this module -- and its tests -- never need the MCP SDK
-    the bridge module pulls in at import time. ``active_source`` is the
-    bridge's rule: absent selection means the visual store, ``database``
-    requires an injected reader, an unknown name fails closed, and there is
-    **no fallback in either direction** -- a database selection whose reader
-    is missing raises here and the sync does not run against the visual
-    store instead. The bridge's own opt-ins still apply.
-    """
-    import os
+    ``store_access`` holds the bridge's selection rule and, since M2.2d, no
+    longer drags in the MCP SDK: absent selection means the visual store,
+    ``database`` requires an injected reader, an unknown name fails closed,
+    and there is **no fallback in either direction** -- a database selection
+    whose reader is missing raises here and the sync does not run against the
+    visual store instead. The bridge's own opt-ins still apply.
 
-    sys.path.insert(
-        0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge")
-    )
-    from wechat_companion_mcp import active_source  # noqa: PLC0415
+    Imported inside the function so the module stays importable, and testable,
+    without the bridge on the path at all. The plain import is tried first
+    because a frozen worker has the module compiled in and no directory to
+    add.
+    """
+    try:
+        from store_access import active_source  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - source checkout, bridge not on the path
+        import os
+
+        sys.path.insert(
+            0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge")
+        )
+        from store_access import active_source  # noqa: PLC0415
 
     return active_source()
 

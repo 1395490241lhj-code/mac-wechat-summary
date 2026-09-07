@@ -160,13 +160,29 @@ struct MemorySyncTests {
     }
 
     @Test @MainActor
-    func theProductionRunnerReportsThePackagingGapInsteadOfFakingASync() async {
-        let model = AppModel(consentDefaults: makeDefaults())  // default runner
+    func aBuildWithoutAWorkerReportsThePackagingGapInsteadOfFakingASync() async {
+        // The M2.2c contract, still exact: with no worker to run, the app says
+        // so rather than pretending a sync happened.
+        let model = AppModel(consentDefaults: makeDefaults(),
+                             memorySync: UnavailableMemorySyncRunner())
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(model.memorySyncPhase == .failed(.runnerUnavailable))
         #expect(MemorySyncFailure.runnerUnavailable.message.contains("operator command line"))
         #expect(model.memoryFreshness == nil)
+    }
+
+    @Test @MainActor
+    func aTestHostNeverResolvesALiveRunnerAgainstTheRealStore() async {
+        // A test host is an app bundle carrying a real worker. Resolving it
+        // here would sync the user's own messages as a side effect of running
+        // the suite; the default must be the inert runner instead.
+        #expect(AppModel.defaultMemorySyncRunner() is UnavailableMemorySyncRunner)
+        let model = AppModel(consentDefaults: makeDefaults())
+        await model.setAllowsLocalPersistence(true)
+        await model.syncMemoryNow()
+        #expect(model.memorySyncPhase == .failed(.runnerUnavailable))
+        #expect(!FileManager.default.fileExists(atPath: MemoryStoreLocation.canonical.path))
     }
 
     @Test
