@@ -356,3 +356,29 @@ def test_the_frozen_worker_is_self_contained_and_syncs_end_to_end(tmp_path):
     status, _ = invoke([str(FROZEN)], {"op": "status", "store_path": str(store)}, env)
     assert status["freshness"]["sources"][SOURCE_VISUAL]["stored_messages"] == 1
     assert str(tmp_path) not in json.dumps(status)
+
+
+# --- canonical activation (M2.2e) --------------------------------------------
+
+
+def test_a_sync_with_no_store_path_writes_the_canonical_store(synthetic):
+    """The product path: the app names no location, the worker derives it."""
+    reply, code = run({"op": "sync"})          # no store_path at all
+    assert (reply["ok"], code) == (True, 0)
+    canonical = paths.canonical_store_path()   # isolated HOME, per the guard
+    assert canonical.exists()
+    assert reply["counts"]["messages_inserted"] == 2
+    assert str(canonical) not in json.dumps(reply)
+
+
+def test_the_worker_and_the_runner_agree_on_the_canonical_store(synthetic):
+    """The same file the ClaudeRunner will point the memory MCP at."""
+    run({"op": "sync"})
+    reply, _ = run({"op": "status"})           # also no path
+    assert reply["ok"] is True
+    assert reply["freshness"]["sources"][SOURCE_VISUAL]["stored_messages"] == 2
+    # The runner resolves it through the same module, not a literal of its own.
+    runner_source = (ROOT / "shadow/runners/claude.py").read_text(encoding="utf-8")
+    assert "memory_paths" in runner_source
+    assert "Application Support" not in runner_source
+    assert "memory.sqlite" not in runner_source

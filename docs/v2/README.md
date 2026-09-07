@@ -33,6 +33,7 @@ Git history and the reports together — never one old phase report in isolation
 19. `M2_2B_CONVERSATION_DISCOVERY_GATE.md` — `memory_conversations` (exact-then-substring, never a guess), the boundary moved to exactly 4 / exactly 9, verified live: unique title resolved, ambiguous title kept as two candidates — **PASS**
 20. `M2_2C_MEMORY_SYNC_FRESHNESS.md` — freshness on every memory envelope (coverage ≠ freshness ≠ latest message), sync honours the selected source, app Sync Memory state + panel with the packaging gap stated, live freshness gate — **PASS**
 21. `M2_2D_PACKAGED_MEMORY_RUNTIME.md` — the bundled memory worker, the app-owned store location, and Sync Now made real (no system Python; hardened runtime kept)
+22. `M2_2E_CANONICAL_MEMORY_ACTIVATION.md` — `--memory` alone finds the app-owned store, the real-user-data test guard, and the end-to-end product gate — **PASS**
 
 ## Known supersessions
 
@@ -71,6 +72,10 @@ Verified from the documents themselves:
   shipped no runtime for the memory layer and its Sync Now reported that gap;
   `M2_2D` bundles a self-contained helper, so Sync Now performs a real
   foreground sync in a normal build.
+- **M2.2d's manual `--memory-db-path` is no longer the product path.**
+  `M2_2D` still shows an operator supplying it; `M2_2E` makes `--memory` alone
+  resolve the app-owned canonical store, with the explicit path kept as a
+  test/debug override.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

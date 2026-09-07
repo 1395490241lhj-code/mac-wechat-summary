@@ -168,11 +168,9 @@ final class AppModel {
     /// the runner they mean to exercise; only a shipped app takes the
     /// packaged one.
     static func defaultMemorySyncRunner() -> any MemorySyncRunning {
-        let environment = ProcessInfo.processInfo.environment
-        let underTest = environment["XCTestConfigurationFilePath"] != nil
-            || environment["XCTestBundlePath"] != nil
-            || NSClassFromString("XCTestCase") != nil
-        guard !underTest else { return UnavailableMemorySyncRunner() }
+        // `bundled()` refuses under a test host; this stays as the second of
+        // two independent stops rather than trusting either alone.
+        guard !PackagedMemorySyncRunner.isUnderTestHost else { return UnavailableMemorySyncRunner() }
         return PackagedMemorySyncRunner.bundled() ?? UnavailableMemorySyncRunner()
     }
 

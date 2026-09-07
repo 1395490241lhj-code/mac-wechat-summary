@@ -197,8 +197,10 @@ Decided, not open questions — see `docs/v2/H5_PRIVACY_DECISIONS.md`:
 
 ## Memory MCP (M2.1) — off by default
 
-`--agent-backend claude --memory --memory-db-path <store> --memory-server memory/wechat_memory_mcp.py`
-adds a second, separate, read-only MCP server (five tools:
+`--agent-backend claude --memory --memory-server memory/wechat_memory_mcp.py`
+adds a second, separate, read-only MCP server over the **app-owned canonical
+store** — no path is required (`--memory-db-path` remains a test/debug
+override) — (five tools:
 `memory_conversations`, `memory_search`, `memory_timeline`, `memory_context`,
 `memory_recent`) and changes the expected wire set from exactly four tools to
 exactly nine. The request is validated before

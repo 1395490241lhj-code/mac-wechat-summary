@@ -59,6 +59,38 @@ private let successReply = """
 struct PackagedMemorySyncRunnerTests {
     // MARK: - Resolution
 
+    // MARK: - The M2.2d incident class
+
+    @Test @MainActor
+    func aTestHostNeverPairsARealWorkerWithTheRealStore() {
+        // The regression test for M2.2d: this very process is a test host
+        // whose bundle contains a real packaged worker whenever the worker has
+        // been built. Resolving it here would point at the user's own store.
+        #expect(PackagedMemorySyncRunner.isUnderTestHost)
+        #expect(PackagedMemorySyncRunner.bundled() == nil)
+        #expect(AppModel.defaultMemorySyncRunner() is UnavailableMemorySyncRunner)
+        // Proven without reading the user's store: only its absence-or-not is
+        // observed, and nothing here opens or creates it.
+        #expect(!FileManager.default.fileExists(
+            atPath: MemoryStoreLocation.canonical.path + ".test-marker"))
+    }
+
+    @Test
+    func theGuardRefusesEvenWhenAWorkerIsPresent() throws {
+        // A bundle that definitely contains a worker still yields no runner,
+        // so the refusal is the test host, not a missing file.
+        let fake = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FakeBundle-\(UUID().uuidString).app", isDirectory: true)
+        let helper = fake.appendingPathComponent("Contents/\(PackagedMemorySyncRunner.bundleSubpath)")
+        try FileManager.default.createDirectory(
+            at: helper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "#!/bin/bash\nexit 0\n".write(to: helper, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: helper.path)
+        defer { try? FileManager.default.removeItem(at: fake) }
+        #expect(FileManager.default.isExecutableFile(atPath: helper.path))
+        #expect(PackagedMemorySyncRunner.bundled(in: Bundle(path: fake.path) ?? .main) == nil)
+    }
+
     @Test
     func noWorkerInTheBundleMeansNoPackagedRunner() {
         let empty = FileManager.default.temporaryDirectory

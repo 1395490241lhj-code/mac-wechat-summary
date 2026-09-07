@@ -70,3 +70,25 @@ def test_the_swift_side_derives_the_same_location():
 def test_no_absolute_path_is_hardcoded_anywhere_in_the_module():
     source = Path(paths.__file__).read_text(encoding="utf-8")
     assert "/Users/" not in source and "/home/" not in source
+
+
+# --- the real-user-data guard itself (M2.2e) ---------------------------------
+
+
+def test_the_suite_runs_with_an_isolated_home(tmp_path):
+    """The guard's own test: deriving the canonical path cannot reach the user."""
+    from conftest import REAL_MEMORY_STORE
+
+    derived = paths.canonical_store_path()
+    assert derived != REAL_MEMORY_STORE
+    assert not str(derived).startswith(str(REAL_MEMORY_STORE.parent))
+    # ...and it is still the same shape, just rooted somewhere disposable.
+    assert derived.parts[-4:] == paths.RELATIVE_STORE_COMPONENTS
+
+
+def test_the_guard_is_central_not_scattered():
+    """One fixture, not an assertion repeated in every test that opens a store."""
+    for suite in ("memory", "shadow"):
+        conftest = (ROOT / suite / "tests" / "conftest.py").read_text(encoding="utf-8")
+        assert "def isolated_home(" in conftest
+        assert "real_data" in conftest

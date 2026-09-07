@@ -47,8 +47,9 @@ canary audit, not an assumption made here.
 
 **Memory MCP (M2.1).** Off by default. With ``memory_enabled`` the isolated
 MCP config names a second, separate read-only server over the memory store
-(``memory/wechat_memory_mcp.py``) and the expected wire set becomes exactly
-nine: the four bridge tools plus ``memory_search``, ``memory_timeline``,
+(``memory/wechat_memory_mcp.py``) reading the **app-owned canonical store**
+-- no path is required or supplied on the normal path (M2.2e) -- and the
+expected wire set becomes exactly nine: the four bridge tools plus ``memory_search``, ``memory_timeline``,
 ``memory_context``, ``memory_recent`` and ``memory_conversations`` (M2.2b).
 The request is validated before the
 run -- server present, database path given, the app's consent state
@@ -155,7 +156,10 @@ class ClaudeConfig:
     # exactly nine. A request that cannot be honoured refuses to start rather
     # than quietly running with the four bridge tools alone.
     memory_enabled: bool = False
-    memory_db_path: Path | None = None   # reaches the memory server env only
+    #: Override only. ``None`` -- the normal product path -- resolves the
+    #: app-owned canonical store. Whatever it is, it reaches the memory
+    #: server's environment and nothing else.
+    memory_db_path: Path | None = None
     memory_server: Path | None = None    # memory/wechat_memory_mcp.py; injected
     #: Reads the app's consent state for the pre-run check. Injectable so tests
     #: never touch the real preference domain; the server itself always reads
@@ -266,37 +270,61 @@ class ClaudeConfig:
             return {}
         if self.memory_server is None or not self.memory_server.is_file():
             raise ShadowError("memory: the memory server script was not supplied or does not exist")
-        if self.memory_db_path is None:
-            raise ShadowError("memory: an explicit memory database path is required")
-        env = {MEMORY_ENABLED_ENV: "1", MEMORY_DB_PATH_ENV: str(self.memory_db_path)}
+        # The store's location is the app's, not the operator's. With no
+        # override the canonical app-owned location is resolved from the
+        # memory layer's own definition -- never a literal repeated here, never
+        # a PATH search, and never a scan for an alternative store. An explicit
+        # ``--memory-db-path`` remains for isolated tests and debugging.
+        resolved = self.memory_db_path or self._canonical_store_path()
+        env = {MEMORY_ENABLED_ENV: "1", MEMORY_DB_PATH_ENV: str(resolved)}
         self._check_memory_available(env)
         return env
 
-    def _check_memory_available(self, env: dict) -> None:
-        """Consent and readability, checked with the memory layer's own gate."""
+    def _load_memory_module(self, name: str):
+        """Loads one memory-layer module from beside the injected server.
+
+        By path, not by import: the runner keeps no import-time dependency on
+        the package it launches as a subprocess. Modules are left in
+        ``sys.modules`` because they import each other.
+        """
         import importlib.util
 
-        memory_dir = self.memory_server.resolve().parent
-        loaded = {}
-        for name in ("memory_consent", "memory_store"):
-            spec = importlib.util.spec_from_file_location(name, memory_dir / f"{name}.py")
-            if spec is None or spec.loader is None:
-                raise ShadowError("memory: the memory layer could not be loaded")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[name] = module
-            try:
-                spec.loader.exec_module(module)
-            except Exception as exc:  # noqa: BLE001
-                sys.modules.pop(name, None)
-                raise ShadowError(f"memory: the memory layer could not be loaded "
-                                  f"({exc.__class__.__name__})") from exc
-            loaded[name] = module
-        consent, store = loaded["memory_consent"], loaded["memory_store"]
+        spec = importlib.util.spec_from_file_location(
+            name, self.memory_server.resolve().parent / f"{name}.py")
+        if spec is None or spec.loader is None:
+            raise ShadowError("memory: the memory layer could not be loaded")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001
+            sys.modules.pop(name, None)
+            raise ShadowError(f"memory: the memory layer could not be loaded "
+                              f"({exc.__class__.__name__})") from exc
+        return module
+
+    def _canonical_store_path(self) -> Path:
+        """The app-owned store, as the memory layer defines it."""
+        return Path(self._load_memory_module("memory_paths").canonical_store_path())
+
+    def _check_memory_available(self, env: dict) -> None:
+        """Consent and readability, checked with the memory layer's own gate.
+
+        Availability only: present, readable, a schema this build understands,
+        and consented. **Age is not a precondition.** A store last synced a
+        week ago is a fact for the model to weigh through the freshness on
+        every query envelope, not a reason to refuse a run, and there is
+        deliberately no threshold here that would decide otherwise.
+        """
+        consent = self._load_memory_module("memory_consent")
+        store = self._load_memory_module("memory_store")
         reader = self.memory_consent_reader or consent.read_app_consent_state_macos
         decision = consent.resolve_consent(env, reader)
         if not decision.allowed:
             raise ShadowError(f"memory: refused before the run ({decision.state})")
         try:
+            # Read-only: this must never bring a store into existence during an
+            # agent run. A missing store is a refusal, not something to create.
             store.MemoryStore.open_read_only(decision).close()
         except store.MemoryStoreError as exc:
             raise ShadowError(f"memory: the store cannot be read ({exc.state})") from exc

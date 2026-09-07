@@ -41,7 +41,7 @@ def app_state(allowed=True):
             "generation": 1, "updatedAt": 1.0}
 
 
-def memory_store(tmp_path, *, version=2, name="memory.sqlite"):
+def memory_store(tmp_path, *, version=2, name="memory.sqlite"):  # noqa: D401
     """A minimal file the read-only gate accepts: v2 tables, no rows."""
     sys.path.insert(0, str(MEMORY_DIR)); sys.path.insert(0, str(ROOT / "bridge"))
     try:
@@ -170,9 +170,97 @@ def test_memory_flags_without_opt_in_refuse(tmp_path):
         cfg(tmp_path, memory_server=SERVER).mcp_config_document()
 
 
-def test_missing_db_path_refuses(tmp_path):
-    with pytest.raises(ShadowError, match="explicit memory database path"):
-        cfg(tmp_path, memory_enabled=True, memory_server=SERVER).memory_env()
+def canonical_under(home, name="memory.sqlite"):
+    return home / "Library/Application Support/WeChatCompanion" / name
+
+
+def test_no_db_path_resolves_the_app_owned_canonical_store(tmp_path, monkeypatch):
+    """The normal product path: --memory alone, no location to know or type."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    store = memory_store(home.parent, name="ignored.sqlite")   # a real v2 file
+    canonical = canonical_under(home)
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_bytes(store.read_bytes())
+
+    c = cfg(tmp_path, memory_enabled=True, memory_server=SERVER)   # no path at all
+    env = c.memory_env()
+    assert env[MEMORY_DB_PATH_ENV] == str(canonical)
+    # Derived from the memory layer's own definition, not a literal here.
+    assert MEMORY_DB_PATH_ENV not in str(SERVER)
+    document = c.mcp_config_document()
+    assert document["mcpServers"][MEMORY_SERVER]["env"][MEMORY_DB_PATH_ENV] == str(canonical)
+
+
+def test_the_canonical_path_matches_the_memory_layers_own_definition(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    paths = load_by_path("memory_paths", MEMORY_DIR / "memory_paths.py")
+    c = cfg(tmp_path, memory_enabled=True, memory_server=SERVER)
+    assert c._canonical_store_path() == paths.canonical_store_path()
+    assert c._canonical_store_path() == canonical_under(home)
+
+
+def test_an_absent_canonical_store_refuses_and_creates_nothing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    c = cfg(tmp_path, memory_enabled=True, memory_server=SERVER)
+    with pytest.raises(ShadowError, match="memory_store_missing"):
+        c.memory_env()
+    # A read-only agent run must never bring a store into existence.
+    assert not canonical_under(home).exists()
+    assert not canonical_under(home).parent.exists()
+
+
+def test_an_explicit_override_still_wins(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    override = memory_store(tmp_path)
+    c = cfg(tmp_path, memory_enabled=True, memory_db_path=override, memory_server=SERVER)
+    assert c.memory_env()[MEMORY_DB_PATH_ENV] == str(override)
+    assert not canonical_under(home).exists()   # the canonical one is not consulted
+
+
+def test_age_is_never_a_precondition(tmp_path, monkeypatch):
+    """Availability, schema and consent gate a run. Staleness does not."""
+    import os
+    import time
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    canonical = canonical_under(home)
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    canonical.write_bytes(memory_store(tmp_path).read_bytes())
+    ancient = time.time() - 400 * 24 * 3600
+    os.utime(canonical, (ancient, ancient))
+    c = cfg(tmp_path, memory_enabled=True, memory_server=SERVER)
+    assert c.memory_env()[MEMORY_DB_PATH_ENV] == str(canonical)   # runs anyway
+    # Nothing in the activation path weighs age at all: no threshold, no
+    # clock comparison, nothing to tune. (The word "stale" elsewhere in the
+    # runner is preflight recovering leftover files, which is unrelated.)
+    import ast
+    import inspect
+    import textwrap
+
+    def code_only(function) -> str:
+        """The statements, without the prose that explains them.
+
+        The docstrings here legitimately name freshness in order to say it is
+        *not* consulted; a scan that read them would fail on the explanation
+        rather than on the behaviour.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    node.body = body[1:] or [ast.Pass()]
+        return ast.unparse(tree)
+
+    activation = code_only(ClaudeConfig.memory_env) + code_only(ClaudeConfig._check_memory_available)
+    for invented in ("stale", "max_age", "is_fresh", "freshness", "time", "mtime", "age"):
+        assert invented not in activation, invented
 
 
 def test_missing_server_refuses(tmp_path):

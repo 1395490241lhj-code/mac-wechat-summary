@@ -104,11 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     memory = ap.add_argument_group(
         "memory MCP (claude backend)",
         "Off unless asked for. Without --memory the run is exactly the "
-        "four-tool run; with it the surface is exactly nine read-only tools.")
+        "four-tool run; with it the surface is exactly nine read-only tools "
+        "over the app-owned canonical store -- no path needed.")
     memory.add_argument("--memory", action="store_true",
                         help="enable the separate read-only memory MCP server")
     memory.add_argument("--memory-db-path", type=Path,
-                        help="the memory store; reaches the memory server only")
+                        help="OVERRIDE for isolated tests and debugging. Omit it: "
+                             "--memory alone reads the app-owned canonical store. "
+                             "Whatever is used reaches the memory server only")
     memory.add_argument("--memory-server", type=Path,
                         help="memory/wechat_memory_mcp.py; never searched for")
     return ap

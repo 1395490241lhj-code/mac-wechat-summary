@@ -38,7 +38,23 @@ struct PackagedMemorySyncRunner: MemorySyncRunning {
     let messageStoreURL: URL
     var timeout: TimeInterval = 120
 
-    /// The runner for this build, or nil when no worker was bundled.
+    /// True when this process is a test host rather than the shipped app.
+    ///
+    /// A test host is an app bundle too, and since M2.2d it carries a real
+    /// worker. This is the one place that pairs that worker with the *real*
+    /// store, so it is the right place to refuse: without this, a test that
+    /// asked for the production runner would sync the user's own messages.
+    /// It happened once; the guard and its reason are kept together so that
+    /// neither is removed without the other.
+    static var isUnderTestHost: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
+    /// The runner for this build, or nil when no worker was bundled -- or when
+    /// this is a test host, whatever it happens to contain.
     ///
     /// Returning nil rather than a runner that always fails keeps the honest
     /// M2.2c behaviour available: a build without the worker still reports the
@@ -48,6 +64,7 @@ struct PackagedMemorySyncRunner: MemorySyncRunning {
         store: URL = MemoryStoreLocation.canonical,
         messageStore: URL = MemoryStoreLocation.messageStore
     ) -> PackagedMemorySyncRunner? {
+        guard !isUnderTestHost else { return nil }
         let executable = URL(fileURLWithPath: bundle.bundlePath)
             .appendingPathComponent("Contents")
             .appendingPathComponent(bundleSubpath)
