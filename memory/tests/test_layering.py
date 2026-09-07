@@ -24,7 +24,7 @@ def python_files(directory: Path):
 
 
 MEMORY_MODULES = ("memory_store", "memory_ingest", "memory_retrieval", "memory_query",
-                  "memory_sync", "memory_consent", "wechat_memory_mcp")
+                  "memory_sync", "memory_consent", "memory_freshness", "wechat_memory_mcp")
 
 
 def test_the_bridge_never_references_the_memory_layer():
@@ -89,7 +89,7 @@ ALLOWED_IMPORTS = {
     "unicodedata", "urllib",
     # The MCP SDK, used by the read-only memory server only (M2.1).
     "mcp",
-    "memory_consent", "memory_identity", "memory_ingest", "memory_query",
+    "memory_consent", "memory_freshness", "memory_identity", "memory_ingest", "memory_query",
     "memory_retrieval", "memory_store", "memory_sync", "message_source",
     # The bridge's own reader, imported lazily by the explicit sync CLI only
     # (memory_sync.py); the memory MCP server must never import it.

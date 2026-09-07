@@ -31,6 +31,7 @@ Git history and the reports together — never one old phase report in isolation
 17. `M2_2A_LIVE_MEMORY_AGENT_GATE.md` — live Claude Code memory gate: harness, corpus, isolation and preflight refusal executed; **live half not run (no credential)**
 18. `M2_2A_LIVE_MEMORY_AGENT_GATE_COMPLETION.md` — the live half, run: exactly 4 / exactly 8 on a real Claude Code 2.1.238 process, four graded synthetic turns, **LIVE MEMORY AGENT GATE PASS**
 19. `M2_2B_CONVERSATION_DISCOVERY_GATE.md` — `memory_conversations` (exact-then-substring, never a guess), the boundary moved to exactly 4 / exactly 9, verified live: unique title resolved, ambiguous title kept as two candidates — **PASS**
+20. `M2_2C_MEMORY_SYNC_FRESHNESS.md` — freshness on every memory envelope (coverage ≠ freshness ≠ latest message), sync honours the selected source, app Sync Memory state + panel with the packaging gap stated, live freshness gate — **PASS**
 
 ## Known supersessions
 

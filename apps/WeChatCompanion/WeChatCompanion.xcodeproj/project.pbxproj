@@ -26,8 +26,10 @@
 		A00000000000000000000012 /* GeminiFrameExtractor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000001B /* GeminiFrameExtractor.swift */; };
 		A00000000000000000000097 /* RetentionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000097 /* RetentionPolicy.swift */; };
 		A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009A /* LocalPersistenceConsentState.swift */; };
+		A0000000000000000000009B /* MemorySync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009B /* MemorySync.swift */; };
 		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
 		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
+		B0000000000000000000009C /* MemorySyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009C /* MemorySyncTests.swift */; };
 		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
 		A00000000000000000000092 /* FrameReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000092 /* FrameReconciler.swift */; };
 		A00000000000000000000093 /* MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000093 /* MessageStore.swift */; };
@@ -78,8 +80,10 @@
 		C0000000000000000000001B /* GeminiFrameExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiFrameExtractor.swift; sourceTree = "<group>"; };
 		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
 		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
+		C0000000000000000000009B /* MemorySync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MemorySync.swift; sourceTree = "<group>"; };
 		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
 		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000009C /* MemorySyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySyncTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
 		C00000000000000000000092 /* FrameReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/FrameReconciler.swift; sourceTree = "<group>"; };
 		C00000000000000000000093 /* MessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageStore.swift; sourceTree = "<group>"; };
@@ -155,6 +159,7 @@
 				C00000000000000000000094 /* MessageIngestor.swift */,
 				C00000000000000000000097 /* RetentionPolicy.swift */,
 				C0000000000000000000009A /* LocalPersistenceConsentState.swift */,
+				C0000000000000000000009B /* MemorySync.swift */,
 				C00000000000000000000098 /* LocalMessageHistory.swift */,
 				C00000000000000000000007 /* Info.plist */,
 			);
@@ -177,6 +182,7 @@
 				C00000000000000000000095 /* FrameReconcilerTests.swift */,
 				C00000000000000000000096 /* MessageIngestionTests.swift */,
 				C00000000000000000000099 /* LocalPersistenceConsentTests.swift */,
+				C0000000000000000000009C /* MemorySyncTests.swift */,
 			);
 			path = WeChatCompanionTests;
 			sourceTree = "<group>";
@@ -312,6 +318,7 @@
 				A00000000000000000000094 /* MessageIngestor.swift in Sources */,
 				A00000000000000000000097 /* RetentionPolicy.swift in Sources */,
 				A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */,
+				A0000000000000000000009B /* MemorySync.swift in Sources */,
 				A00000000000000000000098 /* LocalMessageHistory.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -333,6 +340,7 @@
 				B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */,
 				B00000000000000000000096 /* MessageIngestionTests.swift in Sources */,
 				B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */,
+				B0000000000000000000009C /* MemorySyncTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

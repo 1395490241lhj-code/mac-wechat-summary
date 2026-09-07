@@ -794,12 +794,112 @@ private struct SettingsView: View {
                         + "not affected.")
                 }
 
+                MemorySection(model: model)
+
                 Spacer(minLength: 0)
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Settings")
+    }
+}
+
+/// Memory status and the explicit Sync Now action (M2.2c).
+///
+/// Three different facts are shown as three different rows -- last successful
+/// sync, observed through, latest message -- because they answer three
+/// different questions, and a sync failure is shown apart from incomplete
+/// coverage for the same reason.
+private struct MemorySection: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        GroupBox("Memory") {
+            VStack(alignment: .leading, spacing: 0) {
+                MemoryRow(label: "Source", value: model.memorySource.label)
+                Divider()
+                if model.isMemoryAvailable {
+                    MemoryRow(label: "Last successful sync", value: stamp(model.memoryFreshness?.lastSuccessfulSync))
+                    Divider()
+                    MemoryRow(label: "Observed through", value: stamp(model.memoryFreshness?.observedThrough))
+                    Divider()
+                    MemoryRow(label: "Complete through", value: stamp(model.memoryFreshness?.completeThrough))
+                    Divider()
+                    MemoryRow(label: "Latest stored message", value: stamp(model.memoryFreshness?.latestMessageAt))
+                    Divider()
+                    MemoryRow(label: "Coverage", value: model.memoryFreshness?.coverageSummary ?? "—")
+                    Divider()
+                    MemoryRow(label: "Last sync state", value: lastRunState)
+                    Divider()
+                } else {
+                    Text("Memory persistence and sync are unavailable while local message "
+                        + "storage is off. Turning storage off does not delete existing memory.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 10)
+                    Divider()
+                }
+                HStack(alignment: .firstTextBaseline) {
+                    Button(model.memorySyncPhase.isRunning ? "Syncing…" : "Sync Now") {
+                        Task { await model.syncMemoryNow() }
+                    }
+                    .disabled(!model.canSyncMemory)
+                    if model.memorySyncPhase.isRunning {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(phaseText)
+                        .font(.callout)
+                        .foregroundStyle(phaseIsFailure ? .red : .secondary)
+                }
+                .padding(.vertical, 10)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var lastRunState: String {
+        guard let freshness = model.memoryFreshness else { return "—" }
+        if let failure = freshness.lastRunFailure { return "\(freshness.lastRunState) (\(failure))" }
+        return freshness.lastRunState
+    }
+
+    private var phaseIsFailure: Bool {
+        if case .failed = model.memorySyncPhase { return true }
+        return false
+    }
+
+    private var phaseText: String {
+        switch model.memorySyncPhase {
+        case .idle:
+            return model.isMemoryAvailable ? "Runs once, in the foreground, when you ask." : ""
+        case .running:
+            return "Reading the selected source into Memory."
+        case .succeeded(let counts):
+            return "Done: \(counts.messagesInserted) new, \(counts.messagesUpdated) re-observed, "
+                + "\(counts.conversationsSeen) conversation(s)."
+        case .failed(let failure):
+            return failure.message
+        }
+    }
+
+    private func stamp(_ date: Date?) -> String {
+        guard let date else { return "—" }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+private struct MemoryRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .padding(.vertical, 8)
     }
 }
 

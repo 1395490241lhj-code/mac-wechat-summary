@@ -48,5 +48,11 @@ Intended agent flow: `memory_conversations("产品群")` → a `canonical_conver
 `memory_recent`. Matching is exact-then-substring after NFC/trim/casefold; no
 fuzzy matching, no merge by name.
 
-Sync (operator, foreground): `python3 memory/memory_sync.py`.
+Every result also carries **freshness** (`memory_freshness.py`): when memory
+last synced and through what point each source was observed — separate from
+coverage (what portion of the *requested* data was observed) and from the
+newest stored message. No `is_fresh`, no staleness threshold.
+
+Sync (operator, foreground; honours `WECHAT_COMPANION_MESSAGE_SOURCE`, never
+substitutes a source): `python3 memory/memory_sync.py`.
 Tests: `cd memory && python -m pytest`.

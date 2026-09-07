@@ -230,6 +230,7 @@ def envelope(result: MemoryQueryResult) -> dict[str, Any]:
             },
         },
         "focal_canonical_id": result.focal_canonical_id,
+        "freshness": result.freshness.as_dict(),
     }
 
 
@@ -251,6 +252,7 @@ def discovery_envelope(result: ConversationDiscoveryResult) -> dict[str, Any]:
         "candidates": len(result.items),
         "unique": result.is_unique,
         "ambiguous": result.is_ambiguous,
+        "freshness": result.freshness.as_dict(),
     }
 
 

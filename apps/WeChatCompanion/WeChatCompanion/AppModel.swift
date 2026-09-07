@@ -42,6 +42,7 @@ final class AppModel {
     /// afterwards becomes unfalsifiable.
     @ObservationIgnored private let geminiTransport: any GeminiTransporting
     @ObservationIgnored private let consentDefaults: UserDefaults
+    @ObservationIgnored private let memorySync: any MemorySyncRunning
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     /// Independent of capture polling: an extraction already in flight can
     /// still finish after capture is paused, and Chats must show that result.
@@ -57,7 +58,8 @@ final class AppModel {
         messageHistory: LocalMessageHistory = .applicationSupport,
         credentials: any CredentialStoring = KeychainCredentialStore(),
         geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
-        consentDefaults: UserDefaults = .standard
+        consentDefaults: UserDefaults = .standard,
+        memorySync: any MemorySyncRunning = UnavailableMemorySyncRunner()
     ) {
         self.service = service
         self.store = store
@@ -68,6 +70,7 @@ final class AppModel {
         self.credentials = credentials
         self.geminiTransport = geminiTransport
         self.consentDefaults = consentDefaults
+        self.memorySync = memorySync
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
         )
@@ -152,6 +155,51 @@ final class AppModel {
     /// model change cannot race an in-flight request.
     var isExtractionProcessing: Bool { extractionMetrics.status == .processing }
 
+    // MARK: - Memory sync (M2.2c)
+
+    /// The only source this app can offer: the store it fills itself. A
+    /// database reader is an operator-side selection and is never substituted.
+    let memorySource: MemorySource = .visual
+    private(set) var memorySyncPhase: MemorySyncPhase = .idle
+    /// The last freshness the runner reported. Kept across a consent
+    /// withdrawal -- withdrawing is not a delete request -- but nothing new is
+    /// read or written while consent is off.
+    private(set) var memoryFreshness: MemoryFreshnessSummary?
+
+    /// Memory persistence and sync exist only under the local-storage consent.
+    var isMemoryAvailable: Bool { allowsLocalPersistence }
+    var canSyncMemory: Bool { isMemoryAvailable && !memorySyncPhase.isRunning }
+
+    /// Explicit, foreground, user-initiated. The consent gate is checked here
+    /// first, so the runner is never reached without it; the runner is then
+    /// asked for the configured source and nothing else.
+    func syncMemoryNow() async {
+        guard allowsLocalPersistence else {
+            memorySyncPhase = .failed(.consentWithheld)
+            return
+        }
+        guard !memorySyncPhase.isRunning else { return }
+        memorySyncPhase = .running
+        switch await memorySync.sync(source: memorySource) {
+        case .succeeded(let counts, let freshness):
+            memorySyncPhase = .succeeded(counts)
+            if let freshness {
+                memoryFreshness = freshness
+            } else {
+                memoryFreshness = await memorySync.freshness(source: memorySource)
+            }
+        case .failed(let failure):
+            memorySyncPhase = .failed(failure)
+        }
+    }
+
+    func refreshMemoryFreshness() async {
+        guard allowsLocalPersistence else { return }
+        if let freshness = await memorySync.freshness(source: memorySource) {
+            memoryFreshness = freshness
+        }
+    }
+
     // MARK: - Local persistence settings
 
     /// Turning this on opens (and if needed creates) the local database.
@@ -163,6 +211,11 @@ final class AppModel {
         allowsLocalPersistence = isAllowed
         consentDefaults.set(isAllowed, forKey: Self.localPersistenceConsentKey)
         LocalPersistenceConsentState.record(allowsLocalMessageStorage: isAllowed, in: consentDefaults)
+        if !isAllowed {
+            // Takes effect immediately: no sync can start, and a result from
+            // before the withdrawal is not shown as if it were current state.
+            memorySyncPhase = .idle
+        }
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
     }

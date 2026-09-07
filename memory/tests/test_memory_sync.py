@@ -119,5 +119,49 @@ def test_nothing_schedules_or_polls():
         if isinstance(node, (ast.Import, ast.ImportFrom))
         for alias in (node.names if isinstance(node, ast.Import) else [None])
     }
-    assert imported.isdisjoint({"sched", "threading", "asyncio", "time", "signal", "subprocess"})
+    assert imported.isdisjoint({"sched", "threading", "asyncio", "signal", "subprocess"})
+    assert "sleep" not in inspect.getsource(memory_sync)
     assert "while True" not in inspect.getsource(memory_sync.main)
+
+
+# --- M2.2c: the selected source, never another -------------------------------------
+
+
+def test_the_cli_refuses_when_the_selected_source_cannot_be_built(tmp_path, monkeypatch, capsys):
+    """A database selection without its reader stops the sync; nothing else runs."""
+    for key, value in env(tmp_path).items():
+        monkeypatch.setenv(key, value)
+    def selected():
+        raise MessageSourceError("reader_not_configured", "No external reader configured.")
+    code = memory_sync.main([], build_source=selected)
+    out = capsys.readouterr().out
+    assert code == 1 and "state: reader_not_configured" in out
+    assert not (tmp_path / "memory.sqlite").exists()
+
+
+@pytest.mark.parametrize("selection,expected", [
+    ("database", "reader_not_configured"),
+    ("carrier-pigeon", "source_unknown"),
+])
+def test_build_selected_source_honours_the_bridge_rule(monkeypatch, selection, expected):
+    monkeypatch.setenv("WECHAT_COMPANION_MESSAGE_SOURCE", selection)
+    monkeypatch.setenv("WECHAT_COMPANION_ALLOW_AGENT_READ", "1")
+    monkeypatch.delenv("WECHAT_COMPANION_READER_BIN", raising=False)
+    with pytest.raises(MessageSourceError) as raised:
+        memory_sync.build_selected_source()
+    assert raised.value.state == expected
+
+
+def test_build_selected_source_defaults_to_visual_and_never_switches(monkeypatch):
+    monkeypatch.delenv("WECHAT_COMPANION_MESSAGE_SOURCE", raising=False)
+    assert memory_sync.build_selected_source().name == SOURCE_VISUAL
+    monkeypatch.setenv("WECHAT_COMPANION_MESSAGE_SOURCE", "visual")
+    assert memory_sync.build_selected_source().name == SOURCE_VISUAL
+
+
+def test_a_successful_sync_reports_freshness(tmp_path):
+    report = memory_sync.sync_from_source(FakeSource(MESSAGES), environment=env(tmp_path),
+                                          read_app_consent_state=lambda: app_state(True))
+    assert report.freshness["participating_sources"] == [SOURCE_VISUAL]
+    assert report.freshness["sources"][SOURCE_VISUAL]["last_attempt_state"] == "succeeded"
+    assert report.summary()["freshness"] is report.freshness

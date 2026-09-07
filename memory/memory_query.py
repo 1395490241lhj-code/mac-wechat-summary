@@ -46,9 +46,12 @@ not be. The representative observation for a group is chosen by a fixed rule
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
+
+from memory_freshness import MemoryFreshness, memory_freshness
 
 from memory_store import (
     COVERAGE_COMPLETE,
@@ -325,6 +328,9 @@ class MemoryQueryResult:
     coverage: CoverageReport
     truncated: bool
     query_scope: QueryScope
+    #: When memory was last synced and through what point each source was
+    #: observed (M2.2c). Required: a result without it cannot be built.
+    freshness: MemoryFreshness
     #: For ``context_around``: the canonical id of the focal observation.
     focal_canonical_id: str | None = None
 
@@ -446,6 +452,9 @@ class ConversationDiscoveryResult:
     truncated: bool
     query_scope: QueryScope
     coverage: ConversationCoverage
+    #: Store freshness. Says when memory last synced, never that the store
+    #: knows every conversation the source has.
+    freshness: MemoryFreshness
 
     @property
     def is_unique(self) -> bool:
@@ -503,8 +512,13 @@ def representative_of(observations: Sequence[Observation]) -> Observation:
 class MemoryQueryService:
     """Reads the memory store. Never writes to it."""
 
-    def __init__(self, store: MemoryStore) -> None:
+    def __init__(self, store: MemoryStore, *, clock=time.time) -> None:
         self._store = store
+        self._clock = clock
+
+    def freshness(self) -> MemoryFreshness:
+        """When memory was last updated, per source and aggregated."""
+        return memory_freshness(self._store, generated_at=float(self._clock()))
 
     # -- policy resolution --------------------------------------------------
 
@@ -594,7 +608,7 @@ class MemoryQueryService:
             sender=sender, ownership=ownership,
         )
         return MemoryQueryResult(
-            items=items, truncated=truncated, query_scope=scope,
+            items=items, truncated=truncated, query_scope=scope, freshness=self.freshness(),
             coverage=self._coverage(
                 resolved, conversation_canonical_id=conversation_canonical_id,
                 start=start, end=end,
@@ -657,7 +671,7 @@ class MemoryQueryService:
             anchor=(after or before).canonical_id if (after or before) else None,
         )
         return MemoryQueryResult(
-            items=items, truncated=truncated, query_scope=scope,
+            items=items, truncated=truncated, query_scope=scope, freshness=self.freshness(),
             coverage=self._coverage(
                 resolved, conversation_canonical_id=conversation_canonical_id,
                 start=start, end=end,
@@ -716,7 +730,7 @@ class MemoryQueryService:
             anchor=canonical_message_id,
         )
         return MemoryQueryResult(
-            items=items, truncated=truncated, query_scope=scope,
+            items=items, truncated=truncated, query_scope=scope, freshness=self.freshness(),
             focal_canonical_id=canonical_message_id,
             coverage=self._coverage(
                 resolved, conversation_canonical_id=conversation,
@@ -768,7 +782,7 @@ class MemoryQueryService:
             window=(since, until), limit=limit, order=order,
         )
         return MemoryQueryResult(
-            items=items, truncated=truncated, query_scope=scope,
+            items=items, truncated=truncated, query_scope=scope, freshness=self.freshness(),
             coverage=self._coverage(
                 resolved, conversation_canonical_id=conversation_canonical_id,
                 start=since, end=until,
@@ -844,6 +858,7 @@ class MemoryQueryService:
         return ConversationDiscoveryResult(
             items=tuple(items[:limit]), truncated=truncated, query_scope=scope,
             coverage=ConversationCoverage(exhaustive_of_store=not truncated),
+            freshness=self.freshness(),
         )
 
     # -- plumbing ------------------------------------------------------------

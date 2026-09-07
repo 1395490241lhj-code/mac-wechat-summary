@@ -419,3 +419,55 @@ async def _session_first_call_only(env):
             result = await session.call_tool("memory_search", {"text": "x"})
             text = "".join(getattr(c, "text", "") for c in result.content)
             return None, json.loads(text)
+
+
+# --- M2.2c: freshness on every envelope ---------------------------------------------
+
+
+FRESHNESS_KEYS = {"generated_at", "participating_sources", "last_successful_sync", "observed_through_all_sources",
+                  "complete_through_all_sources", "sources", "caveats", "semantics"}
+
+
+def test_all_five_tools_carry_freshness_beside_unchanged_coverage_and_citations(served):
+    responses = {
+        "search": call(server.memory_search, text="消息"),
+        "timeline": call(server.memory_timeline, conversation_id=CONV),
+        "context": call(server.memory_context, message_id=vid(5)),
+        "recent": call(server.memory_recent),
+        "conversations": call(server.memory_conversations),
+    }
+    for kind, response in responses.items():
+        assert response["ok"] is True, kind
+        assert set(response["freshness"]) == FRESHNESS_KEYS, kind
+        assert response["freshness"]["participating_sources"] == [SOURCE_VISUAL]
+        source = response["freshness"]["sources"][SOURCE_VISUAL]
+        assert set(source) == {"source", "runs_total", "last_attempted_at", "last_attempt_state",
+                               "last_attempt_failure_state", "last_succeeded_at", "observed_through",
+                               "complete_through", "latest_message_at", "latest_message_timestamp_kind",
+                               "stored_messages"}
+        assert {"items", "truncated", "query_scope", "coverage"} <= set(response), kind
+    # Coverage and citation shapes are the M2 / M2.1 ones, untouched.
+    assert set(responses["search"]["coverage"]) == {"status", "trustworthy_empty", "required_sources",
+                                                    "supplemental_sources", "complete_sources", "per_source", "caveats"}
+    assert set(responses["search"]["items"][0]["citation"]) == {
+        "canonical_message_id", "logical_message_id", "canonical_conversation_id", "source",
+        "source_message_id", "identity_mode", "timestamp", "timestamp_kind"}
+    assert responses["conversations"]["coverage"]["status"] == "store_inventory"
+
+
+def test_freshness_values_are_the_stores_not_the_questions(served):
+    a = call(server.memory_search, text="消息", start=BASE, end=BASE + 10)["freshness"]
+    b = call(server.memory_recent, limit=1)["freshness"]
+    for key in FRESHNESS_KEYS - {"generated_at"}:
+        assert a[key] == b[key]
+    assert a["sources"][SOURCE_VISUAL]["last_succeeded_at"] == 1_000.0
+    assert a["sources"][SOURCE_VISUAL]["observed_through"] == BASE + 1_000
+    assert a["sources"][SOURCE_VISUAL]["latest_message_at"] == BASE + 100
+    assert a["last_successful_sync"] == {"source": SOURCE_VISUAL, "at": 1_000.0}
+
+
+def test_freshness_has_no_boolean_verdict_and_leaks_nothing(served, tmp_path):
+    import getpass, socket
+    blob = json.dumps(call(server.memory_recent)["freshness"], ensure_ascii=False)
+    for token in ("is_fresh", "stale", "isFresh", str(tmp_path), "sqlite", socket.gethostname(), getpass.getuser()):
+        assert token not in blob, token
