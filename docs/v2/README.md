@@ -34,6 +34,7 @@ Git history and the reports together — never one old phase report in isolation
 20. `M2_2C_MEMORY_SYNC_FRESHNESS.md` — freshness on every memory envelope (coverage ≠ freshness ≠ latest message), sync honours the selected source, app Sync Memory state + panel with the packaging gap stated, live freshness gate — **PASS**
 21. `M2_2D_PACKAGED_MEMORY_RUNTIME.md` — the bundled memory worker, the app-owned store location, and Sync Now made real (no system Python; hardened runtime kept)
 22. `M2_2E_CANONICAL_MEMORY_ACTIVATION.md` — `--memory` alone finds the app-owned store, the real-user-data test guard, and the end-to-end product gate — **PASS**
+23. `M2_2F_RELEASE_PACKAGING_GATE.md` — Release signing of the nested helper **PASS**; notarization/stapling/Gatekeeper **NOT RUN** (no Developer ID identity or notary credential)
 
 ## Known supersessions
 
@@ -76,6 +77,10 @@ Verified from the documents themselves:
   `M2_2D` still shows an operator supplying it; `M2_2E` makes `--memory` alone
   resolve the app-owned canonical store, with the explicit path kept as a
   test/debug override.
+- **M2.2d's "release/notarization untested" is narrowed, not resolved, by
+  M2.2f.** Release *configuration* signing of the nested helper now passes with
+  hardened runtime intact; distribution signing, notarization and stapling
+  remain NOT RUN for want of a Developer ID identity and a notary credential.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 

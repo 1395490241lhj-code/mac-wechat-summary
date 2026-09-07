@@ -64,6 +64,7 @@ rm -rf "$BUILD/dist" "$BUILD/work"
 "$VENV/bin/pyinstaller" \
   --onedir --noconfirm --clean --log-level ERROR \
   --windowed --name MemoryWorker \
+  --osx-bundle-identifier com.lianghongjing.WeChatCompanion.MemoryWorker \
   --distpath "$BUILD/dist" --workpath "$BUILD/work" --specpath "$BUILD" \
   --paths "$ROOT/memory" --paths "$ROOT/bridge" \
   --hidden-import store_access \
@@ -82,8 +83,19 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   exit 1
 fi
 
+# A helper that is not a user-facing app: no Dock icon, no menu bar.
 /usr/libexec/PlistBuddy -c "Add :LSBackgroundOnly bool true" "$OUT/Contents/Info.plist" >/dev/null 2>&1 \
   || /usr/libexec/PlistBuddy -c "Set :LSBackgroundOnly true" "$OUT/Contents/Info.plist" >/dev/null 2>&1 || true
+
+# The nested bundle needs its own valid, unique, reverse-DNS identifier.
+# PyInstaller defaults to the bare product name ("MemoryWorker"), which is
+# neither, and which a notarization service is entitled to reject. It also
+# becomes the code-signing identifier, so getting it right here fixes both.
+identifier="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$OUT/Contents/Info.plist" 2>/dev/null || echo)"
+if [[ "$identifier" != "com.lianghongjing.WeChatCompanion.MemoryWorker" ]]; then
+  echo "Nested bundle identifier is '$identifier'; expected the reverse-DNS one." >&2
+  exit 1
+fi
 
 # It must run with nothing in the environment: no interpreter on PATH, no
 # PYTHONPATH, no site-packages. If this fails the bundle is not self-contained.
