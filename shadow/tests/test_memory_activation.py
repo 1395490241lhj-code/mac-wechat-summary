@@ -1,6 +1,6 @@
 """Memory MCP activation from the agent path (M2.1).
 
-Off by default and byte-for-byte the four-tool run when off; exactly eight
+Off by default and byte-for-byte the four-tool run when off; exactly nine
 tools when on; refuses to start on any memory request it cannot honour. No
 test here reads the real preference domain or launches a real CLI.
 """
@@ -108,17 +108,18 @@ def test_memory_tools_on_the_wire_in_default_mode_are_refused():
         check_tool_boundary(set(CLAUDE_EXPECTED_TOOLS_WITH_MEMORY), CLAUDE_EXPECTED_TOOLS)
 
 
-# --- enabled: exactly eight --------------------------------------------------------
+# --- enabled: exactly nine ---------------------------------------------------------
 
 
-def test_enabled_is_exactly_eight_tools(tmp_path):
+def test_enabled_is_exactly_nine_tools(tmp_path):
     store = memory_store(tmp_path)
     c = cfg(tmp_path, memory_enabled=True, memory_db_path=store, memory_server=SERVER)
     assert c.expected_tools == CLAUDE_EXPECTED_TOOLS_WITH_MEMORY
-    assert len(c.expected_tools) == 8
+    assert len(c.expected_tools) == 9
     assert CLAUDE_EXPECTED_TOOLS_WITH_MEMORY == CLAUDE_EXPECTED_TOOLS | CLAUDE_MEMORY_TOOLS
     assert CLAUDE_MEMORY_TOOLS == {claude_wire_name(MEMORY_SERVER, t) for t in MEMORY_TOOLS}
-    assert MEMORY_TOOLS == ("memory_search", "memory_timeline", "memory_context", "memory_recent")
+    assert MEMORY_TOOLS == ("memory_search", "memory_timeline", "memory_context", "memory_recent",
+                            "memory_conversations")
 
 
 def test_enabled_config_names_both_servers_and_isolates_the_memory_path(tmp_path):
@@ -136,18 +137,19 @@ def test_enabled_config_names_both_servers_and_isolates_the_memory_path(tmp_path
     assert not any("MEMORY" in k for k in child)
 
 
-def test_enabled_allowed_tools_are_exactly_eight(tmp_path):
+def test_enabled_allowed_tools_are_exactly_nine(tmp_path):
     store = memory_store(tmp_path)
     runner = ClaudeRunner(cfg(tmp_path, memory_enabled=True, memory_db_path=store, memory_server=SERVER))
     argv = runner.argv("p")
     allowed = set(argv[argv.index("--allowedTools") + 1].split(","))
-    assert allowed == CLAUDE_EXPECTED_TOOLS_WITH_MEMORY and len(allowed) == 8
+    assert allowed == CLAUDE_EXPECTED_TOOLS_WITH_MEMORY and len(allowed) == 9
     assert argv[argv.index("--tools") + 1] == ""
 
 
 @pytest.mark.parametrize("extra", [{"Bash"}, {"Read"}, {"WebFetch"}, {"ListMcpResourcesTool"}, {"Task"},
-                                   {"mcp__wechat_memory__memory_sync"}, {"mcp__wechat_memory__memory_link"}])
-def test_enabled_gate_refuses_any_ninth_tool(extra):
+                                   {"mcp__wechat_memory__memory_sync"}, {"mcp__wechat_memory__memory_link"},
+                                   {"mcp__wechat_memory__memory_delete"}, {"ReadMcpResourceTool"}])
+def test_enabled_gate_refuses_any_tenth_tool(extra):
     with pytest.raises(ShadowError, match="unexpected"):
         check_tool_boundary(set(CLAUDE_EXPECTED_TOOLS_WITH_MEMORY) | extra, CLAUDE_EXPECTED_TOOLS_WITH_MEMORY)
 
@@ -299,4 +301,4 @@ def test_runner_constants_match_the_memory_layer():
     assert f'SERVER_NAME: Final = "{MEMORY_SERVER}"' in text
     for tool in MEMORY_TOOLS:
         assert f"def {tool}(" in text
-    assert text.count("@mcp.tool(") == 4
+    assert text.count("@mcp.tool(") == 5

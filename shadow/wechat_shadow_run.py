@@ -21,7 +21,7 @@ The orchestration lives in ``agent_runner.py``; each runtime lives in
 * ``hermes`` (default) — the original Hermes Agent CLI backend. Its flags and
   behaviour are unchanged from before H6.
 * ``claude`` — Claude Code headless. Synthetic-only until its gates are sealed.
-  ``--memory`` adds the separate read-only memory MCP server (exactly eight
+  ``--memory`` adds the separate read-only memory MCP server (exactly nine
   tools on the wire instead of four); off by default.
 
 Not enabled, by construction: cron, unattended execution, messaging sends,
@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory = ap.add_argument_group(
         "memory MCP (claude backend)",
         "Off unless asked for. Without --memory the run is exactly the "
-        "four-tool run; with it the surface is exactly eight read-only tools.")
+        "four-tool run; with it the surface is exactly nine read-only tools.")
     memory.add_argument("--memory", action="store_true",
                         help="enable the separate read-only memory MCP server")
     memory.add_argument("--memory-db-path", type=Path,

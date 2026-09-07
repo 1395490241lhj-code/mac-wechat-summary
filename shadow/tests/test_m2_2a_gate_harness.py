@@ -49,7 +49,7 @@ def test_the_gate_runner_keeps_the_eight_tool_boundary_and_swaps_only_the_prompt
                            memory=tmp_path / "memory.sqlite", consent_home=tmp_path / "home")
     runner = gate.LiveMemoryRunner(cfg, "q", err=io.StringIO())
     assert runner.expected_tools == gate.CLAUDE_EXPECTED_TOOLS_WITH_MEMORY
-    assert len(runner.expected_tools) == 8
+    assert len(runner.expected_tools) == 9  # nine since M2.2b; the M2.2a doc records eight as of its run
     argv = runner.argv("q")
     assert argv[argv.index("--output-format") + 1] == "stream-json"
     assert argv[argv.index("--system-prompt") + 1] == gate.TEST_SYSTEM_PROMPT

@@ -48,8 +48,9 @@ canary audit, not an assumption made here.
 **Memory MCP (M2.1).** Off by default. With ``memory_enabled`` the isolated
 MCP config names a second, separate read-only server over the memory store
 (``memory/wechat_memory_mcp.py``) and the expected wire set becomes exactly
-eight: the four bridge tools plus ``memory_search``, ``memory_timeline``,
-``memory_context``, ``memory_recent``. The request is validated before the
+nine: the four bridge tools plus ``memory_search``, ``memory_timeline``,
+``memory_context``, ``memory_recent`` and ``memory_conversations`` (M2.2b).
+The request is validated before the
 run -- server present, database path given, the app's consent state
 allowing, the store readable at a supported version -- and refuses to start
 otherwise. The memory database path reaches the memory server's environment
@@ -96,7 +97,8 @@ READER_TIMEOUT_ENV = "WECHAT_COMPANION_READER_TIMEOUT"
 #: them. Repeated here for the same reason as the bridge's: the runner keeps no
 #: import-time dependency on what it launches, and a test compares the copies.
 MEMORY_SERVER = "wechat_memory"
-MEMORY_TOOLS = ("memory_search", "memory_timeline", "memory_context", "memory_recent")
+MEMORY_TOOLS = ("memory_search", "memory_timeline", "memory_context", "memory_recent",
+                "memory_conversations")
 MEMORY_ENABLED_ENV = "WECHAT_COMPANION_MEMORY_ENABLED"
 MEMORY_DB_PATH_ENV = "WECHAT_COMPANION_MEMORY_DB_PATH"
 
@@ -115,7 +117,7 @@ def claude_wire_name(server: str, tool: str) -> str:
 CLAUDE_EXPECTED_TOOLS = frozenset(claude_wire_name(BRIDGE_SERVER, t) for t in BRIDGE_TOOLS)
 CLAUDE_MEMORY_TOOLS = frozenset(claude_wire_name(MEMORY_SERVER, t) for t in MEMORY_TOOLS)
 #: The whole surface with memory explicitly enabled: the four bridge tools
-#: plus the four memory tools, and nothing else. Exactly eight.
+#: plus the five memory tools, and nothing else. Exactly nine.
 CLAUDE_EXPECTED_TOOLS_WITH_MEMORY = CLAUDE_EXPECTED_TOOLS | CLAUDE_MEMORY_TOOLS
 
 
@@ -150,7 +152,7 @@ class ClaudeConfig:
     # default, and when off the run is exactly the four-tool run it has always
     # been: no server, no variable, no expected tool. When on, everything it
     # needs is validated before the run starts and the expected surface becomes
-    # exactly eight. A request that cannot be honoured refuses to start rather
+    # exactly nine. A request that cannot be honoured refuses to start rather
     # than quietly running with the four bridge tools alone.
     memory_enabled: bool = False
     memory_db_path: Path | None = None   # reaches the memory server env only
@@ -244,7 +246,7 @@ class ClaudeConfig:
 
     @property
     def expected_tools(self) -> frozenset[str]:
-        """Exactly four, or exactly eight. Nothing in between."""
+        """Exactly four, or exactly nine. Nothing in between."""
         return CLAUDE_EXPECTED_TOOLS_WITH_MEMORY if self.memory_enabled else CLAUDE_EXPECTED_TOOLS
 
     def memory_env(self) -> dict:

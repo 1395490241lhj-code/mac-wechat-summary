@@ -74,11 +74,12 @@ def served(tmp_path, monkeypatch):
 # --- surface -------------------------------------------------------------------
 
 
-def test_exactly_four_read_only_tools_are_declared():
+def test_exactly_five_read_only_tools_are_declared():
     names = {t if isinstance(t, str) else getattr(t, "name", None)
              for t in _declared_tool_names()}
     assert names == set(server.TOOL_NAMES)
-    assert names == {"memory_search", "memory_timeline", "memory_context", "memory_recent"}
+    assert names == {"memory_search", "memory_timeline", "memory_context", "memory_recent",
+                     "memory_conversations"}
 
 
 def _declared_tool_names():
@@ -146,7 +147,8 @@ def test_the_policy_is_reported_but_not_accepted(served):
     scope = call(server.memory_search)["query_scope"]
     assert scope["policy"] == {"required_sources": [SOURCE_VISUAL], "supplemental_sources": []}
     import inspect
-    for tool in (server.memory_search, server.memory_timeline, server.memory_context, server.memory_recent):
+    for tool in (server.memory_search, server.memory_timeline, server.memory_context, server.memory_recent,
+                 server.memory_conversations):
         parameters = inspect.signature(getattr(tool, "fn", tool)).parameters
         assert "policy" not in parameters and "source" not in parameters
         assert not any("path" in p or "sql" in p for p in parameters)

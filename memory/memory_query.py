@@ -46,6 +46,7 @@ not be. The representative observation for a group is chosen by a fixed rule
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Literal, Sequence
 
@@ -334,6 +335,141 @@ class MemoryQueryResult:
     @property
     def citations(self) -> tuple[MessageCitation, ...]:
         return tuple(c for item in self.items for c in item.citations)
+
+
+# --- Conversation discovery (M2.2b) --------------------------------------------
+#
+# The one question the message queries cannot answer: "which conversation is
+# 「产品群」?". Discovery is deliberately dumb. A name matches a stored display
+# name *exactly* after normalisation, or as a *substring* of it, and that is
+# the whole rule: no fuzzy matching, no ranking by similarity, no model. Two
+# conversations with the same display name are two candidates and stay two
+# candidates; choosing between them is the caller's decision, never this
+# layer's. Equivalence across sources is only ever what an explicit link says.
+
+MATCH_EXACT: str = "exact"
+MATCH_CONTAINS: str = "contains"
+MATCH_ALL: str = "all"
+
+
+def normalize_name(name: str | None) -> str:
+    """NFC, trimmed, case-folded. Comparison only; stored names are untouched."""
+    if name is None:
+        return ""
+    return unicodedata.normalize("NFC", name).strip().casefold()
+
+
+@dataclass(frozen=True)
+class ConversationObservation:
+    """One reader's account of one conversation. Provenance, no messages."""
+
+    canonical_conversation_id: str
+    source: str
+    source_conversation_id: str
+    display_name: str | None
+    kind: str | None
+    first_seen_at: float | None
+    last_seen_at: float | None
+    last_observed_at: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "canonical_conversation_id": self.canonical_conversation_id,
+            "source": self.source,
+            "source_conversation_id": self.source_conversation_id,
+            "display_name": self.display_name,
+            "kind": self.kind,
+            "first_seen_at": self.first_seen_at,
+            "last_seen_at": self.last_seen_at,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationItem:
+    """One candidate: a single observation, or one linked logical conversation.
+
+    ``canonical_conversation_id`` is the representative observation's id and is
+    what a caller passes to ``search`` / ``timeline`` / ``recent_context``.
+    Those queries are per observation, so a linked logical conversation lists
+    every observation and a caller who wants all of them queries each.
+    """
+
+    canonical_conversation_id: str
+    display_name: str | None
+    kind: str | None
+    match: str
+    observations: tuple[ConversationObservation, ...]
+    logical_conversation_id: str | None = None
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(o.source for o in self.observations))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "canonical_conversation_id": self.canonical_conversation_id,
+            "logical_conversation_id": self.logical_conversation_id,
+            "display_name": self.display_name,
+            "kind": self.kind,
+            "match": self.match,
+            "sources": list(self.sources),
+            "observations": [o.as_dict() for o in self.observations],
+        }
+
+
+@dataclass(frozen=True)
+class ConversationCoverage:
+    """What discovery can honestly claim about its own result.
+
+    Discovery enumerates the *store*. It can say whether it returned every
+    stored candidate (it did unless truncated); it can never say the store
+    holds every conversation WeChat has, and it does not pretend to.
+    """
+
+    exhaustive_of_store: bool
+    status: str = "store_inventory"
+    note: str = (
+        "Candidates are the conversations this memory store holds. Nothing is "
+        "claimed about conversations the store has never observed."
+    )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"status": self.status, "exhaustive_of_store": self.exhaustive_of_store,
+                "note": self.note}
+
+
+@dataclass(frozen=True)
+class ConversationDiscoveryResult:
+    """The discovery envelope: candidates, truncation, scope, honest coverage."""
+
+    items: tuple[ConversationItem, ...]
+    truncated: bool
+    query_scope: QueryScope
+    coverage: ConversationCoverage
+
+    @property
+    def is_unique(self) -> bool:
+        return len(self.items) == 1
+
+    @property
+    def is_ambiguous(self) -> bool:
+        return len(self.items) > 1
+
+
+def _match_kind(query: str, display_name: str | None) -> str | None:
+    if not query:
+        return MATCH_ALL
+    stored = normalize_name(display_name)
+    if not stored:
+        return None
+    if stored == query:
+        return MATCH_EXACT
+    if query in stored:
+        return MATCH_CONTAINS
+    return None
+
+
+_MATCH_RANK = {MATCH_EXACT: 0, MATCH_CONTAINS: 1, MATCH_ALL: 2}
 
 
 # --- Representative selection --------------------------------------------------
@@ -639,6 +775,77 @@ class MemoryQueryService:
             ),
         )
 
+    # -- conversation discovery (M2.2b) -------------------------------------
+
+    def conversations(
+        self, *, name: str | None = None, limit: int = DEFAULT_LIMIT
+    ) -> ConversationDiscoveryResult:
+        """Candidates for a display name, or every conversation the store holds.
+
+        Rule, exactly: after NFC + trim + casefold on both sides, a stored
+        display name that *equals* the query is an ``exact`` match and one
+        that *contains* it is a ``contains`` match; nothing else matches. With
+        no name every conversation is returned as ``all``. Ordering is exact
+        before contains, then most recently seen first, then canonical id.
+        Observations explicitly linked to one logical conversation are grouped
+        into one item; nothing else is grouped, however alike it looks.
+
+        The conversations table is read whole and filtered here, because the
+        normalisation cannot be expressed in SQL and the table is small by
+        construction (one row per observed conversation).
+        """
+        limit = _clamp(limit)
+        query = normalize_name(name)
+        rows = self._store.connection.execute(
+            "SELECT canonical_id, source, source_conversation_id, display_name, kind,"
+            " first_seen_at, last_seen_at, last_observed_at, logical_conversation_id"
+            " FROM conversations;"
+        ).fetchall()
+        groups: dict[str, list[Any]] = {}
+        for row in rows:
+            key = row["logical_conversation_id"] or row["canonical_id"]
+            groups.setdefault(key, []).append(row)
+        items: list[ConversationItem] = []
+        for key, members in groups.items():
+            observations = tuple(
+                sorted(
+                    (ConversationObservation(
+                        canonical_conversation_id=r["canonical_id"], source=r["source"],
+                        source_conversation_id=r["source_conversation_id"],
+                        display_name=r["display_name"], kind=r["kind"],
+                        first_seen_at=r["first_seen_at"], last_seen_at=r["last_seen_at"],
+                        last_observed_at=r["last_observed_at"],
+                    ) for r in members),
+                    key=lambda o: (-(o.last_seen_at if o.last_seen_at is not None else o.last_observed_at),
+                                   o.canonical_conversation_id),
+                )
+            )
+            matches = [m for m in (_match_kind(query, o.display_name) for o in observations) if m]
+            if not matches:
+                continue
+            best = min(matches, key=_MATCH_RANK.__getitem__)
+            representative = observations[0]
+            logical = members[0]["logical_conversation_id"]
+            items.append(ConversationItem(
+                canonical_conversation_id=representative.canonical_conversation_id,
+                display_name=representative.display_name,
+                kind=next((o.kind for o in observations if o.kind), None),
+                match=best, observations=observations, logical_conversation_id=logical,
+            ))
+        items.sort(key=lambda i: (
+            _MATCH_RANK[i.match],
+            -max((o.last_seen_at if o.last_seen_at is not None else o.last_observed_at)
+                 for o in i.observations),
+            i.canonical_conversation_id,
+        ))
+        truncated = len(items) > limit
+        scope = QueryScope(kind="conversations", policy=self.resolve_policy(None, None),
+                           limit=limit, order="match,recent", text=name)
+        return ConversationDiscoveryResult(
+            items=tuple(items[:limit]), truncated=truncated, query_scope=scope,
+            coverage=ConversationCoverage(exhaustive_of_store=not truncated),
+        )
+
     # -- plumbing ------------------------------------------------------------
 
     def _rows(self, selection: str, clauses: list[str], parameters: list[Any],
@@ -739,7 +946,9 @@ def _clamp(limit: int) -> int:
 
 
 __all__ = [
-    "DEFAULT_LIMIT", "MAX_LIMIT", "CoverageReport", "MemoryItem",
+    "DEFAULT_LIMIT", "MAX_LIMIT", "MATCH_ALL", "MATCH_CONTAINS", "MATCH_EXACT",
+    "ConversationCoverage", "ConversationDiscoveryResult", "ConversationItem",
+    "ConversationObservation", "CoverageReport", "MemoryItem", "normalize_name",
     "MemoryQueryResult", "MemoryQueryService", "MessageCitation", "Observation",
     "QueryScope", "SourcePolicy", "TimelineCursor", "report_coverage",
     "representative_of",

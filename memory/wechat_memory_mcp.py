@@ -12,11 +12,14 @@ other.
 What it can do
 --------------
 
-Exactly four read-only queries: ``memory_search``, ``memory_timeline``,
-``memory_context``, ``memory_recent``. Each returns the M2 envelope -- items,
-coverage, truncated, query scope -- and every item carries its stable
-citation. Coverage cannot be dropped on the wire because there is no shape
-without it.
+Exactly five read-only queries: ``memory_search``, ``memory_timeline``,
+``memory_context``, ``memory_recent`` and, since M2.2b, ``memory_conversations``.
+The four message queries return the M2 envelope -- items, coverage,
+truncated, query scope -- and every item carries its stable citation.
+Coverage cannot be dropped on the wire because there is no shape without it.
+Discovery returns candidates with their provenance and an honest statement
+that it enumerated the store, not WeChat; two candidates with one name stay
+two candidates.
 
 What it cannot do
 -----------------
@@ -48,6 +51,7 @@ try:
     from memory_consent import MemoryConsentError, resolve_consent
     from memory_query import (
         DEFAULT_LIMIT,
+        ConversationDiscoveryResult,
         MemoryItem,
         MemoryQueryResult,
         MemoryQueryService,
@@ -62,6 +66,7 @@ except ImportError:  # pragma: no cover - launched by path from another cwd
     from memory_consent import MemoryConsentError, resolve_consent
     from memory_query import (
         DEFAULT_LIMIT,
+        ConversationDiscoveryResult,
         MemoryItem,
         MemoryQueryResult,
         MemoryQueryService,
@@ -77,6 +82,7 @@ except ImportError:  # MCP SDK 1.x
 SERVER_NAME: Final = "wechat_memory"
 TOOL_NAMES: Final[tuple[str, ...]] = (
     "memory_search", "memory_timeline", "memory_context", "memory_recent",
+    "memory_conversations",
 )
 
 # --- Public caps ------------------------------------------------------------
@@ -88,6 +94,7 @@ MAX_LIMIT: Final = 200
 MAX_CONTEXT_SIDE: Final = 50
 DEFAULT_CONTEXT_SIDE: Final = 5
 MAX_TEXT_CHARS: Final = 500
+MAX_NAME_CHARS: Final = 200
 SEARCH_ORDERS: Final = frozenset({"recent", "oldest", "relevance"})
 RECENT_ORDERS: Final = frozenset({"recent", "oldest"})
 
@@ -226,6 +233,27 @@ def envelope(result: MemoryQueryResult) -> dict[str, Any]:
     }
 
 
+def discovery_envelope(result: ConversationDiscoveryResult) -> dict[str, Any]:
+    """The discovery wire shape. Truncation and scope are not optional keys."""
+    scope = result.query_scope
+    return {
+        "ok": True,
+        "items": [i.as_dict() for i in result.items],
+        "truncated": result.truncated,
+        "query_scope": {
+            "kind": scope.kind,
+            "name": scope.text,
+            "limit": scope.limit,
+            "order": scope.order,
+            "match_rule": "exact (normalised equality) before contains (normalised substring); no fuzzy matching",
+        },
+        "coverage": result.coverage.as_dict(),
+        "candidates": len(result.items),
+        "unique": result.is_unique,
+        "ambiguous": result.is_ambiguous,
+    }
+
+
 def refusal(state: str, detail: str) -> dict[str, Any]:
     log(f"request refused: {state}")
     return {"ok": False, "state": state, "detail": detail}
@@ -264,6 +292,8 @@ def _answer(run) -> dict[str, Any]:
         store.close()
     log(f"{result.query_scope.kind}: returned {len(result.items)} item(s), "
         f"coverage {result.coverage.status}")
+    if isinstance(result, ConversationDiscoveryResult):
+        return discovery_envelope(result)
     return envelope(result)
 
 
@@ -352,6 +382,22 @@ def memory_recent(
             since=s, until=u,
             limit=_int(limit, "limit", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT),
             order=_order(order, RECENT_ORDERS, "recent"),  # type: ignore[arg-type]
+        )
+    return _answer(run)
+
+
+@mcp.tool(description="Find remembered conversations by display name, to obtain the canonical_conversation_id for memory_search / memory_timeline / memory_recent. Exact (normalised) matches rank first, then substring matches; no fuzzy matching. Several candidates with one name stay several: choose, or ask, never guess. With no name, lists conversations most recently seen first.")
+def memory_conversations(
+    name: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    def run(service: MemoryQueryService) -> ConversationDiscoveryResult:
+        query = _text(name, "name")
+        if query is not None and len(query) > MAX_NAME_CHARS:
+            raise InvalidArgument("name is too long.")
+        return service.conversations(
+            name=query,
+            limit=_int(limit, "limit", default=DEFAULT_LIMIT, low=1, high=MAX_LIMIT),
         )
     return _answer(run)
 

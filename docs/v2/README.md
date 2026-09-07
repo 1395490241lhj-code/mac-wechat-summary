@@ -30,6 +30,7 @@ Git history and the reports together — never one old phase report in isolation
 16. `M2_1_MEMORY_MCP_GATE.md` — the separate read-only memory MCP server, explicit activation from ClaudeRunner, and the 4-tool / 8-tool wire gate
 17. `M2_2A_LIVE_MEMORY_AGENT_GATE.md` — live Claude Code memory gate: harness, corpus, isolation and preflight refusal executed; **live half not run (no credential)**
 18. `M2_2A_LIVE_MEMORY_AGENT_GATE_COMPLETION.md` — the live half, run: exactly 4 / exactly 8 on a real Claude Code 2.1.238 process, four graded synthetic turns, **LIVE MEMORY AGENT GATE PASS**
+19. `M2_2B_CONVERSATION_DISCOVERY_GATE.md` — `memory_conversations` (exact-then-substring, never a guess), the boundary moved to exactly 4 / exactly 9, verified live: unique title resolved, ambiguous title kept as two candidates — **PASS**
 
 ## Known supersessions
 
@@ -61,6 +62,9 @@ Verified from the documents themselves:
   the gate's binary rule because the live half never executed for want of a
   credential; the completion report records the same harness run for real
   with a PASS. The first report is preserved unchanged as sealed evidence.
+- **"Exactly eight" is superseded by "exactly nine" at M2.2b.** `M2_1`,
+  `M2_2A` and its completion record eight memory-mode tools, correct as of
+  their runs; `M2_2B` adds `memory_conversations` and re-verifies 4 / 9 live.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 
