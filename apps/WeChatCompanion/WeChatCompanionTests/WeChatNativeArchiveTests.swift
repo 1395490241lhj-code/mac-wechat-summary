@@ -144,9 +144,29 @@ private struct ZIPBuilder {
 private let m35 = "2026年9月7日 20:35"
 private let m36 = "2026年9月7日 20:36"
 
+/// Shape A: `·sender` / date / body / blank.
 private func transcript(_ rows: [(String, String, String)], newline: String = "\n") -> String {
-    rows.map { "·\($0.0)\n\($0.1)\n\($0.2)\n" }.joined()
+    rows.map { "·\($0.0)\n\($0.1)\n\($0.2)\n\n" }.joined()
         .replacingOccurrences(of: "\n", with: newline)
+}
+
+/// Shape B: `·record` / blank. Mirrors the real archive exactly -- one blank
+/// line between records and none after the last.
+private func unattributed(_ records: [String], newline: String = "\n") -> String {
+    records.map { "·\($0)" }.joined(separator: "\n\n")
+        .appending("\n")
+        .replacingOccurrences(of: "\n", with: newline)
+}
+
+/// Shape A messages, or a test failure if the transcript was another shape.
+private func attributedMessages(_ t: WeChatNativeTranscript) -> [WeChatAttributedArchiveMessage] {
+    guard case .attributed(let a) = t else { return [] }
+    return a.messages
+}
+
+private func unattributedRecords(_ t: WeChatNativeTranscript) -> [WeChatUnattributedArchiveRecord] {
+    guard case .unattributed(let u) = t else { return [] }
+    return u.records
 }
 
 /// A directory that exists only for the duration of one test.
@@ -170,15 +190,20 @@ private struct Scratch: ~Copyable {
     deinit { try? FileManager.default.removeItem(at: url) }
 }
 
-// MARK: - Parser
+// MARK: - Shape A (attributed)
 
-struct WeChatNativeTranscriptParserTests {
+struct WeChatAttributedTranscriptTests {
+    private func parse(_ body: String, tz: TimeZone = WeChatNativeTranscriptParser.defaultTimeZone) throws -> [WeChatAttributedArchiveMessage] {
+        let t = try WeChatNativeTranscriptParser.parse(body, timeZone: tz)
+        #expect(t.shapeName == "attributed")
+        #expect(t.attributionAvailable)
+        #expect(t.perMessageTimeAvailable)
+        return attributedMessages(t)
+    }
+
     @Test
     func parsesOrdinaryMessagesInOrder() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(transcript([
-            ("张三", m35, "哈哈"),
-            ("李四", m36, "收到"),
-        ]))
+        let messages = try parse(transcript([("张三", m35, "哈哈"), ("李四", m36, "收到")]))
         #expect(messages.map(\.sender) == ["张三", "李四"])
         #expect(messages.map(\.text) == ["哈哈", "收到"])
         #expect(messages.map(\.sequence) == [0, 1])
@@ -197,21 +222,14 @@ struct WeChatNativeTranscriptParserTests {
         \(m36)
         尾巴
         """
-        let messages = try WeChatNativeTranscriptParser.parse(body)
+        let messages = try parse(body)
         #expect(messages[0].text == "第一行\n  第二行有前导空格\n\n第四行在空行之后")
         #expect(messages[1].text == "尾巴")
     }
 
     @Test
     func keepsAnEmptyBodyAsAnEmptyString() throws {
-        let messages = try WeChatNativeTranscriptParser.parse("""
-        ·张三
-        \(m35)
-
-        ·李四
-        \(m36)
-        收到
-        """)
+        let messages = try parse("·张三\n\(m35)\n\n·李四\n\(m36)\n收到\n")
         #expect(messages.count == 2)
         #expect(messages[0].text.isEmpty)
         #expect(messages[1].text == "收到")
@@ -219,83 +237,57 @@ struct WeChatNativeTranscriptParserTests {
 
     @Test
     func acceptsCRLFLineEndings() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(
-            transcript([("张三", m35, "哈哈"), ("李四", m36, "收到")], newline: "\r\n")
-        )
+        let messages = try parse(transcript([("张三", m35, "哈哈"), ("李四", m36, "收到")], newline: "\r\n"))
         #expect(messages.map(\.text) == ["哈哈", "收到"])
     }
 
     @Test
     func acceptsAUTF8ByteOrderMark() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(
-            "\u{FEFF}" + transcript([("张三", m35, "哈哈")])
-        )
+        let messages = try parse("\u{FEFF}" + transcript([("张三", m35, "哈哈")]))
         #expect(messages.count == 1)
         #expect(messages[0].sender == "张三")
     }
 
     @Test
     func preservesUnicodeAndEmojiInSendersAndBodies() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(transcript([
-            ("李·四 🐉", m35, "你好 🌍\n第二行 😀"),
-            ("Ann O'Neill", m36, "Ünïcødé — ok"),
+        let messages = try parse(transcript([
+            ("李·四 🐉", m35, "你好 🌍"), ("Ann O\'Neill", m36, "Ünïcødé — ok"),
         ]))
         #expect(messages[0].sender == "李·四 🐉")
-        #expect(messages[0].text == "你好 🌍\n第二行 😀")
-        #expect(messages[1].sender == "Ann O'Neill")
+        #expect(messages[0].text == "你好 🌍")
+        #expect(messages[1].sender == "Ann O\'Neill")
         #expect(messages[1].text == "Ünïcødé — ok")
     }
 
     @Test
     func repeatedIdenticalMessagesAreAllPreserved() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(
-            transcript(Array(repeating: ("张三", m35, "哈哈"), count: 3))
-        )
+        let messages = try parse(transcript(Array(repeating: ("张三", m35, "哈哈"), count: 3)))
         #expect(messages.count == 3)
         #expect(messages.map(\.sequence) == [0, 1, 2])
     }
 
     @Test
     func identicalSenderTimeAndTextDoNotCollapse() throws {
-        // The reader models a transcript, not a set. Two messages that agree on
-        // every visible field are still two messages, distinguished by position
-        // -- the same rule `FrameReconciler` follows for captured frames.
-        let messages = try WeChatNativeTranscriptParser.parse(transcript([
-            ("张三", m35, "哈哈"),
-            ("张三", m35, "哈哈"),
-            ("李四", m35, "哈哈"),
+        let messages = try parse(transcript([
+            ("张三", m35, "哈哈"), ("张三", m35, "哈哈"), ("李四", m35, "哈哈"),
         ]))
         #expect(messages.count == 3)
-        #expect(Set(messages.map(\.sequence)).count == 3)
         #expect(messages[0].sentAt == messages[2].sentAt)
     }
 
     @Test
-    func aByteOrderMarkIsStrippedOnlyAtTheStart() throws {
-        // Leading U+FEFF is an encoding marker. The same scalar inside a body
-        // is ZERO WIDTH NO-BREAK SPACE -- ordinary text -- and deleting it
-        // would silently rewrite what the user sent.
-        let interior = "前\u{FEFF}后"
-        let messages = try WeChatNativeTranscriptParser.parse(
-            "\u{FEFF}" + transcript([("张三", m35, interior), ("李四", m36, "\u{FEFF}开头")])
-        )
-        #expect(messages[0].text == interior)
-        #expect(messages[0].text.contains("\u{FEFF}"))
-        // A BOM at the start of a *body* is body text, not an encoding marker.
-        #expect(messages[1].text == "\u{FEFF}开头")
-        #expect(messages[0].sender == "张三")
+    func senderIsKeptVerbatimAndNeverTrimmed() throws {
+        let messages = try parse(transcript([(" 张三 ", m35, "哈哈"), ("李\u{00A0}四", m36, "收到")]))
+        #expect(messages[0].sender == " 张三 ")
+        #expect(messages[1].sender == "李\u{00A0}四")
     }
 
     @Test
-    func senderIsKeptVerbatimAndNeverTrimmed() throws {
-        // WeChat has not been observed padding the sender line. Until a real
-        // export shows otherwise, trimming would be editing the user's data on
-        // a guess -- so whatever sits between "·" and the newline is the sender.
-        let messages = try WeChatNativeTranscriptParser.parse(
-            transcript([(" 张三 ", m35, "哈哈"), ("李\u{00A0}四", m36, "收到")])
-        )
-        #expect(messages[0].sender == " 张三 ")
-        #expect(messages[1].sender == "李\u{00A0}四")
+    func aByteOrderMarkIsStrippedOnlyAtTheStart() throws {
+        let interior = "前\u{FEFF}后"
+        let messages = try parse("\u{FEFF}" + transcript([("张三", m35, interior), ("李四", m36, "\u{FEFF}开头")]))
+        #expect(messages[0].text == interior)
+        #expect(messages[1].text == "\u{FEFF}开头")
     }
 
     @Test
@@ -310,70 +302,219 @@ struct WeChatNativeTranscriptParserTests {
         #expect(throws: WeChatTranscriptError.notANativeTranscript) {
             try WeChatNativeTranscriptParser.parse("导出说明\n" + transcript([("张三", m35, "x")]))
         }
-        let tolerated = try WeChatNativeTranscriptParser.parse(
-            "\n\n  \n" + transcript([("张三", m35, "x")])
-        )
-        #expect(tolerated.count == 1)
+        #expect(try parse("\n\n  \n" + transcript([("张三", m35, "x")])).count == 1)
     }
 }
 
-// MARK: - Time semantics
+// MARK: - Shape B (unattributed)
+
+struct WeChatUnattributedTranscriptTests {
+    private func parse(_ body: String) throws -> [WeChatUnattributedArchiveRecord] {
+        let t = try WeChatNativeTranscriptParser.parse(body)
+        #expect(t.shapeName == "unattributed")
+        // The whole point of the sum type: no attribution can be read out,
+        // because there is nowhere to read it from.
+        #expect(!t.attributionAvailable)
+        #expect(!t.perMessageTimeAvailable)
+        return unattributedRecords(t)
+    }
+
+    @Test
+    func parsesOrdinaryRecordsInOrder() throws {
+        let records = try parse(unattributed(["哈哈", "收到", "好的"]))
+        #expect(records.count == 3)
+        #expect(records.map(\.sequence) == [0, 1, 2])
+    }
+
+    @Test
+    func keepsTheLeadingMarkerBecauseNothingProvesItIsNotPayload() throws {
+        // In Shape A the `·` is unambiguously a marker: a sender follows it.
+        // Shape B proves no such thing, and deleting a byte WeChat wrote on an
+        // analogy is worse than keeping one that may be structural.
+        let records = try parse(unattributed(["哈哈"]))
+        #expect(records[0].recordText == "·哈哈")
+        #expect(records[0].recordText.hasPrefix("·"))
+    }
+
+    @Test
+    func repeatedIdenticalRecordsAreAllPreserved() throws {
+        let records = try parse(unattributed(Array(repeating: "哈哈", count: 4)))
+        #expect(records.count == 4)
+        #expect(Set(records.map(\.recordText)).count == 1)
+        #expect(records.map(\.sequence) == [0, 1, 2, 3])
+    }
+
+    @Test
+    func preservesUnicodeEmojiAndMeaningfulWhitespace() throws {
+        // The real archive has records whose payload carries leading and
+        // trailing spaces. Trimming would rewrite what the user sent.
+        let payloads = ["你好 🌍", "  前导空格", "尾随空格  ", "Ünïcødé — ok", "·看起来像标记"]
+        let records = try parse(unattributed(payloads))
+        #expect(records.map(\.recordText) == payloads.map { "·" + $0 })
+    }
+
+    @Test
+    func acceptsCRLFAndALeadingByteOrderMark() throws {
+        let crlf = try parse(unattributed(["哈哈", "收到"], newline: "\r\n"))
+        #expect(crlf.count == 2)
+        let bom = try parse("\u{FEFF}" + unattributed(["哈哈"]))
+        #expect(bom.count == 1)
+        // Interior U+FEFF is content, not an encoding marker.
+        let interior = try parse(unattributed(["前\u{FEFF}后"]))
+        #expect(interior[0].recordText == "·前\u{FEFF}后")
+    }
+
+    @Test
+    func toleratesLeadingBlankLinesAndTheFinalNewline() throws {
+        #expect(try parse("\n\n" + unattributed(["哈哈", "收到"])).count == 2)
+    }
+
+    @Test
+    func thereIsNoSenderOrTimestampFieldToRead() throws {
+        // Structural, not behavioural: the record type has exactly two stored
+        // properties, so no caller can obtain attribution from Shape B.
+        let record = try parse(unattributed(["哈哈"]))[0]
+        #expect(record == WeChatUnattributedArchiveRecord(sequence: 0, recordText: "·哈哈"))
+    }
+
+    @Test
+    func rejectsTwoBlankLinesBetweenRecords() {
+        #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+            try WeChatNativeTranscriptParser.parse("·哈哈\n\n\n·收到\n")
+        }
+    }
+
+    @Test
+    func rejectsRecordsWithNoBlankSeparator() {
+        #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+            try WeChatNativeTranscriptParser.parse("·哈哈\n·收到\n")
+        }
+    }
+
+    @Test
+    func rejectsANonMarkerLine() {
+        #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+            try WeChatNativeTranscriptParser.parse("·哈哈\n\n随便一行\n\n·收到\n")
+        }
+    }
+}
+
+// MARK: - Discrimination
+
+struct WeChatTranscriptDiscriminationTests {
+    @Test
+    func validShapeAClassifiesAsAttributed() throws {
+        let t = try WeChatNativeTranscriptParser.parse(transcript([("张三", m35, "哈哈")]))
+        #expect(t.shapeName == "attributed")
+        #expect(t.recordCount == 1)
+    }
+
+    @Test
+    func validShapeBClassifiesAsUnattributed() throws {
+        let t = try WeChatNativeTranscriptParser.parse(unattributed(["哈哈", "收到"]))
+        #expect(t.shapeName == "unattributed")
+        #expect(t.recordCount == 2)
+    }
+
+    @Test
+    func shapeAIsNeverDowngradedToShapeB() throws {
+        // Shape B would have to see the date line as a record; it must not.
+        for rows in [[("张三", m35, "哈哈")],
+                     [("张三", m35, "哈哈"), ("李四", m36, "收到")]] {
+            let t = try WeChatNativeTranscriptParser.parse(transcript(rows))
+            #expect(t.shapeName == "attributed")
+        }
+    }
+
+    @Test
+    func shapeBIsNeverTreatedAsShapeA() throws {
+        // A Shape B payload that merely *contains* a date must not promote the
+        // record to an attributed message.
+        let t = try WeChatNativeTranscriptParser.parse(unattributed(["哈哈", "开会时间 \(m35)"]))
+        #expect(t.shapeName == "unattributed")
+        #expect(t.recordCount == 2)
+    }
+
+    @Test
+    func aHybridFailsClosedRatherThanSwallowingRecords() {
+        // One attributed record followed by an unattributed one. Parsed as
+        // Shape A this silently absorbs the second into the first's body --
+        // exactly the failure the two-parser design exists to prevent.
+        let hybrid = "·张三\n\(m35)\n哈哈\n\n·没有署名的记录\n"
+        #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+            try WeChatNativeTranscriptParser.parse(hybrid)
+        }
+    }
+
+    @Test
+    func aShapeBRecordFollowedByAnAttributedOneAlsoFails() {
+        let hybrid = "·没有署名的记录\n\n·张三\n\(m35)\n哈哈\n"
+        #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+            try WeChatNativeTranscriptParser.parse(hybrid)
+        }
+    }
+
+    @Test
+    func anUnknownTextFailsClosed() {
+        for text in ["", "just some notes", "导出说明\n更多说明", "· \n· \n· "] where text != "· \n· \n· " {
+            #expect(throws: WeChatTranscriptError.notANativeTranscript) {
+                try WeChatNativeTranscriptParser.parse(text)
+            }
+        }
+    }
+}
+
+// MARK: - Time semantics (Shape A only)
 
 struct WeChatArchiveTimeSemanticsTests {
+    private func parse(_ body: String, tz: TimeZone) throws -> [WeChatAttributedArchiveMessage] {
+        attributedMessages(try WeChatNativeTranscriptParser.parse(body, timeZone: tz))
+    }
+
     @Test
     func parsesToMinutePrecisionInAnExplicitTimeZone() throws {
         let shanghai = TimeZone(identifier: "Asia/Shanghai")!
-        let messages = try WeChatNativeTranscriptParser.parse(
-            transcript([("张三", m35, "哈哈")]), timeZone: shanghai
-        )
+        let messages = try parse(transcript([("张三", m35, "哈哈")]), tz: shanghai)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = shanghai
-        let parts = calendar.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second], from: messages[0].sentAt
-        )
+        let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: messages[0].sentAt)
         #expect(parts.year == 2026)
         #expect(parts.month == 9)
         #expect(parts.day == 7)
         #expect(parts.hour == 20)
         #expect(parts.minute == 35)
-        // A native export states a minute. It never states a second, and this
-        // reader must never imply one.
+        // A native export states a minute, never a second.
         #expect(parts.second == 0)
     }
 
     @Test
     func theSameTextInTwoTimeZonesIsTwoDifferentInstants() throws {
-        let shanghai = try WeChatNativeTranscriptParser.parse(
-            transcript([("张三", m35, "x")]), timeZone: TimeZone(identifier: "Asia/Shanghai")!
-        )[0]
-        let newYork = try WeChatNativeTranscriptParser.parse(
-            transcript([("张三", m35, "x")]), timeZone: TimeZone(identifier: "America/New_York")!
-        )[0]
-        // Documents the assumption rather than hiding it: a native export
-        // carries no offset, so the importing Mac's zone decides the instant.
-        #expect(shanghai.sentAt != newYork.sentAt)
-        #expect(shanghai.sentAtText == newYork.sentAtText)
+        let a = try parse(transcript([("张三", m35, "x")]), tz: TimeZone(identifier: "Asia/Shanghai")!)[0]
+        let b = try parse(transcript([("张三", m35, "x")]), tz: TimeZone(identifier: "America/New_York")!)[0]
+        #expect(a.sentAt != b.sentAt)
+        #expect(a.sentAtText == b.sentAtText)
     }
 
     @Test
     func aSingleDigitHourParses() throws {
-        let messages = try WeChatNativeTranscriptParser.parse(
-            transcript([("张三", "2026年9月7日 9:05", "早")])
-        )
+        let messages = try parse(transcript([("张三", "2026年9月7日 9:05", "早")]), tz: .current)
         #expect(messages.count == 1)
         #expect(messages[0].sentAtText == "2026年9月7日 9:05")
     }
 
     @Test
-    func theParsedInstantDoesNotDependOnTheUsersCalendarPreference() throws {
-        // A DateFormatter that inherited a Buddhist calendar from system
-        // settings would read 2026年 as a different year entirely.
-        let formatter = WeChatNativeTranscriptParser.formatter(
-            timeZone: TimeZone(identifier: "Asia/Shanghai")!
-        )
+    func theParsedInstantDoesNotDependOnTheUsersCalendarPreference() {
+        let formatter = WeChatNativeTranscriptParser.formatter(timeZone: TimeZone(identifier: "Asia/Shanghai")!)
         #expect(formatter.calendar.identifier == .gregorian)
         #expect(formatter.locale.identifier == "en_US_POSIX")
         #expect(!formatter.isLenient)
+    }
+
+    @Test
+    func anUnattributedTranscriptExposesNoTimeAtAll() throws {
+        let t = try WeChatNativeTranscriptParser.parse(unattributed(["哈哈"]))
+        #expect(!t.perMessageTimeAvailable)
+        #expect(attributedMessages(t).isEmpty)
     }
 }
 
@@ -398,7 +539,7 @@ struct WeChatNativeArchiveSafetyTests {
         }
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
         #expect(archive.transcriptEntryName == "聊天记录.txt")
-        #expect(archive.messages.count == 2)
+        #expect(archive.recordCount == 2)
         #expect(archive.entryCount == 3)
         #expect(archive.transcriptCandidateCount == 1)
         #expect(archive.attachmentCountsByExtension == ["jpg": 1, "mp4": 1])
@@ -408,7 +549,7 @@ struct WeChatNativeArchiveSafetyTests {
     func readsAStoredUncompressedTranscript() throws {
         let scratch = try Scratch()
         let url = try scratch.zip { $0.add("chat.txt", transcript([("张三", m35, "哈哈")])) }
-        #expect(try WeChatNativeArchiveReader.read(contentsOf: url).messages.count == 1)
+        #expect(try WeChatNativeArchiveReader.read(contentsOf: url).recordCount == 1)
     }
 
     @Test
@@ -616,7 +757,7 @@ struct WeChatNativeArchiveSafetyTests {
         try builder.write(to: url)
 
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
-        #expect(archive.messages.count == 2)
+        #expect(archive.recordCount == 2)
     }
 
     @Test
@@ -694,6 +835,91 @@ struct WeChatNativeArchiveSafetyTests {
     }
 
     @Test
+    func anUnattributedArchiveIsValidAndRecognized_notInvalid() throws {
+        // The earlier reader reported a real Shape B export as
+        // `noRecognizableTranscript`, i.e. an invalid archive. It is neither.
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", unattributed(["哈哈", "收到", "好的"]), deflated: true)
+            builder.add("images/1.jpg", "not really a jpeg")
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.transcriptShape == "unattributed")
+        #expect(archive.recordCount == 3)
+        #expect(!archive.attributionAvailable)
+        #expect(!archive.perMessageTimeAvailable)
+        #expect(archive.attributedMessages == nil)
+        #expect(archive.unattributedRecords?.count == 3)
+        #expect(archive.timestampBounds == nil)
+
+        let summary = WeChatNativeArchiveSummary(archive)
+        let report = summary.reportLines.joined(separator: "\n")
+        #expect(report.contains("container valid: yes"))
+        #expect(report.contains("transcript recognized: yes"))
+        #expect(report.contains("transcript shape: unattributed"))
+        #expect(report.contains("record count: 3"))
+        #expect(report.contains("attribution available: no"))
+        #expect(report.contains("per-message time available: no"))
+        // No timestamp line may appear for a shape that has no timestamps.
+        #expect(!report.contains("first timestamp"))
+        #expect(!report.contains("interpreted in timezone"))
+    }
+
+    @Test
+    func anAttributedArchiveReportsAttributionAndBounds() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("聊天记录.txt", transcript([("张三", m35, "哈哈"), ("李四", m36, "收到")]), deflated: true)
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.transcriptShape == "attributed")
+        #expect(archive.recordCount == 2)
+        #expect(archive.attributionAvailable)
+        #expect(archive.perMessageTimeAvailable)
+        #expect(archive.unattributedRecords == nil)
+        let report = WeChatNativeArchiveSummary(archive).reportLines.joined(separator: "\n")
+        #expect(report.contains("transcript shape: attributed"))
+        #expect(report.contains("first timestamp: \(m35)"))
+        #expect(report.contains("last timestamp: \(m36)"))
+    }
+
+    @Test
+    func aSingleCandidateOfEitherShapeIsUsed() throws {
+        let scratch = try Scratch()
+        let a = try scratch.zip("a.zip") { $0.add("c.txt", transcript([("张三", m35, "哈哈")])) }
+        #expect(try WeChatNativeArchiveReader.read(contentsOf: a).transcriptShape == "attributed")
+        let b = try scratch.zip("b.zip") { $0.add("c.txt", unattributed(["哈哈"])) }
+        #expect(try WeChatNativeArchiveReader.read(contentsOf: b).transcriptShape == "unattributed")
+    }
+
+    @Test
+    func mixedShapeCandidatesFailClosed() throws {
+        // Choosing the longer one would be choosing between "who said what
+        // when" and "some ordered text" on the basis of length.
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("a.txt", transcript([("张三", m35, "哈哈")]))
+            builder.add("b.txt", unattributed(["1", "2", "3", "4", "5"]))
+        }
+        #expect(throws: WeChatNativeArchiveError.ambiguousTranscriptCandidates) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func severalCandidatesOfOneShapeTakeTheRichest() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("small.txt", unattributed(["1"]))
+            builder.add("big.txt", unattributed(["1", "2", "3"]))
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.transcriptShape == "unattributed")
+        #expect(archive.recordCount == 3)
+        #expect(archive.transcriptCandidateCount == 2)
+    }
+
+    @Test
     func picksTheRecognizableTranscriptWithTheMostMessages() throws {
         let scratch = try Scratch()
         let url = try scratch.zip { builder in
@@ -705,7 +931,7 @@ struct WeChatNativeArchiveSafetyTests {
         }
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
         #expect(archive.transcriptEntryName == "big.txt")
-        #expect(archive.messages.count == 3)
+        #expect(archive.recordCount == 3)
         // Two candidates parsed; neither was concatenated into the other.
         #expect(archive.transcriptCandidateCount == 2)
     }
@@ -768,7 +994,7 @@ struct WeChatNativeArchiveBoundaryTests {
         let report = summary.reportLines.joined(separator: "\n")
         #expect(!report.contains(secret))
         #expect(!report.contains("张三"))
-        #expect(report.contains("message count: 1"))
+        #expect(report.contains("record count: 1"))
         #expect(report.contains("first timestamp: \(m35)"))
         #expect(report.contains("jpg=1"))
     }
@@ -887,12 +1113,12 @@ struct WeChatNativeArchiveFixtureTests {
             )
         } catch {
             let reason = "\(type(of: error)).\(error)"
-            print("DUKOU FIXTURE\n" + shape + "\n" + WeChatNativeArchiveSummary(failure: reason)
+            print("DUKOU FIXTURE\n" + shape + "\n" + WeChatNativeArchiveSummary(failure: reason, containerValid: inventory != nil)
                 .reportLines.joined(separator: "\n"))
             throw error
         }
         print("DUKOU FIXTURE\n" + shape + "\n" + summary.reportLines.joined(separator: "\n"))
-        #expect(summary.isValid)
-        #expect(summary.messageCount > 0)
+        #expect(summary.transcriptRecognized)
+        #expect(summary.recordCount > 0)
     }
 }

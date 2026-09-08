@@ -14,13 +14,12 @@ struct WeChatNativeArchive: Sendable, Equatable {
     /// deliberately **not** part of the pasteable acceptance report -- see
     /// `WeChatNativeArchiveSummary`.
     let transcriptEntryName: String
-    /// Position of that entry in the archive's central directory, from 0. A
-    /// stable way to say *which* entry was chosen without repeating its name.
+    /// Position of that entry in the archive's central directory, from 0.
     let transcriptEntryIndex: Int
-    let messages: [WeChatArchiveMessage]
-    /// How the timestamps in `messages` were interpreted. A native export
-    /// carries no offset, so this is the reader's assumption, recorded.
-    let timeZoneIdentifier: String
+    /// Which of the two observed shapes this archive turned out to carry, with
+    /// its records. Not a message list: an unattributed archive has no messages
+    /// in the sense the rest of this app means by the word.
+    let transcript: WeChatNativeTranscript
     /// Facts about the container, kept so the acceptance seam can report shape
     /// without reporting content.
     let entryCount: Int
@@ -28,12 +27,49 @@ struct WeChatNativeArchive: Sendable, Equatable {
     /// Non-transcript file entries, counted by lowercased extension. Phase A
     /// does not read, extract or interpret any of them.
     let attachmentCountsByExtension: [String: Int]
+
+    // Privacy-safe aggregate semantics. "No strict attributed parse" is not
+    // "invalid archive", and these are what say so.
+    var transcriptShape: String { transcript.shapeName }
+    var recordCount: Int { transcript.recordCount }
+    var attributionAvailable: Bool { transcript.attributionAvailable }
+    var perMessageTimeAvailable: Bool { transcript.perMessageTimeAvailable }
+
+    /// Attributed messages, or nil when this archive carries none. There is no
+    /// variant of this that invents an empty sender or a placeholder date.
+    var attributedMessages: [WeChatAttributedArchiveMessage]? {
+        if case .attributed(let t) = transcript { return t.messages }
+        return nil
+    }
+
+    var unattributedRecords: [WeChatUnattributedArchiveRecord]? {
+        if case .unattributed(let t) = transcript { return t.records }
+        return nil
+    }
+
+    /// Only an attributed transcript has timestamp bounds.
+    var timestampBounds: (first: String, last: String)? {
+        guard case .attributed(let t) = transcript,
+              let first = t.messages.first, let last = t.messages.last
+        else { return nil }
+        return (first.sentAtText, last.sentAtText)
+    }
+
+    var timeZoneIdentifier: String? {
+        if case .attributed(let t) = transcript { return t.timeZoneIdentifier }
+        return nil
+    }
 }
 
 enum WeChatNativeArchiveError: Error, Equatable, Sendable {
     case archive(ZIPArchiveError)
-    /// No entry in the archive parses as a native WeChat transcript.
+    /// No entry in the archive parses as either observed native shape.
     case noRecognizableTranscript
+    /// The archive carries recognizable transcripts of **different shapes**.
+    /// Refused rather than resolved by count: picking the larger one would be
+    /// choosing between "who said what when" and "some ordered text" on the
+    /// basis of which happened to be longer.
+    case ambiguousTranscriptCandidates
 }
 
 /// Reads a native WeChat export ZIP into a validated in-memory transcript.
@@ -97,25 +133,30 @@ enum WeChatNativeArchiveReader {
             $0.pathExtension == "txt" && $0.uncompressedSize <= maximumTranscriptBytes
         }
 
-        // Only entries that parse *completely* as a native transcript compete,
-        // and the richest one wins. Transcripts are never concatenated: two
-        // TXTs in one export are two accounts, and stitching them would invent
-        // a conversation that WeChat never wrote.
-        var best: (name: String, index: Int, messages: [WeChatArchiveMessage])?
-        var recognized = 0
+        // Only entries that classify as one of the two observed shapes compete.
+        // Transcripts are never concatenated: two TXTs in one export are two
+        // accounts, and stitching them would invent a conversation WeChat never
+        // wrote.
+        var recognized: [(name: String, index: Int, transcript: WeChatNativeTranscript)] = []
         for candidate in candidates {
             guard let data = try? reader.data(for: candidate),
                   let body = decodeUTF8(data),
-                  let messages = try? WeChatNativeTranscriptParser.parse(body, timeZone: timeZone),
-                  !messages.isEmpty
+                  let transcript = try? WeChatNativeTranscriptParser.parse(body, timeZone: timeZone)
             else { continue }
-            recognized += 1
-            if best == nil || messages.count > best!.messages.count {
-                let index = reader.entries.firstIndex { $0.name == candidate.name } ?? 0
-                best = (candidate.name, index, messages)
-            }
+            let index = reader.entries.firstIndex { $0.name == candidate.name } ?? 0
+            recognized.append((candidate.name, index, transcript))
         }
-        guard let best else { throw WeChatNativeArchiveError.noRecognizableTranscript }
+        guard !recognized.isEmpty else { throw WeChatNativeArchiveError.noRecognizableTranscript }
+
+        // Mixed shapes are ambiguous and fail closed. Within one shape the
+        // richest transcript wins -- the rule Dukou's own reader uses, and the
+        // only one with any evidence behind it. No real archive observed so far
+        // carries more than one TXT at all.
+        let shapes = Set(recognized.map(\.transcript.shapeName))
+        guard shapes.count == 1 else {
+            throw WeChatNativeArchiveError.ambiguousTranscriptCandidates
+        }
+        let best = recognized.max { $0.transcript.recordCount < $1.transcript.recordCount }!
 
         var attachments: [String: Int] = [:]
         for file in files where file.name != best.name {
@@ -125,10 +166,9 @@ enum WeChatNativeArchiveReader {
         return WeChatNativeArchive(
             transcriptEntryName: best.name,
             transcriptEntryIndex: best.index,
-            messages: best.messages,
-            timeZoneIdentifier: timeZone.identifier,
+            transcript: best.transcript,
             entryCount: reader.entries.count,
-            transcriptCandidateCount: recognized,
+            transcriptCandidateCount: recognized.count,
             attachmentCountsByExtension: attachments
         )
     }
@@ -149,61 +189,79 @@ enum WeChatNativeArchiveReader {
 /// private conversation -- the same rule `DiagnosticResult` and
 /// `WindowCaptureMetrics` already follow.
 ///
-/// **The chosen entry's filename is not reported, and that is a change of
-/// mind.** It was, on the assumption that a WeChat export names its transcript
-/// something fixed and generic. Nobody has opened a real export, so that is a
-/// guess, and the thing being guessed about is whether a filename contains a
-/// chat title or a contact's name. The entry is identified by its extension and
-/// its ordinal instead, which answers "which entry was chosen" without betting
-/// a private name on an unverified assumption. If a real export shows the name
-/// is a fixed constant, report it then.
+/// **The chosen entry's filename is not reported.** It was, on the assumption
+/// that a WeChat export names its transcript something fixed and generic. A
+/// real export later showed the archive's one top-level directory named after
+/// the conversation and its participants, so that assumption was worth exactly
+/// nothing. The entry is identified by extension and ordinal instead.
 ///
-/// The two timestamps are the only values derived from message data, and they
-/// are bounds, not content: they say the export covers a span, not what was
-/// said in it.
+/// **A recognized transcript is not the same as an attributed one.** An
+/// unattributed archive is valid, recognized, and simply carries no
+/// attribution; reporting it as an invalid archive was the earlier mistake this
+/// type now refuses to repeat. Timestamp bounds appear only when the shape has
+/// timestamps to bound.
 struct WeChatNativeArchiveSummary: Sendable, Equatable {
-    let isValid: Bool
+    let containerValid: Bool
+    let transcriptRecognized: Bool
     let entryCount: Int
     let transcriptCandidateCount: Int
     /// Lowercased extension of the chosen entry, e.g. "txt".
     let chosenTranscriptExtension: String
     /// Its position in the central directory, from 0.
     let chosenTranscriptIndex: Int
-    let messageCount: Int
-    let firstSentAtText: String
-    let lastSentAtText: String
-    let timeZoneIdentifier: String
+    /// "attributed" or "unattributed".
+    let transcriptShape: String
+    let recordCount: Int
+    let attributionAvailable: Bool
+    let perMessageTimeAvailable: Bool
+    /// Present only for an attributed transcript.
+    let firstSentAtText: String?
+    let lastSentAtText: String?
+    let timeZoneIdentifier: String?
     let attachmentCountsByExtension: [String: Int]
     /// Closed-set reason the archive was refused, or nil when it was accepted.
     let failureReason: String?
 
     init(_ archive: WeChatNativeArchive) {
-        isValid = true
+        containerValid = true
+        transcriptRecognized = true
         failureReason = nil
         entryCount = archive.entryCount
         transcriptCandidateCount = archive.transcriptCandidateCount
         chosenTranscriptExtension = WeChatNativeArchiveSummary
             .extensionOf(archive.transcriptEntryName)
         chosenTranscriptIndex = archive.transcriptEntryIndex
-        messageCount = archive.messages.count
-        firstSentAtText = archive.messages.first?.sentAtText ?? ""
-        lastSentAtText = archive.messages.last?.sentAtText ?? ""
+        transcriptShape = archive.transcriptShape
+        recordCount = archive.recordCount
+        attributionAvailable = archive.attributionAvailable
+        perMessageTimeAvailable = archive.perMessageTimeAvailable
+        firstSentAtText = archive.timestampBounds?.first
+        lastSentAtText = archive.timestampBounds?.last
         timeZoneIdentifier = archive.timeZoneIdentifier
         attachmentCountsByExtension = archive.attachmentCountsByExtension
     }
 
     /// A refusal, described without saying anything about the file.
-    init(failure: String) {
-        isValid = false
+    ///
+    /// - Parameter containerValid: whether the ZIP itself was fine. The two
+    ///   gates are reported separately on purpose: "the container is sound but
+    ///   its transcript is a shape we do not recognise" and "this is not a
+    ///   usable ZIP" are different results and must not collapse into one word.
+    init(failure: String, containerValid: Bool) {
+        self.containerValid = containerValid
+        transcriptRecognized = false
         failureReason = failure
         entryCount = 0
         transcriptCandidateCount = 0
         chosenTranscriptExtension = ""
         chosenTranscriptIndex = -1
-        messageCount = 0
-        firstSentAtText = ""
-        lastSentAtText = ""
-        timeZoneIdentifier = ""
+        transcriptShape = "none"
+        recordCount = 0
+        attributionAvailable = false
+        perMessageTimeAvailable = false
+        firstSentAtText = nil
+        lastSentAtText = nil
+        timeZoneIdentifier = nil
         attachmentCountsByExtension = [:]
     }
 
@@ -215,22 +273,36 @@ struct WeChatNativeArchiveSummary: Sendable, Equatable {
 
     /// Stable, greppable lines for an acceptance run.
     var reportLines: [String] {
-        guard isValid else { return ["archive valid: no (\(failureReason ?? "unknown"))"] }
+        guard transcriptRecognized else {
+            return [
+                "container valid: \(containerValid ? "yes" : "no")",
+                "transcript recognized: no (\(failureReason ?? "unknown"))",
+            ]
+        }
         let attachments = attachmentCountsByExtension
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: " ")
-        return [
-            "archive valid: yes",
+        var lines = [
+            "container valid: yes",
+            "transcript recognized: yes",
+            "transcript shape: \(transcriptShape)",
+            "record count: \(recordCount)",
+            "attribution available: \(attributionAvailable ? "yes" : "no")",
+            "per-message time available: \(perMessageTimeAvailable ? "yes" : "no")",
             "entry count: \(entryCount)",
             "transcript candidates: \(transcriptCandidateCount)",
             "chosen transcript: extension=\(chosenTranscriptExtension.isEmpty ? "(none)" : chosenTranscriptExtension) index=\(chosenTranscriptIndex)",
-            "message count: \(messageCount)",
-            "first timestamp: \(firstSentAtText)",
-            "last timestamp: \(lastSentAtText)",
-            "interpreted in timezone: \(timeZoneIdentifier)",
-            "attachments by extension: \(attachments.isEmpty ? "(none)" : attachments)",
         ]
+        if let firstSentAtText, let lastSentAtText {
+            lines.append("first timestamp: \(firstSentAtText)")
+            lines.append("last timestamp: \(lastSentAtText)")
+        }
+        if let timeZoneIdentifier {
+            lines.append("interpreted in timezone: \(timeZoneIdentifier)")
+        }
+        lines.append("attachments by extension: \(attachments.isEmpty ? "(none)" : attachments)")
+        return lines
     }
 }
 
