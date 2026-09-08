@@ -18,7 +18,27 @@ See *Remaining gates* below.
 | `tool_boundary_proxy.py` | Exact-N wire verifier: every tools-bearing model request must carry exactly the expected tool names |
 | `exact8_assertion_proxy.py` | The Hermes instance of that verifier (the eight names Hermes v0.20.5 puts on the wire). Unchanged contract |
 | `h6_synthetic_gate.py` | H6 gate: Scenario A + J on the Claude backend, then a canary persistence audit |
-| `tests/` | Subprocess-faked unit tests for the driver, both runners and the proxy |
+| `hermes_isolation.py` | **Fail-closed guard.** Refuses any Hermes validation unless `HOME` and `HERMES_HOME` are explicit, disposable and outside the account home, `~/.hermes` and `wechatshadow` |
+| `hermes_validation.py` | H5-preflight validation runner: `prepare` (upstream checkout + composed PR heads), `offline` (everything provable without a credential), `online` |
+| `hermes_online.py` | The credential-dependent half: behavioural gates, both wire assertions, the synthetic digest, the residue audit |
+| `hermes_probe.py` | Resolves one tree's session platform and toolset row. Imports Hermes; guard runs first |
+| `hermes_desktop_turn.py` | One agent turn on the **Desktop** surface via the gateway's own `_make_agent`, no Electron. Imports Hermes; guard runs first |
+| `_mcp_capability_probe.py` | Measures what the bridge advertises, so the expected wire set is derived rather than assumed |
+| `tests/` | Subprocess-faked unit tests for the driver, both runners, the proxy and the isolation guard |
+
+### Never import Hermes without the guard
+
+Importing `hermes_cli.config` — directly, or through anything that reaches it
+such as `tui_gateway.server` — seeds and **upgrades** `SOUL.md` inside the
+resolved `HERMES_HOME` at *import time*, and falls back to `$HOME/.hermes`
+when that variable is unset. Current upstream also treats the previous
+generation of its own default `SOUL.md` as replaceable content, so a stock
+install is exactly the case that gets overwritten. A bare
+`python -c "import tui_gateway.server"` is enough.
+
+`hermes_probe.py` and `hermes_desktop_turn.py` are the only two modules here
+that import a Hermes tree, and both call `enforce_disposable_home()` before the
+tree reaches `sys.path`. Anything new that imports Hermes must do the same.
 
 The digest policy is **not** here. It is `.hermes/skills/wechat-digest/SKILL.md`,
 which every backend consumes unmodified — Hermes by preloading it (`-s`),
