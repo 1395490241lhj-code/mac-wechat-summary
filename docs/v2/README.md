@@ -36,6 +36,7 @@ Git history and the reports together — never one old phase report in isolation
 22. `M2_2E_CANONICAL_MEMORY_ACTIVATION.md` — `--memory` alone finds the app-owned store, the real-user-data test guard, and the end-to-end product gate — **PASS**
 23. `M2_2F_RELEASE_PACKAGING_GATE.md` — Release signing of the nested helper **PASS**; notarization/stapling/Gatekeeper **NOT RUN** (no Developer ID identity or notary credential)
 24. `M2_3_MEMORY_SKILL_INTEGRATION.md` — the production skill learns Memory (v1.0.0 → v1.1.0); default 4-tool behaviour intact, 7/7 live Memory scenarios, citations validated — **PASS**
+25. `M2_4_REAL_VISUAL_MEMORY_UX_GATE.md` — first real-data run: capture → Sync Now → canonical store → 9 tools all **worked**; answer quality **not established** (dataset too small to exercise Memory; both grading methods inconclusive) — **FAIL, not established**
 
 ## Known supersessions
 
