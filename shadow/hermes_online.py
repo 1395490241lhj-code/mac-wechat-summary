@@ -20,13 +20,16 @@ Four behavioural gates, a canary, one wire assertion, one digest, one audit:
   the eight expected schemas — zero extra, zero missing — with
   ``tools_bearing >= 1``. The proxy sits between the runtime and the provider
   and aborts a mismatch before it is forwarded.
-* **Seeded /wechat-digest probe.** Not a gate. Current upstream skips slash
-  expansion for a seeded (``-q``) query -- ``cli.py`` guards it with
-  ``if not is_seeded_query`` -- so this path cannot exercise H4.7's
-  server-side-expansion finding and its result is recorded, not asserted. The
-  property that *does* gate the run, "the digest works with the ``skills``
-  toolset fully disabled", is established five times over by the ``-s``
-  preload gates above, which is the path the shadow runner actually uses.
+* **Every digest ends on the coverage line**, with nothing after it, and
+  carries no internal field name. SKILL.md v1.2.0 (H4.1).
+
+The supported invocation is the **preloaded skill**: ``-s wechat-digest`` for
+the CLI runner, and the skill's bytes prepended to the prompt for the Desktop
+turn. ``hermes chat -q "/wechat-digest …"`` is **not** an acceptance path and
+is not exercised here: current upstream reaches slash expansion only under
+``if not is_seeded_query`` in ``cli.py``, and ``-q`` is a seeded query, so the
+text would go to the model verbatim with no skill applied. Nothing in this
+project claims otherwise.
 * **Audit.** Request dumps, sessions, updater backups, scratch residue and
   credential residue.
 
@@ -51,7 +54,7 @@ REPO = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / ".hermes" / "skills" / "wechat-digest" / "evaluation"))
 
-from agent_runner import ShadowError, run_shadow  # noqa: E402
+from agent_runner import PROMPT, ShadowError, run_shadow  # noqa: E402
 from runners.hermes import HERMES_EXPECTED_TOOLS, HermesConfig, HermesRunner  # noqa: E402
 
 CREDENTIAL_VARIABLE = "ANTHROPIC_API_KEY"
@@ -223,6 +226,7 @@ def _gate(work: Path, composed: Path, venv_python: Path, label: str, key: str,
         "expected_tools": sorted(runner.expected_tools),
         "digest_produced": bool(digest.strip()),
         "coverage_line_last": _coverage_line_last(digest),
+        "internal_names_leaked": _internal_names_leaked(digest),
         "hermes_home": str(runner.cfg.hermes_home),
         "isolated_home": str(runner.cfg.isolated_home),
         "stderr": [l for l in err.getvalue().splitlines()
@@ -236,6 +240,21 @@ def _gate(work: Path, composed: Path, venv_python: Path, label: str, key: str,
 #: earlier version did -- matches nothing, because the mandated line contains
 #: neither, so every digest was recorded as failing a rule it actually kept.
 COVERAGE_LINE = "基于 WeChat Companion 已采集到的消息生成，可能不包含未被采集的聊天。"
+
+
+#: Internal vocabulary that must never appear in a digest (SKILL.md v1.2.0).
+#: A real run emitted "conversation_count=1, message_count=2,
+#: reader_configured=false" and "first_observed_at" into user-visible output.
+INTERNAL_NAMES = (
+    "message_count", "conversation_count", "reader_configured", "schema_version",
+    "first_observed_at", "before_sequence", "since_observed_at",
+    "logical_message_id", "mcp__wechat_companion__", "mcp__wechat_memory__",
+)
+
+
+def _internal_names_leaked(digest: str) -> list[str]:
+    """Which internal names, if any, reached user-visible output."""
+    return sorted(n for n in INTERNAL_NAMES if n in digest)
 
 
 def _coverage_line_last(digest: str) -> bool | None:
@@ -273,6 +292,8 @@ def _gate_canary(work: Path, composed: Path, venv_python: Path, credential: str,
     print("=== gate C (canary) ===")
     print(digest.replace(token, "<canary>"))
     residue["digest_contained_canary"] = token in digest
+    residue["coverage_line_last"] = _coverage_line_last(digest)
+    residue["internal_names_leaked"] = _internal_names_leaked(digest)
 
     real_cleanup(None)
     residue["sessions_after_purge"] = runner.list_sessions()
@@ -280,55 +301,6 @@ def _gate_canary(work: Path, composed: Path, venv_python: Path, credential: str,
     residue["canary_hits_after_purge"] = _search([home, hermes_home], tokenb)
     return {"scenario": "A_unanswered_question + canary", "status": status,
             "digest_produced": bool(digest.strip()), **residue}
-
-
-def _slash_digest(work: Path, composed: Path, venv_python: Path, credential: str,
-                  proxy_port: int) -> dict:
-    """Probe, not a gate: what a seeded ``/wechat-digest`` actually produces.
-
-    H4.7 found that ``/wechat-digest`` expands server-side, so the digest works
-    with the ``skills`` toolset disabled. That was an interactive Desktop chat
-    on v0.20.5. Current upstream reaches slash expansion only under
-    ``if not is_seeded_query`` in ``cli.py``, and ``-q`` *is* a seeded query, so
-    here the text goes to the model verbatim and no skill is applied. The
-    result is recorded so the deviation is visible; it is deliberately not
-    asserted, because a failure would be measuring a path the product does not
-    use.
-    """
-    from hermes_validation import disposable_env, write_required_config
-
-    db = _scenario_store(work, "A_unanswered_question", "slash")
-    env = disposable_env(work, "run_slash", {
-        "HERMES_DESKTOP": "1",
-        "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{proxy_port}",
-        CREDENTIAL_VARIABLE: credential,
-    })
-    write_required_config(env, python=venv_python, db=db,
-                          base_url=f"http://127.0.0.1:{proxy_port}")
-    proc = subprocess.run(
-        [str(venv_python), str(composed / "hermes"), "chat", "-Q", "-q",
-         "/wechat-digest 请生成今天的摘要", "-t", "wechat_companion"],
-        cwd=str(REPO), env=env, capture_output=True, text=True, timeout=900)
-    text = proc.stdout.strip()
-    print("=== synthetic /wechat-digest ===")
-    print(text)
-    combined = proc.stdout + proc.stderr
-    return {
-        "returncode": proc.returncode,
-        "digest_produced": bool(text),
-        "coverage_line_last": _coverage_line_last(text),
-        "skill_tools_observed": sorted(
-            {name for name in ("skill_view", "skills_list", "skill_manage")
-             if name in combined}),
-        "hermes_home": env["HERMES_HOME"],
-        "no_skill_tools_used": not any(
-            n in combined for n in ("skill_view", "skills_list", "skill_manage")),
-        # Recorded, never asserted -- see the docstring.
-        "slash_expansion_established": False,
-        "slash_expansion_note": (
-            "current upstream skips slash expansion for seeded (-q) queries "
-            "(cli.py: `if not is_seeded_query`), so this run cannot exercise it"),
-    }
 
 
 def _purge_home(hermes_home: Path) -> dict:
@@ -392,7 +364,7 @@ def desktop_turn_argv(venv_python: Path, composed: Path, response: Path,
     return [str(venv_python), str(HERE / "hermes_desktop_turn.py"),
             "--tree", str(composed),
             "--session-id", session_id or f"h5pre-{secrets.token_hex(4)}",
-            "--prompt", "/wechat-digest 请生成今天的摘要",
+            "--prompt", PROMPT,
             "--skill", str(REPO / ".hermes" / "skills" / "wechat-digest" / "SKILL.md"),
             "--response", str(response), "--out", str(out)]
 
@@ -456,10 +428,16 @@ def _desktop_turn(work: Path, composed: Path, venv_python: Path, credential: str
     print(text)
     detail["digest_produced"] = bool(text.strip())
     detail["coverage_line_last"] = _coverage_line_last(text)
+    detail["internal_names_leaked"] = _internal_names_leaked(text)
     # The Desktop turn is not driven by HermesRunner, so nothing else purges
     # the session store or a failure-path request dump it may have written.
     detail["residue_purged"] = _purge_home(Path(env["HERMES_HOME"]))
     detail["pass"] = (bool(detail.get("ok")) and detail["digest_produced"]
+                      # H4.1: the same two rules the CLI gates carry. This is
+                      # the surface that appended a note after the coverage
+                      # line, so it is the one that must prove it no longer does.
+                      and detail["coverage_line_last"]
+                      and not detail["internal_names_leaked"]
                       and detail.get("session_platform") == "desktop"
                       and detail.get("agent_platform") == "desktop"
                       and detail.get("enabled_toolsets") == ["wechat_companion"])
@@ -494,8 +472,6 @@ def phase_online(work: Path, report: dict, venv_python: Path) -> None:
             results["gates"][label] = _gate(work, composed, venv_python, label, key,
                                             credential, proxy.port)
         results["canary"] = _gate_canary(work, composed, venv_python, credential, proxy.port)
-        results["slash_digest"] = _slash_digest(work, composed, venv_python, credential,
-                                                proxy.port)
         cli_wire = proxy.verdict()
     results["exact8_cli"] = wire_verdict(cli_wire, "cli (hermes chat)", proxy.state)
 
@@ -503,7 +479,8 @@ def phase_online(work: Path, report: dict, venv_python: Path) -> None:
     results["containment"] = {"changed": diff_snapshots(before, protected_snapshot())}
     results["pass"] = (
         all(g.get("status") == 0 and g.get("digest_produced")
-            and g.get("coverage_line_last") for g in results["gates"].values())
+            and g.get("coverage_line_last") and not g.get("internal_names_leaked")
+            for g in results["gates"].values())
         and results["canary"].get("status") == 0
         and results["canary"].get("canary_hits_after_purge") == []
         # `digest_contained_canary` is recorded, never asserted: the canary is a
@@ -514,7 +491,8 @@ def phase_online(work: Path, report: dict, venv_python: Path) -> None:
         # working.
         and results["canary"].get("dumps_after_purge") == []
         and results["canary"].get("sessions_after_purge") == []
-        # results["slash_digest"] is a recorded probe, not a gate.
+        and results["canary"].get("coverage_line_last")
+        and not results["canary"].get("internal_names_leaked")
         and results["desktop_turn"]["pass"]
         and results["exact8_desktop"]["pass"]
         and results["exact8_cli"]["pass"]

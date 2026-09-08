@@ -44,6 +44,20 @@ The digest policy is **not** here. It is `.hermes/skills/wechat-digest/SKILL.md`
 which every backend consumes unmodified — Hermes by preloading it (`-s`),
 Claude by passing its bytes verbatim as the system prompt.
 
+### The supported invocation is the preloaded skill
+
+| Path | Status |
+|---|---|
+| `hermes chat … -s wechat-digest -t wechat_companion` | **supported.** What `HermesRunner` runs, and the only Hermes invocation under acceptance |
+| Desktop turn with SKILL.md prepended to the prompt | **supported.** The same policy bytes, same contract |
+| `hermes chat -q "/wechat-digest …"` | **not supported, and not claimed.** Current upstream reaches slash expansion only under `if not is_seeded_query` (`cli.py`), and `-q` *is* a seeded query — the text goes to the model verbatim and no skill is applied |
+
+H4.7 observed `/wechat-digest` expanding server-side in an **interactive Desktop
+chat on stock v0.20.5**. That finding is scoped to that runtime and that
+invocation. It was never evidence about `-q`, and nothing here claims a seeded
+`-q` performs slash expansion. Upstream's CLI behaviour is not patched by this
+project.
+
 ## Why this exists as code
 
 H4.5 and H4.6 established two boundaries that cannot be maintained by

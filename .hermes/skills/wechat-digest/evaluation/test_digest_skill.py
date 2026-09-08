@@ -312,6 +312,36 @@ def test_coverage_line_and_prohibited_claims(skill_text, prose):
         assert claim in prose, claim
 
 
+def test_coverage_line_must_be_the_literal_final_line(prose):
+    """H4.1: position is a rule, not a preference.
+
+    A trailing note displaces the qualification a reader lands on when they stop
+    at the last line -- and a note that itself describes coverage reads as a
+    *more precise* claim than the one it displaced. A real Desktop run appended
+    "（提示：当前仅采集到 1 个会话、2 条消息，覆盖范围非常有限。）" after it,
+    which is exactly the completeness claim the coverage section exists to
+    prevent.
+    """
+    assert "the coverage line is the literal last line of your entire response" in prose.lower()
+    assert "Write nothing after it" in prose
+    for forbidden in ("note", "caveat", "parenthetical", "footer", "commentary"):
+        assert forbidden in prose, forbidden
+
+
+def test_internal_field_names_are_forbidden_in_user_visible_output(prose):
+    """H4.1: how the answer was obtained is not part of the answer.
+
+    A real run emitted "conversation_count=1, message_count=2,
+    reader_configured=false" and "first_observed_at" into a user-facing digest.
+    """
+    assert "Never put an internal name in the digest" in prose
+    for name in ("message_count", "conversation_count", "reader_configured",
+                 "schema_version", "first_observed_at"):
+        assert name in prose, name
+    # The one sanctioned exception stays sanctioned.
+    assert "依据：msg:…" in prose
+
+
 # --- Output contract ---------------------------------------------------------
 
 def test_all_output_headings_are_specified(skill_text):

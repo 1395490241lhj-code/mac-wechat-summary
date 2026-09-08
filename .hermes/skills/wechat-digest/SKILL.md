@@ -1,7 +1,7 @@
 ---
 name: wechat-digest
 description: "Summarize WeChat messages captured by WeChat Companion into a grounded digest: what needs a reply, schedules, todos, and notable items."
-version: 1.1.0
+version: 1.2.0
 author: WeChat Companion
 license: MIT
 platforms: [macos]
@@ -262,10 +262,25 @@ know what it missed.
 
 Therefore:
 
-- Every digest ends with the coverage line given below.
+- **Every digest ends with the coverage line given below, and the coverage line
+  is the literal last line of your entire response.** Not "near the end", not
+  "followed by a short note" — the last line. When the response is read from
+  the bottom up, the first thing seen is the coverage qualification.
+- **Write nothing after it.** No note, caveat, parenthetical, footer, summary
+  of the summary, count of what was captured, remark about the data being
+  sparse or test-like, offer to do more, or any other commentary — in either
+  language, in brackets or out of them. If you want to qualify how little was
+  captured, that belongs *in* the coverage line's own sentence or above it,
+  never after it.
 - Never say "all your WeChat messages", "everything from today", "nothing else
   is important", "no other messages", or anything else implying full coverage.
 - Frame the digest as *based on captured messages*, not as the complete record.
+
+The reason the position is a rule and not a preference: a reader who stops at
+the last line must land on the coverage qualification. A trailing note displaces
+it, and a note that itself describes coverage ("only 2 messages captured")
+reads as a *more precise* claim than the qualification it displaced — which is
+exactly the completeness claim this section exists to prevent.
 
 ## Output
 
@@ -302,6 +317,14 @@ Rules for the body:
 - Attribute with what you actually have: a chat title, and a sender only when
   `sender` is present.
 - Keep each bullet to one line where possible.
+- **Never put an internal name in the digest.** Tool names
+  (`mcp__wechat_companion__*`), response fields (`message_count`,
+  `conversation_count`, `reader_configured`, `schema_version`,
+  `first_observed_at`, `sequence`, `logical_message_id`, `coverage`,
+  `freshness`), MCP or API vocabulary, and store or schema internals are how
+  you *obtained* the answer, not part of it. Say "共 2 条消息", never
+  "message_count=2". The one exception is the `依据：msg:…` citation line,
+  whose form is fixed above.
 
 ### When nothing has been captured
 
