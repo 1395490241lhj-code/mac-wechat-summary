@@ -168,8 +168,16 @@ class HermesRunner:
     def assert_tool_boundary(self) -> set[str]:
         """Read the effective tool list and fail closed on anything unexpected."""
         cfg = self.cfg
+        # No ``-Q`` here, deliberately, and only here. Quiet mode suppresses
+        # the tool-selection line this probe reads (``model_tools`` prints it
+        # under ``if not quiet_mode``), so a quiet probe can never see the
+        # boundary and aborts every run with "never reported a tool selection".
+        # The digest turn below keeps ``-Q``: it is the turn whose output is
+        # the digest, and it must stay quiet. Printing the selection is not a
+        # relaxation of the boundary -- it is the only way to read it before a
+        # message is read.
         proc = self._popen(
-            [str(cfg.python), str(cfg.hermes_entry), "chat", "-Q", "-v",
+            [str(cfg.python), str(cfg.hermes_entry), "chat", "-v",
              "-q", "boundary-probe", "-s", SKILL_NAME, "-t", TOOLSETS],
             cwd=str(cfg.project_dir), env=cfg.child_env(),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

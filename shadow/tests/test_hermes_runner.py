@@ -107,7 +107,7 @@ def test_boundary_probe_argv_and_termination(cfg):
     tools = runner.assert_tool_boundary()
     assert tools == set(HERMES_EXPECTED_TOOLS)
     argv, kw = record[0]
-    assert argv == [str(cfg.python), str(cfg.hermes_entry), "chat", "-Q", "-v",
+    assert argv == [str(cfg.python), str(cfg.hermes_entry), "chat", "-v",
                     "-q", "boundary-probe", "-s", SKILL_NAME, "-t", TOOLSETS]
     assert kw["env"] == cfg.child_env() and kw["stderr"] == subprocess.STDOUT
 

@@ -95,10 +95,18 @@ agent:
     - clarify
 """
 
-#: The read-only bridge, as Hermes must see it. Without this block the
-#: ``wechat_companion`` toolset name resolves to nothing and the run has no
-#: tools to assert. Both bridge opt-ins live here, in the MCP child's own
-#: environment, because that is the process that reads the store.
+#: Where the digest skill lives. Current upstream resolves `-s <name>` from
+#: `HERMES_HOME/skills` plus `skills.external_dirs` only -- it no longer
+#: discovers `<cwd>/.hermes/skills`, so a run started from the repo reports
+#: "Unknown skill(s): wechat-digest" and exits before it resolves any tools.
+#: Pointing at the repo directory rather than copying keeps the skill bytes
+#: canonical: `SKILL.md` byte-identity is project evidence.
+SKILLS_BLOCK = """
+skills:
+  external_dirs:
+    - "{skills_dir}"
+"""
+
 MODEL_BLOCK = """
 model:
   default: "{model}"
@@ -112,6 +120,10 @@ model:
 #: not-tools-bearing, and the assertion silently never fires.
 DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 
+#: The read-only bridge, as Hermes must see it. Without this block the
+#: ``wechat_companion`` toolset name resolves to nothing and the run has no
+#: tools to assert. Both bridge opt-ins live here, in the MCP child's own
+#: environment, because that is the process that reads the store.
 MCP_SERVER_BLOCK = """
 mcp_servers:
   wechat_companion:
@@ -207,7 +219,8 @@ def write_required_config(env: dict, *, python: Path | None = None,
     run against the same profile, which would send a real request past the
     assertion proxy straight to the provider.
     """
-    text = REQUIRED_CONFIG
+    text = REQUIRED_CONFIG + SKILLS_BLOCK.format(
+        skills_dir=REPO / ".hermes" / "skills")
     if base_url is not None:
         text += MODEL_BLOCK.format(model=model, base_url=base_url)
     if python is not None and db is not None:
