@@ -44,6 +44,15 @@ enum WeChatNativeArchiveImportError: Error, Equatable, Sendable {
     /// The transcript is fine, but the archive's layout establishes no
     /// source-side conversation identity, and B1 keys durable evidence on one.
     case sourceConversationIdentityUnavailable
+    /// The write refused itself: the rows inserted disagreed with the
+    /// transcript, so the import was rolled back whole. A bug on our side, not
+    /// something the user can act on -- and the counts stay internal, because
+    /// they say how long the conversation was.
+    case persistenceInvariantFailed
+    /// The store failed for some other reason. Deliberately opaque: the
+    /// underlying SQLite status is a diagnostic, not something to show or to
+    /// let a caller branch on.
+    case persistenceFailed
 }
 
 /// Turns a native WeChat export into durable local evidence.
@@ -63,12 +72,21 @@ struct WeChatNativeArchiveImporter: Sendable {
 
     init(history: LocalMessageHistory) { self.history = history }
 
+    /// Runs between the archive read and the write, so a test can change the
+    /// history's state exactly in the window the preflight cannot cover.
+    ///
+    /// A deterministic seam rather than a sleep: the race is "state changed
+    /// after preflight", and reproducing it by timing would make the test flaky
+    /// about the one thing it is supposed to pin down.
+    typealias AfterReadHook = @Sendable () async -> Void
+
     @discardableResult
     func importArchive(
         contentsOf url: URL,
         limits: ZIPArchiveReader.Limits = .standard,
         timeZone: TimeZone = WeChatNativeTranscriptParser.defaultTimeZone,
-        importedAt: Date = Date()
+        importedAt: Date = Date(),
+        afterReadForTesting: AfterReadHook? = nil
     ) async throws -> WeChatNativeArchiveImportSummary {
         // Preflight before the file is opened. If nothing can be stored, there
         // is no reason to decompress and parse somebody's conversation to find
@@ -97,6 +115,8 @@ struct WeChatNativeArchiveImporter: Sendable {
             throw Self.mapped(error)
         }
 
+        await afterReadForTesting?()
+
         guard let identity = archive.sourceIdentity else {
             // Refusing costs the user one import. Inventing a key -- from the
             // filename, from a transcript hash, from anything at all -- would
@@ -105,11 +125,26 @@ struct WeChatNativeArchiveImporter: Sendable {
             throw WeChatNativeArchiveImportError.sourceConversationIdentityUnavailable
         }
 
-        let result = try await history.persistArchiveEvidence(
-            transcript: archive.transcript,
-            conversationKey: ArchiveConversationKey(sourceIdentity: identity),
-            importedAt: importedAt
-        )
+        // The preflight above is an optimisation, not the guarantee: consent can
+        // be withdrawn, or the store can fail, while the archive is being read.
+        // B1 re-checks at write time and this maps whatever it says back into
+        // one enum, so a caller never has to know that `ArchivePersistenceError`
+        // or `MessageStoreError` exist.
+        let result: ArchivePersistenceResult
+        do {
+            result = try await history.persistArchiveEvidence(
+                transcript: archive.transcript,
+                conversationKey: ArchiveConversationKey(sourceIdentity: identity),
+                importedAt: importedAt
+            )
+        } catch let error as ArchivePersistenceError {
+            throw Self.mapped(error)
+        } catch {
+            // MessageStoreError and anything else the storage layer can raise.
+            // Collapsed on purpose: a raw SQLite status is a diagnostic, and
+            // leaking the type would make it part of this contract.
+            throw WeChatNativeArchiveImportError.persistenceFailed
+        }
 
         return WeChatNativeArchiveImportSummary(
             outcome: result.isInsert ? .inserted : .alreadyImported,
@@ -120,6 +155,16 @@ struct WeChatNativeArchiveImporter: Sendable {
             attachmentCountsByExtension: archive.attachmentCountsByExtension,
             sourceIdentityKind: identity.kind
         )
+    }
+
+    private static func mapped(_ error: ArchivePersistenceError) -> WeChatNativeArchiveImportError {
+        switch error {
+        case .localPersistenceConsentRequired: .localPersistenceConsentRequired
+        case .localStoreUnavailable: .localStoreUnavailable
+        // Never reported as a consent or store problem: it is neither, and
+        // saying so would send the user to fix something that is not broken.
+        case .recordCountMismatch: .persistenceInvariantFailed
+        }
     }
 
     private static func mapped(_ error: WeChatNativeArchiveError) -> WeChatNativeArchiveImportError {

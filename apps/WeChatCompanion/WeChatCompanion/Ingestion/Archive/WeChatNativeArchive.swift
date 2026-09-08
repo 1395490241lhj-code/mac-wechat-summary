@@ -157,9 +157,15 @@ enum WeChatNativeArchiveReader {
             throw WeChatNativeArchiveError.archive(error)
         }
 
-        let files = reader.entries.filter { !$0.isDirectory }
+        // Entries are carried with their real central-directory index. A ZIP may
+        // hold two entries with the same name, so matching by name later would
+        // be matching on something that is not an identity.
+        let files = reader.entries.enumerated()
+            .filter { !$0.element.isDirectory }
+            .map { (index: $0.offset, entry: $0.element) }
         let candidates = files.filter {
-            $0.pathExtension == "txt" && $0.uncompressedSize <= maximumTranscriptBytes
+            $0.entry.pathExtension == "txt"
+                && $0.entry.uncompressedSize <= maximumTranscriptBytes
         }
 
         // Only entries that classify as one of the two observed shapes compete.
@@ -168,12 +174,11 @@ enum WeChatNativeArchiveReader {
         // wrote.
         var recognized: [(name: String, index: Int, transcript: WeChatNativeTranscript)] = []
         for candidate in candidates {
-            guard let data = try? reader.data(for: candidate),
+            guard let data = try? reader.data(for: candidate.entry),
                   let body = decodeUTF8(data),
                   let transcript = try? WeChatNativeTranscriptParser.parse(body, timeZone: timeZone)
             else { continue }
-            let index = reader.entries.firstIndex { $0.name == candidate.name } ?? 0
-            recognized.append((candidate.name, index, transcript))
+            recognized.append((candidate.entry.name, candidate.index, transcript))
         }
         guard !recognized.isEmpty else { throw WeChatNativeArchiveError.noRecognizableTranscript }
 
@@ -187,10 +192,19 @@ enum WeChatNativeArchiveReader {
         }
         let best = recognized.max { $0.transcript.recordCount < $1.transcript.recordCount }!
 
-        let others = files.filter { $0.name != best.name }
+        // Every *recognized* transcript is excluded, not merely the winner. A
+        // losing candidate is still a transcript -- Phase A deliberately allows
+        // several of one shape and takes the richest -- so treating the others
+        // as ordinary entries would let a root-level TXT decide that no single
+        // top-level directory covers the archive, and identity would vanish for
+        // an archive that plainly has one. Excluded by index, because names are
+        // not unique in a ZIP.
+        let transcriptIndices = Set(recognized.map(\.index))
+        let others = files.filter { !transcriptIndices.contains($0.index) }
         var attachments: [String: Int] = [:]
         for file in others {
-            attachments[file.pathExtension.isEmpty ? "(none)" : file.pathExtension, default: 0] += 1
+            let ext = file.entry.pathExtension
+            attachments[ext.isEmpty ? "(none)" : ext, default: 0] += 1
         }
 
         return WeChatNativeArchive(
@@ -220,12 +234,12 @@ enum WeChatNativeArchiveReader {
     /// the conservative answer: an invented conversation key would merge two
     /// conversations or split one, and both are silent.
     private static func sourceIdentity(
-        ofEntriesOtherThanTranscript entries: [ZIPArchiveReader.Entry]
+        ofEntriesOtherThanTranscript entries: [(index: Int, entry: ZIPArchiveReader.Entry)]
     ) -> WeChatNativeArchiveSourceIdentity? {
         guard !entries.isEmpty else { return nil }
         var shared: String?
-        for entry in entries {
-            let components = entry.name.split(separator: "/", omittingEmptySubsequences: false)
+        for file in entries {
+            let components = file.entry.name.split(separator: "/", omittingEmptySubsequences: false)
             // A root-level entry has no top-level directory to belong to.
             guard components.count >= 2 else { return nil }
             let top = String(components[0])

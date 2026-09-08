@@ -407,3 +407,154 @@ struct ArchiveImportCoordinatorTests {
         #expect(FileManager.default.fileExists(atPath: url.path), "the source must be left alone")
     }
 }
+
+// MARK: - State changing between preflight and write
+
+/// The preflight is an optimisation, not the guarantee. Consent can be withdrawn
+/// while the archive is being read, and the write-time refusal must reach the
+/// caller as an *importer* error -- B2b should never have to know that
+/// `ArchivePersistenceError` or `MessageStoreError` exist.
+struct ArchiveImportRaceTests {
+    /// `Sandbox` is noncopyable, so it cannot travel in a tuple; each test owns
+    /// its own and builds the archive inline.
+    private func archive(in sandbox: borrowing Sandbox) throws -> URL {
+        try sandbox.archive(entries: [
+            ("聊天记录.txt", shapeA([("张三", t35, "哈哈")])),
+            ("会话目录/a.jpg", "x"),
+        ])
+    }
+
+    @Test
+    func consentRevokedAfterPreflightSurfacesAsAnImporterConsentError() async throws {
+        let sandbox = try Sandbox()
+        let url = try archive(in: sandbox)
+        let history = LocalMessageHistory(url: sandbox.databaseURL)
+        await history.setEnabled(true)
+        let store = await history.openStore()!
+        let importer = WeChatNativeArchiveImporter(history: history)
+
+        await #expect(throws: WeChatNativeArchiveImportError.localPersistenceConsentRequired) {
+            try await importer.importArchive(contentsOf: url) {
+                // Exactly the window the preflight cannot cover.
+                await history.setEnabled(false)
+            }
+        }
+        #expect(try await store.archiveImportCount() == 0)
+        #expect(try await store.archiveConversationCount() == 0)
+        #expect(try await store.archiveRecordCount(shape: "attributed") == 0)
+    }
+
+    @Test
+    func aStoreThatBecomesUnavailableAfterPreflightSurfacesAsAnImporterStoreError() async throws {
+        let sandbox = try Sandbox()
+        let url = try archive(in: sandbox)
+        let history = LocalMessageHistory(url: sandbox.databaseURL)
+        await history.setEnabled(true)
+        let importer = WeChatNativeArchiveImporter(history: history)
+
+        await #expect(throws: WeChatNativeArchiveImportError.localStoreUnavailable) {
+            try await importer.importArchive(contentsOf: url) {
+                // Consent stays on; the store goes away. Toggling off and on
+                // over a database this build refuses to open is the honest way
+                // to reach `unavailable` without faking the state directly.
+                await history.setEnabled(false)
+                var handle: OpaquePointer?
+                sqlite3_open_v2(sandbox.databaseURL.path, &handle,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
+                sqlite3_exec(handle, "PRAGMA user_version = 3;", nil, nil, nil)
+                sqlite3_close_v2(handle)
+                await history.setEnabled(true)
+            }
+        }
+        #expect(await history.storeState == .unavailable)
+    }
+
+    @Test
+    func noPersistenceLayerErrorEscapesTheImporter() async throws {
+        // The contract B2b depends on: one enum, whatever went wrong.
+        let sandbox = try Sandbox()
+        let url = try archive(in: sandbox)
+        let history = LocalMessageHistory(url: sandbox.databaseURL)
+        await history.setEnabled(true)
+        let importer = WeChatNativeArchiveImporter(history: history)
+        do {
+            try await importer.importArchive(contentsOf: url) {
+                await history.setEnabled(false)
+            }
+            Issue.record("expected a refusal")
+        } catch is WeChatNativeArchiveImportError {
+            // Correct: the importer's own type.
+        } catch {
+            Issue.record("leaked \(type(of: error)) instead of WeChatNativeArchiveImportError")
+        }
+    }
+}
+
+// MARK: - Several recognized transcripts
+
+/// Phase A allows several recognized candidates of one shape and takes the
+/// richest. A losing candidate is still a transcript, so it must not be treated
+/// as an ordinary entry when deriving source identity -- otherwise a root-level
+/// TXT would prove that no single top-level directory covers the archive, and
+/// identity would vanish for an archive that plainly has one.
+struct ArchiveMultipleTranscriptCandidateTests {
+    @Test
+    func aLosingRootLevelCandidateDoesNotDestroySourceIdentity() throws {
+        let sandbox = try Sandbox()
+        let url = try sandbox.archive(entries: [
+            ("small.txt", shapeA([("张三", t35, "哈哈")])),
+            ("big.txt", shapeA([("张三", t35, "哈哈"), ("李四", t36, "收到"), ("王五", t36, "好")])),
+            ("会话目录/a.jpg", "x"),
+            ("会话目录/b.jpg", "y"),
+        ])
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.transcriptCandidateCount == 2)
+        #expect(archive.recordCount == 3, "the richest transcript wins")
+        #expect(archive.sourceIdentity == .singleTopLevelDirectory("会话目录"))
+        // The losing transcript is not counted as an attachment either.
+        #expect(archive.attachmentCountsByExtension == ["jpg": 2])
+    }
+
+    @Test
+    func severalCandidatesWithAttachmentsInTwoDirectoriesStillYieldNoIdentity() throws {
+        let sandbox = try Sandbox()
+        let url = try sandbox.archive(entries: [
+            ("small.txt", shapeB(["一"])),
+            ("big.txt", shapeB(["一", "二", "三"])),
+            ("目录甲/a.jpg", "x"),
+            ("目录乙/b.jpg", "y"),
+        ])
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.recordCount == 3)
+        #expect(archive.sourceIdentity == nil)
+    }
+
+    @Test
+    func mixedShapeCandidatesAreStillAmbiguous() throws {
+        let sandbox = try Sandbox()
+        let url = try sandbox.archive(entries: [
+            ("a.txt", shapeA([("张三", t35, "哈哈")])),
+            ("b.txt", shapeB(["一", "二", "三"])),
+            ("会话目录/a.jpg", "x"),
+        ])
+        #expect(throws: WeChatNativeArchiveError.ambiguousTranscriptCandidates) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func theRawIdentityStaysOutOfSummariesEvenWithSeveralCandidates() throws {
+        let sandbox = try Sandbox()
+        let secret = "机密会话目录"
+        let url = try sandbox.archive(entries: [
+            ("small.txt", shapeA([("张三", t35, "哈哈")])),
+            ("big.txt", shapeA([("张三", t35, "哈哈"), ("李四", t36, "收到")])),
+            ("\(secret)/a.jpg", "x"),
+        ])
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        let report = WeChatNativeArchiveSummary(archive).reportLines.joined(separator: "\n")
+        #expect(report.contains("source identity available: yes"))
+        #expect(!report.contains(secret))
+        #expect(!report.contains(ArchiveConversationKey(sourceIdentity: archive.sourceIdentity!).rawValue))
+    }
+}
