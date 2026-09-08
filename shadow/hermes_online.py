@@ -74,13 +74,35 @@ BEHAVIOURAL_GATES = {
 UPDATER_BACKUP_GLOBS = ("state.db.bak*", "state.db.backup*", "*.bak", "backups/**/*")
 
 
-def _credential() -> str:
+#: A hand-off file for the credential, used only when the environment cannot
+#: carry it. An exported variable reaches a process only at its start, so a
+#: long-running session cannot pick one up from a shell that exported it
+#: later; this is the way in that does not require restarting anything.
+KEY_FILE_NAME = "anthropic_api_key"
+
+
+def _credential(work: Path | None = None) -> str:
+    """The provider key, from the environment or a one-shot hand-off file.
+
+    The file is read once and deleted immediately, before any provider call, so
+    the secret is on disk for the shortest window the design allows. It is
+    never copied into a report, an argv, or a log line -- only into the child
+    process environment that needs it.
+    """
     value = os.environ.get(CREDENTIAL_VARIABLE, "").strip()
-    if not value:
-        raise ShadowError(
-            f"{CREDENTIAL_VARIABLE} is not set. The online phase makes real provider "
-            "calls on synthetic content and cannot run without it.")
-    return value
+    if value:
+        return value
+    if work is not None:
+        handoff = work / KEY_FILE_NAME
+        if handoff.is_file():
+            value = handoff.read_text(encoding="utf-8").strip()
+            handoff.unlink(missing_ok=True)
+            if value:
+                return value
+    raise ShadowError(
+        f"{CREDENTIAL_VARIABLE} is not set and no hand-off file was found. The online "
+        "phase makes real provider calls on synthetic content and cannot run without a "
+        "credential.")
 
 
 def _contains(path: Path, token: bytes) -> bool:
@@ -417,7 +439,7 @@ def phase_online(work: Path, report: dict, venv_python: Path) -> None:
 
     if venv_python is None:
         raise ShadowError("--venv-python is required for the online phase")
-    credential = _credential()
+    credential = _credential(work)
     composed = work / "composed"
     before = protected_snapshot()
     results: dict = {"gates": {}}
