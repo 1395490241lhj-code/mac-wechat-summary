@@ -9,6 +9,14 @@ struct WeChatCompanionApp: App {
             ContentView(model: model)
                 .frame(minWidth: 760, minHeight: 520)
                 .task {
+                    // Under an XCTest host this scene still appears, and
+                    // bootstrap would restore the stored consent and open the
+                    // operator's real message store before any test runs.
+                    // Normal launches are unaffected.
+                    guard AppBootstrapPolicy.shouldBootstrap(
+                        isUnderTestHost: RuntimeEnvironment.isUnderTestHost
+                    ) else { return }
+
                     let arguments = ProcessInfo.processInfo.arguments
                     await model.bootstrap(
                         autoRunDiagnostics: arguments.contains("--run-diagnostics"),

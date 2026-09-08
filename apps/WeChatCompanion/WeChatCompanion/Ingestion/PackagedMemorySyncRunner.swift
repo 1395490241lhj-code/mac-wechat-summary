@@ -46,12 +46,10 @@ struct PackagedMemorySyncRunner: MemorySyncRunning {
     /// asked for the production runner would sync the user's own messages.
     /// It happened once; the guard and its reason are kept together so that
     /// neither is removed without the other.
-    static var isUnderTestHost: Bool {
-        let environment = ProcessInfo.processInfo.environment
-        return environment["XCTestConfigurationFilePath"] != nil
-            || environment["XCTestBundlePath"] != nil
-            || NSClassFromString("XCTestCase") != nil
-    }
+    /// One definition, shared with the app's launch path. Two copies of this
+    /// predicate would eventually disagree, and the disagreement would be about
+    /// whether to touch the user's data.
+    static var isUnderTestHost: Bool { RuntimeEnvironment.isUnderTestHost }
 
     /// The runner for this build, or nil when no worker was bundled -- or when
     /// this is a test host, whatever it happens to contain.

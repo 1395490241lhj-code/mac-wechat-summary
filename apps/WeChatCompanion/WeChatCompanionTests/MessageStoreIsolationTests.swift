@@ -27,6 +27,20 @@ struct FileFingerprint: Equatable, Sendable, CustomStringConvertible {
     }
 }
 
+/// The canonical memory-store locations, fingerprinted together.
+///
+/// Used by the memory-sync guard, which proves **non-mutation** rather than
+/// absence: an operator who has legitimately run Sync Now owns this file, and
+/// its existence is not evidence that a test wrote to it.
+func canonicalMemoryStoreFingerprints() -> [String: FileFingerprint] {
+    let base = MemoryStoreLocation.canonical
+    return [
+        "db": FileFingerprint(base),
+        "wal": FileFingerprint(URL(fileURLWithPath: base.path + "-wal")),
+        "shm": FileFingerprint(URL(fileURLWithPath: base.path + "-shm")),
+    ]
+}
+
 /// The canonical locations a test must never touch, fingerprinted together.
 private func canonicalStoreFingerprints() -> [String: FileFingerprint] {
     let base = MessageStore.applicationSupport
@@ -43,19 +57,21 @@ private func canonicalStoreFingerprints() -> [String: FileFingerprint] {
 /// persistence on drove consent transitions against the operator's real
 /// database. This is the missing half of that guard.
 ///
-/// **Known limitation, deliberately stated rather than papered over.** This
-/// suite cannot catch the *other* route to the same file: the test target uses
-/// the app itself as its `TEST_HOST`, so `@main` constructs a production
-/// `AppModel()` and `bootstrap()` calls `setEnabled(allowsLocalPersistence)`
-/// against the real `UserDefaults`. On a machine where the operator granted
-/// local persistence, the host opens the real store **before any test runs**,
-/// and a before/after comparison inside a test sees nothing. Measured: running
-/// a suite that never touches `AppModel` still moves the canonical `-shm`
-/// timestamp.
+/// **Isolation has two layers, and this suite can only see one of them.**
 ///
-/// Dependency injection cannot close that; it needs a host-level decision
-/// (no test host, or a launch argument that suppresses bootstrap). Until then
-/// these tests prove the *test-authored* half only.
+/// Layer 1 is dependency injection: no test may build an `AppModel` without
+/// supplying its own history. That is what the structural check below enforces.
+///
+/// Layer 2 is the host. The test target uses the app itself as its `TEST_HOST`,
+/// so `@main` runs for real and `bootstrap()` would restore the stored consent
+/// and open the operator's `messages.sqlite` **before any test executes** --
+/// measured: a suite that never touches `AppModel` still moved the canonical
+/// `-shm` timestamp. `AppBootstrapPolicy` now suppresses that.
+///
+/// An in-process test cannot observe state from before its own host launched,
+/// so it cannot prove layer 2. The authoritative proof is an external
+/// before/after snapshot of the canonical files taken around the whole
+/// `xcodebuild test` run; this file deliberately does not claim to replace it.
 struct MessageStoreIsolationTests {
     @Test @MainActor
     func aRepresentativePersistenceFlowNeverTouchesTheCanonicalStore() async throws {
@@ -119,5 +135,30 @@ struct MessageStoreIsolationTests {
                 )
             }
         }
+    }
+}
+
+/// The host-level half of isolation.
+struct RuntimeEnvironmentTests {
+    @Test
+    func thisProcessIsRecognisedAsATestHost() {
+        // If this were ever false, the bootstrap guard would silently stop
+        // guarding and nothing else would notice.
+        #expect(RuntimeEnvironment.isUnderTestHost)
+    }
+
+    @Test
+    func bootstrapIsSuppressedUnderATestHostAndAllowedOtherwise() {
+        // A pure policy seam, so the decision is testable without launching a
+        // second process and without mutating the environment.
+        #expect(!AppBootstrapPolicy.shouldBootstrap(isUnderTestHost: true))
+        #expect(AppBootstrapPolicy.shouldBootstrap(isUnderTestHost: false))
+    }
+
+    @Test
+    func theMemorySyncRunnerUsesTheSameDefinitionOfTestHost() {
+        // One predicate, two call sites. Two copies would eventually disagree.
+        #expect(PackagedMemorySyncRunner.isUnderTestHost == RuntimeEnvironment.isUnderTestHost)
+        #expect(PackagedMemorySyncRunner.bundled() == nil)
     }
 }

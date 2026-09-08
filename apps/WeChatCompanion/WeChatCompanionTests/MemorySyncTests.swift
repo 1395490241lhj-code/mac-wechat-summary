@@ -177,12 +177,27 @@ struct MemorySyncTests {
         // A test host is an app bundle carrying a real worker. Resolving it
         // here would sync the user's own messages as a side effect of running
         // the suite; the default must be the inert runner instead.
+        //
+        // The contract is **non-mutation**, not absence. This test used to
+        // assert the canonical memory store did not exist, which is false the
+        // moment an operator legitimately uses Sync Now -- "the operator has
+        // used the product" and "the suite touched the product's data" are
+        // different claims, and only the second is a defect. Asserting the
+        // first made the guard fail on exactly the machines it was written to
+        // protect, which is how a guard gets deleted instead of fixed.
+        let before = canonicalMemoryStoreFingerprints()
+
         #expect(AppModel.defaultMemorySyncRunner() is UnavailableMemorySyncRunner)
         let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(model.memorySyncPhase == .failed(.runnerUnavailable))
-        #expect(!FileManager.default.fileExists(atPath: MemoryStoreLocation.canonical.path))
+
+        let after = canonicalMemoryStoreFingerprints()
+        for key in ["db", "wal", "shm"] {
+            #expect(after[key] == before[key],
+                    "the canonical memory store's \(key) changed: \(before[key]!) -> \(after[key]!)")
+        }
     }
 
     @Test

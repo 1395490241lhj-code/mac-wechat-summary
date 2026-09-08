@@ -31,6 +31,7 @@
 		A00000000000000000000A2 /* WeChatNativeArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A2 /* WeChatNativeArchive.swift */; };
 		B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */; };
 		A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A4 /* ArchiveEvidence.swift */; };
+		A0000000000000000000B2 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B2 /* RuntimeEnvironment.swift */; };
 		A0000000000000000000009B /* MemorySync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009B /* MemorySync.swift */; };
 		A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009E /* PackagedMemorySyncRunner.swift */; };
 		A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009D /* MemoryStoreLocation.swift */; };
@@ -94,6 +95,7 @@
 		C00000000000000000000A2 /* WeChatNativeArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/WeChatNativeArchive.swift; sourceTree = "<group>"; };
 		C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatNativeArchiveTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000A4 /* ArchiveEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/ArchiveEvidence.swift; sourceTree = "<group>"; };
+		C0000000000000000000B2 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
 		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
 		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
 		C0000000000000000000009B /* MemorySync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MemorySync.swift; sourceTree = "<group>"; };
@@ -160,6 +162,7 @@
 				C00000000000000000000001 /* WeChatCompanionApp.swift */,
 				C00000000000000000000002 /* ContentView.swift */,
 				C00000000000000000000003 /* AppModel.swift */,
+				C0000000000000000000B2 /* RuntimeEnvironment.swift */,
 				C00000000000000000000004 /* DiagnosticResult.swift */,
 				C00000000000000000000005 /* DiagnosticsService.swift */,
 				C00000000000000000000006 /* DiagnosticsStore.swift */,
@@ -349,6 +352,7 @@
 				A00000000000000000000001 /* WeChatCompanionApp.swift in Sources */,
 				A00000000000000000000002 /* ContentView.swift in Sources */,
 				A00000000000000000000003 /* AppModel.swift in Sources */,
+				A0000000000000000000B2 /* RuntimeEnvironment.swift in Sources */,
 				A00000000000000000000004 /* DiagnosticResult.swift in Sources */,
 				A00000000000000000000005 /* DiagnosticsService.swift in Sources */,
 				A00000000000000000000006 /* DiagnosticsStore.swift in Sources */,
