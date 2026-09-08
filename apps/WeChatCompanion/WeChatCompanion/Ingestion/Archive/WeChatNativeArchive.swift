@@ -9,6 +9,31 @@ import Foundation
 /// delete action, and a raw chat archive kept beside it would survive
 /// "Delete All History" and quietly make that action a lie. Persisting an
 /// archive needs its own lifecycle design first.
+/// Identity of the conversation **as the archive's own structure expresses it**.
+///
+/// Derived from the container layout and nothing else. Never from the ZIP's
+/// filename, the transcript's contents, a sender, a timestamp, an attachment
+/// basename, a record count, a transcript hash, or a visual conversation title
+/// — every one of those is either content or a coincidence, and D-019/D-022
+/// forbid resolving identity from them.
+///
+/// The associated value is the directory component **verbatim**: not trimmed,
+/// not lowercased, not Unicode-normalised. Two source directories that differ
+/// only by normalisation are two different claims about provenance, and this
+/// type is not the place to decide they are the same.
+enum WeChatNativeArchiveSourceIdentity: Sendable, Equatable {
+    /// Every non-transcript file entry lives beneath one shared top-level
+    /// directory, which is the only layout real exports have shown.
+    case singleTopLevelDirectory(String)
+
+    /// Stable, privacy-safe label. Reportable; the value never is.
+    var kind: String {
+        switch self {
+        case .singleTopLevelDirectory: "single_top_level_directory"
+        }
+    }
+}
+
 struct WeChatNativeArchive: Sendable, Equatable {
     /// The entry the transcript was read from. Kept for internal use; it is
     /// deliberately **not** part of the pasteable acceptance report -- see
@@ -27,6 +52,10 @@ struct WeChatNativeArchive: Sendable, Equatable {
     /// Non-transcript file entries, counted by lowercased extension. Phase A
     /// does not read, extract or interpret any of them.
     let attachmentCountsByExtension: [String: Int]
+    /// Source-side conversation identity, or `nil` when the layout does not
+    /// establish one. Derived in the **same read** as the transcript, so the
+    /// two can never describe different files.
+    let sourceIdentity: WeChatNativeArchiveSourceIdentity?
 
     // Privacy-safe aggregate semantics. "No strict attributed parse" is not
     // "invalid archive", and these are what say so.
@@ -128,9 +157,15 @@ enum WeChatNativeArchiveReader {
             throw WeChatNativeArchiveError.archive(error)
         }
 
-        let files = reader.entries.filter { !$0.isDirectory }
+        // Entries are carried with their real central-directory index. A ZIP may
+        // hold two entries with the same name, so matching by name later would
+        // be matching on something that is not an identity.
+        let files = reader.entries.enumerated()
+            .filter { !$0.element.isDirectory }
+            .map { (index: $0.offset, entry: $0.element) }
         let candidates = files.filter {
-            $0.pathExtension == "txt" && $0.uncompressedSize <= maximumTranscriptBytes
+            $0.entry.pathExtension == "txt"
+                && $0.entry.uncompressedSize <= maximumTranscriptBytes
         }
 
         // Only entries that classify as one of the two observed shapes compete.
@@ -139,12 +174,11 @@ enum WeChatNativeArchiveReader {
         // wrote.
         var recognized: [(name: String, index: Int, transcript: WeChatNativeTranscript)] = []
         for candidate in candidates {
-            guard let data = try? reader.data(for: candidate),
+            guard let data = try? reader.data(for: candidate.entry),
                   let body = decodeUTF8(data),
                   let transcript = try? WeChatNativeTranscriptParser.parse(body, timeZone: timeZone)
             else { continue }
-            let index = reader.entries.firstIndex { $0.name == candidate.name } ?? 0
-            recognized.append((candidate.name, index, transcript))
+            recognized.append((candidate.entry.name, candidate.index, transcript))
         }
         guard !recognized.isEmpty else { throw WeChatNativeArchiveError.noRecognizableTranscript }
 
@@ -158,9 +192,19 @@ enum WeChatNativeArchiveReader {
         }
         let best = recognized.max { $0.transcript.recordCount < $1.transcript.recordCount }!
 
+        // Every *recognized* transcript is excluded, not merely the winner. A
+        // losing candidate is still a transcript -- Phase A deliberately allows
+        // several of one shape and takes the richest -- so treating the others
+        // as ordinary entries would let a root-level TXT decide that no single
+        // top-level directory covers the archive, and identity would vanish for
+        // an archive that plainly has one. Excluded by index, because names are
+        // not unique in a ZIP.
+        let transcriptIndices = Set(recognized.map(\.index))
+        let others = files.filter { !transcriptIndices.contains($0.index) }
         var attachments: [String: Int] = [:]
-        for file in files where file.name != best.name {
-            attachments[file.pathExtension.isEmpty ? "(none)" : file.pathExtension, default: 0] += 1
+        for file in others {
+            let ext = file.entry.pathExtension
+            attachments[ext.isEmpty ? "(none)" : ext, default: 0] += 1
         }
 
         return WeChatNativeArchive(
@@ -169,8 +213,44 @@ enum WeChatNativeArchiveReader {
             transcript: best.transcript,
             entryCount: reader.entries.count,
             transcriptCandidateCount: recognized.count,
-            attachmentCountsByExtension: attachments
+            attachmentCountsByExtension: attachments,
+            sourceIdentity: sourceIdentity(ofEntriesOtherThanTranscript: others)
         )
+    }
+
+    /// Derives source identity from the container layout, strictly.
+    ///
+    /// Every real export observed so far puts its transcript at the archive
+    /// root and its attachments beneath **one** top-level directory named for
+    /// the conversation, so that directory is the only structural identity the
+    /// artifact offers. The transcript is therefore excluded from the check --
+    /// requiring it to sit under the directory too would reject every real
+    /// archive we have.
+    ///
+    /// Returns `nil` -- identity unavailable -- rather than guessing when:
+    /// there are no non-transcript entries at all (an attachment-free export
+    /// has no directory to name it), any of them sits at the archive root, or
+    /// they are spread across more than one top-level directory. Refusing is
+    /// the conservative answer: an invented conversation key would merge two
+    /// conversations or split one, and both are silent.
+    private static func sourceIdentity(
+        ofEntriesOtherThanTranscript entries: [(index: Int, entry: ZIPArchiveReader.Entry)]
+    ) -> WeChatNativeArchiveSourceIdentity? {
+        guard !entries.isEmpty else { return nil }
+        var shared: String?
+        for file in entries {
+            let components = file.entry.name.split(separator: "/", omittingEmptySubsequences: false)
+            // A root-level entry has no top-level directory to belong to.
+            guard components.count >= 2 else { return nil }
+            let top = String(components[0])
+            guard !top.isEmpty else { return nil }
+            if let shared {
+                guard shared == top else { return nil }
+            } else {
+                shared = top
+            }
+        }
+        return shared.map(WeChatNativeArchiveSourceIdentity.singleTopLevelDirectory)
     }
 
     /// UTF-8, with an optional BOM. A native export is UTF-8; anything that is
@@ -219,6 +299,12 @@ struct WeChatNativeArchiveSummary: Sendable, Equatable {
     let lastSentAtText: String?
     let timeZoneIdentifier: String?
     let attachmentCountsByExtension: [String: Int]
+    /// Whether the layout established a source-side conversation identity, and
+    /// which rule found it. **The identity value itself is never reported**,
+    /// and neither is a hash of it -- a hash of a chat name is still a stable
+    /// identifier for that chat, so it is not a privacy-safe substitute.
+    let sourceIdentityAvailable: Bool
+    let sourceIdentityKind: String
     /// Closed-set reason the archive was refused, or nil when it was accepted.
     let failureReason: String?
 
@@ -239,6 +325,8 @@ struct WeChatNativeArchiveSummary: Sendable, Equatable {
         lastSentAtText = archive.timestampBounds?.last
         timeZoneIdentifier = archive.timeZoneIdentifier
         attachmentCountsByExtension = archive.attachmentCountsByExtension
+        sourceIdentityAvailable = archive.sourceIdentity != nil
+        sourceIdentityKind = archive.sourceIdentity?.kind ?? "none"
     }
 
     /// A refusal, described without saying anything about the file.
@@ -263,6 +351,8 @@ struct WeChatNativeArchiveSummary: Sendable, Equatable {
         lastSentAtText = nil
         timeZoneIdentifier = nil
         attachmentCountsByExtension = [:]
+        sourceIdentityAvailable = false
+        sourceIdentityKind = "none"
     }
 
     static func extensionOf(_ name: String) -> String {
@@ -302,6 +392,8 @@ struct WeChatNativeArchiveSummary: Sendable, Equatable {
             lines.append("interpreted in timezone: \(timeZoneIdentifier)")
         }
         lines.append("attachments by extension: \(attachments.isEmpty ? "(none)" : attachments)")
+        lines.append("source identity available: \(sourceIdentityAvailable ? "yes" : "no")")
+        lines.append("source identity kind: \(sourceIdentityKind)")
         return lines
     }
 }

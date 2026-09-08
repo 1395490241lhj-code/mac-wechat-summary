@@ -32,6 +32,7 @@
 		B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */; };
 		A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A4 /* ArchiveEvidence.swift */; };
 		A0000000000000000000B2 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B2 /* RuntimeEnvironment.swift */; };
+		A0000000000000000000A6 /* WeChatNativeArchiveImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A6 /* WeChatNativeArchiveImporter.swift */; };
 		A0000000000000000000009B /* MemorySync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009B /* MemorySync.swift */; };
 		A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009E /* PackagedMemorySyncRunner.swift */; };
 		A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009D /* MemoryStoreLocation.swift */; };
@@ -40,6 +41,8 @@
 		B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A5 /* ArchivePersistenceTests.swift */; };
 		B0000000000000000000A9 /* TestMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A9 /* TestMessageHistory.swift */; };
 		B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B1 /* MessageStoreIsolationTests.swift */; };
+		B0000000000000000000A7 /* ArchiveImportCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A7 /* ArchiveImportCoordinatorTests.swift */; };
+		B0000000000000000000A8 /* B2ARealArchiveGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A8 /* B2ARealArchiveGateTests.swift */; };
 		B0000000000000000000009C /* MemorySyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009C /* MemorySyncTests.swift */; };
 		B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */; };
 		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
@@ -96,6 +99,7 @@
 		C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatNativeArchiveTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000A4 /* ArchiveEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/ArchiveEvidence.swift; sourceTree = "<group>"; };
 		C0000000000000000000B2 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
+		C0000000000000000000A6 /* WeChatNativeArchiveImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/WeChatNativeArchiveImporter.swift; sourceTree = "<group>"; };
 		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
 		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
 		C0000000000000000000009B /* MemorySync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MemorySync.swift; sourceTree = "<group>"; };
@@ -106,6 +110,8 @@
 		C00000000000000000000A5 /* ArchivePersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchivePersistenceTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000A9 /* TestMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestMessageHistory.swift; sourceTree = "<group>"; };
 		C0000000000000000000B1 /* MessageStoreIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageStoreIsolationTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000A7 /* ArchiveImportCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveImportCoordinatorTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000A8 /* B2ARealArchiveGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = B2ARealArchiveGateTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009C /* MemorySyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySyncTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackagedMemorySyncRunnerTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
@@ -188,6 +194,7 @@
 				C0000000000000000000009E /* PackagedMemorySyncRunner.swift */,
 				C0000000000000000000009D /* MemoryStoreLocation.swift */,
 				C00000000000000000000A4 /* ArchiveEvidence.swift */,
+				C0000000000000000000A6 /* WeChatNativeArchiveImporter.swift */,
 				C00000000000000000000A0 /* ZIPArchiveReader.swift */,
 				C00000000000000000000A1 /* WeChatNativeTranscriptParser.swift */,
 				C00000000000000000000A2 /* WeChatNativeArchive.swift */,
@@ -218,6 +225,8 @@
 				C0000000000000000000B1 /* MessageStoreIsolationTests.swift */,
 				C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */,
 				C00000000000000000000A5 /* ArchivePersistenceTests.swift */,
+				C0000000000000000000A7 /* ArchiveImportCoordinatorTests.swift */,
+				C0000000000000000000A8 /* B2ARealArchiveGateTests.swift */,
 				C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */,
 			);
 			path = WeChatCompanionTests;
@@ -378,6 +387,7 @@
 				A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */,
 				A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */,
 				A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */,
+				A0000000000000000000A6 /* WeChatNativeArchiveImporter.swift in Sources */,
 				A00000000000000000000A0 /* ZIPArchiveReader.swift in Sources */,
 				A00000000000000000000A1 /* WeChatNativeTranscriptParser.swift in Sources */,
 				A00000000000000000000A2 /* WeChatNativeArchive.swift in Sources */,
@@ -407,6 +417,8 @@
 				B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */,
 				B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */,
 				B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */,
+				B0000000000000000000A7 /* ArchiveImportCoordinatorTests.swift in Sources */,
+				B0000000000000000000A8 /* B2ARealArchiveGateTests.swift in Sources */,
 				B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
