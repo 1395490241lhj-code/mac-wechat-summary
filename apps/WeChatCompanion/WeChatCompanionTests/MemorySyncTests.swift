@@ -50,7 +50,7 @@ struct MemorySyncTests {
     @Test @MainActor
     func aFreshInstallCannotSyncAndNeverReachesTheRunner() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, freshness())])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         #expect(model.isMemoryAvailable == false)
         #expect(model.canSyncMemory == false)
         await model.syncMemoryNow()
@@ -61,7 +61,7 @@ struct MemorySyncTests {
 
     @Test @MainActor
     func theActiveSourceIsVisibleAndIsTheVisualStore() {
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: FakeMemorySyncRunner(outcomes: []))
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: FakeMemorySyncRunner(outcomes: []))
         #expect(model.memorySource == .visual)
         #expect(model.memorySource.label.contains("Visual"))
     }
@@ -69,7 +69,7 @@ struct MemorySyncTests {
     @Test @MainActor
     func aConsentedSyncRunsInTheForegroundAndRefreshesFreshness() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, freshness())])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         #expect(model.canSyncMemory)
         await model.syncMemoryNow()
@@ -85,7 +85,7 @@ struct MemorySyncTests {
     @Test @MainActor
     func freshnessIsFetchedWhenTheRunnerDoesNotReturnItInline() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, nil)], freshness: freshness())
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(runner.freshnessCalls == 1)
@@ -98,7 +98,7 @@ struct MemorySyncTests {
             .succeeded(counts, freshness()),
             .succeeded(MemorySyncCounts(conversationsSeen: 2, messagesSeen: 13, messagesInserted: 0, messagesUpdated: 13), freshness()),
         ])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         await model.syncMemoryNow()
@@ -117,7 +117,7 @@ struct MemorySyncTests {
             .succeeded(counts, freshness(coverage: "partial")),
             .failed(.ingestionFailed(state: "reader_unavailable")),
         ])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(model.memoryFreshness?.coverageSummary == "partial")
@@ -132,7 +132,7 @@ struct MemorySyncTests {
     @Test @MainActor
     func aSelectedSourceThatIsUnavailableFailsWithoutSubstitution() async {
         let runner = FakeMemorySyncRunner(outcomes: [.failed(.sourceUnavailable(state: "reader_not_configured"))])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(model.memorySyncPhase == .failed(.sourceUnavailable(state: "reader_not_configured")))
@@ -143,7 +143,7 @@ struct MemorySyncTests {
     @Test @MainActor
     func revokingConsentTakesEffectImmediatelyAndDeletesNothing() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, freshness())])
-        let model = AppModel(consentDefaults: makeDefaults(), memorySync: runner)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         await model.setAllowsLocalPersistence(false)
@@ -163,7 +163,7 @@ struct MemorySyncTests {
     func aBuildWithoutAWorkerReportsThePackagingGapInsteadOfFakingASync() async {
         // The M2.2c contract, still exact: with no worker to run, the app says
         // so rather than pretending a sync happened.
-        let model = AppModel(consentDefaults: makeDefaults(),
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
                              memorySync: UnavailableMemorySyncRunner())
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
@@ -178,7 +178,7 @@ struct MemorySyncTests {
         // here would sync the user's own messages as a side effect of running
         // the suite; the default must be the inert runner instead.
         #expect(AppModel.defaultMemorySyncRunner() is UnavailableMemorySyncRunner)
-        let model = AppModel(consentDefaults: makeDefaults())
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
         #expect(model.memorySyncPhase == .failed(.runnerUnavailable))

@@ -145,7 +145,7 @@ struct ExtractionUIStateTests {
     private func makeModel(coordinator: ExtractionCoordinator) -> AppModel {
         AppModel(
             extractionCoordinator: coordinator,
-            credentials: EmptyCredentialStore(),
+            messageHistory: makeTestMessageHistory(), credentials: EmptyCredentialStore(),
             consentDefaults: UserDefaults(suiteName: "ExtractionUIStateTests-\(UUID())")!
         )
     }

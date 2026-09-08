@@ -64,7 +64,7 @@ struct LocalPersistenceConsentTests {
 
     @Test @MainActor
     func localPersistenceIsOffOnAFreshInstall() {
-        let model = AppModel(consentDefaults: makeDefaults())
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
         #expect(model.allowsLocalPersistence == false)
         // Independent of the remote consent, which is also off by default.
         #expect(model.allowsRemoteProcessing == false)
@@ -72,7 +72,7 @@ struct LocalPersistenceConsentTests {
 
     @Test @MainActor
     func retentionDefaultsToThirtyDays() {
-        let model = AppModel(consentDefaults: makeDefaults())
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
         #expect(model.retentionPolicy == .thirtyDays)
     }
 
@@ -553,7 +553,7 @@ struct LocalPersistenceConsentStateTests {
     @Test @MainActor
     func aFreshInstallRecordsAnExplicitNo() {
         let defaults = makeDefaults()
-        _ = AppModel(consentDefaults: defaults)
+        _ = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: defaults)
         let state = LocalPersistenceConsentState.load(from: defaults)
         #expect(state?.allowsLocalMessageStorage == false)
         #expect(state?.allowsMemoryStorage == false)
@@ -563,7 +563,7 @@ struct LocalPersistenceConsentStateTests {
     @Test @MainActor
     func grantingWritesTheStateAndAdvancesTheGeneration() async {
         let defaults = makeDefaults()
-        let model = AppModel(consentDefaults: defaults)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: defaults)
         await model.setAllowsLocalPersistence(true)
         let state = LocalPersistenceConsentState.load(from: defaults)
         #expect(state?.allowsLocalMessageStorage == true)
@@ -574,7 +574,7 @@ struct LocalPersistenceConsentStateTests {
     @Test @MainActor
     func revokingTakesEffectInTheState() async {
         let defaults = makeDefaults()
-        let model = AppModel(consentDefaults: defaults)
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: defaults)
         await model.setAllowsLocalPersistence(true)
         await model.setAllowsLocalPersistence(false)
         let state = LocalPersistenceConsentState.load(from: defaults)
@@ -590,7 +590,7 @@ struct LocalPersistenceConsentStateTests {
         let defaults = makeDefaults()
         // An older build stored only the flag.
         defaults.set(true, forKey: AppModel.localPersistenceConsentKey)
-        _ = AppModel(consentDefaults: defaults)
+        _ = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: defaults)
         let state = LocalPersistenceConsentState.load(from: defaults)
         #expect(state?.allowsLocalMessageStorage == true)
         #expect(state?.generation == 1)

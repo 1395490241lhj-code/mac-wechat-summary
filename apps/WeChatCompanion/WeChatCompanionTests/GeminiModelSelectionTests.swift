@@ -252,7 +252,7 @@ struct GeminiModelSelectionTests {
     ) -> AppModel {
         AppModel(
             extractionCoordinator: coordinator,
-            credentials: credentials,
+            messageHistory: makeTestMessageHistory(), credentials: credentials,
             geminiTransport: transport,
             consentDefaults: defaults ?? scratchDefaults()
         )

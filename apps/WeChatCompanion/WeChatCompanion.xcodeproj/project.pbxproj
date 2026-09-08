@@ -37,6 +37,8 @@
 		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
 		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
 		B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A5 /* ArchivePersistenceTests.swift */; };
+		B0000000000000000000A9 /* TestMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A9 /* TestMessageHistory.swift */; };
+		B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B1 /* MessageStoreIsolationTests.swift */; };
 		B0000000000000000000009C /* MemorySyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009C /* MemorySyncTests.swift */; };
 		B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */; };
 		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
@@ -100,6 +102,8 @@
 		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
 		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000A5 /* ArchivePersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchivePersistenceTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000A9 /* TestMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestMessageHistory.swift; sourceTree = "<group>"; };
+		C0000000000000000000B1 /* MessageStoreIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageStoreIsolationTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009C /* MemorySyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySyncTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackagedMemorySyncRunnerTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
@@ -207,6 +211,8 @@
 				C00000000000000000000096 /* MessageIngestionTests.swift */,
 				C00000000000000000000099 /* LocalPersistenceConsentTests.swift */,
 				C0000000000000000000009C /* MemorySyncTests.swift */,
+				C0000000000000000000A9 /* TestMessageHistory.swift */,
+				C0000000000000000000B1 /* MessageStoreIsolationTests.swift */,
 				C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */,
 				C00000000000000000000A5 /* ArchivePersistenceTests.swift */,
 				C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */,
@@ -393,6 +399,8 @@
 				B00000000000000000000096 /* MessageIngestionTests.swift in Sources */,
 				B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */,
 				B0000000000000000000009C /* MemorySyncTests.swift in Sources */,
+				B0000000000000000000A9 /* TestMessageHistory.swift in Sources */,
+				B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */,
 				B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */,
 				B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */,
 				B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */,
