@@ -159,39 +159,62 @@ actor MessageStore {
         try exec(handle, "PRAGMA journal_mode = WAL;")
     }
 
-    private static func readUserVersion(_ handle: OpaquePointer) throws -> Int32 {
+    /// Every read that the migration decision rests on goes through here, and
+    /// an uncertain read throws with SQLite's **actual** status rather than a
+    /// generic error -- the difference between "the file says 2" and "we could
+    /// not find out" must reach the caller, because the second must never
+    /// stamp, migrate or change journal mode.
+    private static func prepared<T>(
+        _ handle: OpaquePointer, _ sql: String, _ body: (OpaquePointer) throws -> T
+    ) throws -> T {
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, "PRAGMA user_version;", -1, &statement, nil) == SQLITE_OK,
-              let statement
-        else {
+        let prepared = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepared == SQLITE_OK, let statement else {
             if let statement { sqlite3_finalize(statement) }
-            throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+            throw MessageStoreError.statementFailed(status: prepared)
         }
         defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW else {
-            throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+        return try body(statement)
+    }
+
+    private static func readUserVersion(_ handle: OpaquePointer) throws -> Int32 {
+        try prepared(handle, "PRAGMA user_version;") { statement in
+            let step = sqlite3_step(statement)
+            guard step == SQLITE_ROW else {
+                throw MessageStoreError.statementFailed(status: step)
+            }
+            return Int32(sqlite3_column_int64(statement, 0))
         }
-        return Int32(sqlite3_column_int64(statement, 0))
+    }
+
+    /// Collects rows from a prepared statement, failing closed on any status
+    /// that is neither `SQLITE_ROW` nor `SQLITE_DONE`. Extracted so a test can
+    /// drive it with a statement that errors mid-iteration and prove a partial
+    /// result never escapes.
+    static func collectRows<T>(
+        _ statement: OpaquePointer, _ row: (OpaquePointer) -> T
+    ) throws -> [T] {
+        var rows: [T] = []
+        while true {
+            let step = sqlite3_step(statement)
+            switch step {
+            case SQLITE_ROW: rows.append(row(statement))
+            case SQLITE_DONE: return rows
+            default: throw MessageStoreError.statementFailed(status: step)
+            }
+        }
     }
 
     /// User tables only. SQLite's own bookkeeping (`sqlite_sequence` and
     /// friends) is not evidence that someone else's schema is present.
     private static func applicationTables(_ handle: OpaquePointer) throws -> Set<String> {
-        var statement: OpaquePointer?
-        let sql = "SELECT name FROM sqlite_master WHERE type = 'table';"
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
-            if let statement { sqlite3_finalize(statement) }
-            throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+        // Treating "anything that is not a row" as the end would let a read
+        // error return a *partial* table list, and schema discovery would then
+        // accept a file it never finished inspecting.
+        let names = try prepared(handle, "SELECT name FROM sqlite_master WHERE type = 'table';") {
+            try collectRows($0) { string($0, 0) }
         }
-        defer { sqlite3_finalize(statement) }
-        var names: Set<String> = []
-        while sqlite3_step(statement) == SQLITE_ROW {
-            if let raw = sqlite3_column_text(statement, 0) {
-                let name = String(cString: raw)
-                if !name.hasPrefix("sqlite_") { names.insert(name) }
-            }
-        }
-        return names
+        return Set(names.compactMap { $0 }.filter { !$0.hasPrefix("sqlite_") })
     }
 
     private static func require(
@@ -418,14 +441,14 @@ actor MessageStore {
                 last_seen_at = MAX(last_seen_at, excluded.last_seen_at);
             """
         ) { statement in
-            sqlite3_bind_text(statement, 1, title, -1, Self.transient)
+            Self.bind(statement, 1, title)
             sqlite3_bind_double(statement, 2, stamp)
             sqlite3_bind_double(statement, 3, stamp)
         }
         let ids = try query(
             "SELECT id FROM conversations WHERE title = ?;",
             bind: { statement in
-                sqlite3_bind_text(statement, 1, title, -1, Self.transient)
+                Self.bind(statement, 1, title)
             },
             row: { sqlite3_column_int64($0, 0) }
         )
@@ -508,10 +531,10 @@ actor MessageStore {
             sqlite3_bind_int64(statement, 1, conversationID)
             sqlite3_bind_int64(statement, 2, sequence)
             Self.bind(statement, 3, message.sender)
-            sqlite3_bind_text(statement, 4, message.ownership.rawValue, -1, Self.transient)
+            Self.bind(statement, 4, message.ownership.rawValue)
             Self.bind(statement, 5, message.visibleTime)
             Self.bind(statement, 6, message.text)
-            sqlite3_bind_text(statement, 7, message.kind.rawValue, -1, Self.transient)
+            Self.bind(statement, 7, message.kind.rawValue)
             sqlite3_bind_double(statement, 8, message.confidence)
             sqlite3_bind_double(statement, 9, observedAt.timeIntervalSince1970)
             // normalizedBounds is intentionally NOT persisted.
@@ -548,7 +571,11 @@ actor MessageStore {
     /// on screen. `visible_time` is a display string, not a date, and using it
     /// would silently keep or drop the wrong rows.
     @discardableResult
-    func applyRetention(_ policy: RetentionPolicy, now: Date = Date()) throws -> Int {
+    func applyRetention(
+        _ policy: RetentionPolicy,
+        now: Date = Date(),
+        failBetweenArchiveRetentionStepsForTesting: Bool = false
+    ) throws -> Int {
         guard let maximumAge = policy.maximumAge else { return 0 }
         let cutoff = now.addingTimeInterval(-maximumAge).timeIntervalSince1970
 
@@ -562,7 +589,9 @@ actor MessageStore {
             );
             """)
         let removed = before - (try totalMessageCount())
-        let archiveRemoved = try applyArchiveRetention(cutoff: cutoff)
+        let archiveRemoved = try applyArchiveRetention(
+            cutoff: cutoff, failBetweenStepsForTesting: failBetweenArchiveRetentionStepsForTesting
+        )
         if removed > 0 || archiveRemoved > 0 {
             try Self.exec(handle, "PRAGMA wal_checkpoint(TRUNCATE);")
         }
@@ -578,19 +607,34 @@ actor MessageStore {
     /// shapes expire the same way.
     ///
     /// - Returns: how many imports were removed.
-    private func applyArchiveRetention(cutoff: TimeInterval) throws -> Int {
+    private func applyArchiveRetention(
+        cutoff: TimeInterval, failBetweenStepsForTesting: Bool = false
+    ) throws -> Int {
         let before = try archiveImportCount()
-        try run("DELETE FROM archive_imports WHERE imported_at < ?;") { statement in
-            sqlite3_bind_double(statement, 1, cutoff)
+        // One unit, not two statements. Expiring the imports and dropping the
+        // conversations they justified must succeed or fail together: stopping
+        // in between leaves zero imports and a surviving
+        // `source_conversation_key`, which is chat identity outliving every
+        // reason to hold it -- the one outcome retention must never produce.
+        try Self.exec(handle, "BEGIN IMMEDIATE;")
+        do {
+            try run("DELETE FROM archive_imports WHERE imported_at < ?;") { statement in
+                sqlite3_bind_double(statement, 1, cutoff)
+            }
+            if failBetweenStepsForTesting {
+                throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+            }
+            // Records cascade with their import.
+            try run("""
+                DELETE FROM archive_conversations WHERE id NOT IN (
+                    SELECT DISTINCT archive_conversation_id FROM archive_imports
+                );
+                """)
+            try Self.exec(handle, "COMMIT;")
+        } catch {
+            try? Self.exec(handle, "ROLLBACK;")
+            throw error
         }
-        // Records cascade. The conversation must not outlive them:
-        // `source_conversation_key` is chat identity, and keeping it after its
-        // last import expired would leave the sensitive half behind.
-        try run("""
-            DELETE FROM archive_conversations WHERE id NOT IN (
-                SELECT DISTINCT archive_conversation_id FROM archive_imports
-            );
-            """)
         return before - (try archiveImportCount())
     }
 
@@ -764,6 +808,40 @@ actor MessageStore {
         Set(try query("PRAGMA table_info(\(table));") { Self.string($0, 1) ?? "" })
     }
 
+    /// Reads back what was actually stored, so a round-trip test measures the
+    /// database rather than the value the caller still holds in memory.
+    func attributedRecordsForTesting(importID: Int64) throws -> [(Int, String, String, String)] {
+        try query(
+            """
+            SELECT sequence, sender, sent_at_text, text FROM archive_attributed_records
+            WHERE import_id = ? ORDER BY sequence;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: {
+                (Int(sqlite3_column_int64($0, 0)), Self.string($0, 1) ?? "",
+                 Self.string($0, 2) ?? "", Self.string($0, 3) ?? "")
+            }
+        )
+    }
+
+    func unattributedRecordsForTesting(importID: Int64) throws -> [(Int, String)] {
+        try query(
+            """
+            SELECT sequence, record_text FROM archive_unattributed_records
+            WHERE import_id = ? ORDER BY sequence;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { (Int(sqlite3_column_int64($0, 0)), Self.string($0, 1) ?? "") }
+        )
+    }
+
+    /// Byte length of a stored value as SQLite sees it -- the measurement that
+    /// exposes a C-string truncation, which a Swift `String` comparison alone
+    /// would not.
+    func storedByteLengthForTesting(_ sql: String) throws -> Int {
+        try query(sql) { Int(sqlite3_column_int64($0, 0)) }.first ?? -1
+    }
+
     func sourceKeysForTesting() throws -> [String] {
         try query("SELECT source_conversation_key FROM archive_conversations ORDER BY id;") {
             Self.string($0, 0) ?? ""
@@ -811,17 +889,32 @@ actor MessageStore {
         }
     }
 
+    /// Binds text by **explicit byte count**, never `-1`.
+    ///
+    /// `-1` tells SQLite the value is NUL-terminated, so a string containing
+    /// U+0000 is silently stored only up to the first one. Message text is
+    /// arbitrary user-authored UTF-8 and the import fingerprint hashes all of
+    /// it, so a truncating write would make the digest describe a value the
+    /// database does not hold -- corruption that no fingerprint test could see.
     private static func bind(_ statement: OpaquePointer, _ index: Int32, _ value: String?) {
-        if let value {
-            sqlite3_bind_text(statement, index, value, -1, transient)
-        } else {
+        guard let value else {
             sqlite3_bind_null(statement, index)
+            return
         }
+        var bytes = Array(value.utf8)
+        // `transient` copies, so the array need not outlive this call. An empty
+        // string must still bind a non-nil pointer, or SQLite treats it as NULL.
+        sqlite3_bind_text(statement, index, &bytes, Int32(bytes.count), transient)
     }
 
+    /// Reads text by its **actual byte count**.
+    ///
+    /// `String(cString:)` stops at the first NUL for the same reason, so a
+    /// value written correctly would still come back truncated.
     private static func string(_ statement: OpaquePointer, _ index: Int32) -> String? {
         guard let raw = sqlite3_column_text(statement, index) else { return nil }
-        return String(cString: raw)
+        let count = Int(sqlite3_column_bytes(statement, index))
+        return String(decoding: UnsafeBufferPointer(start: raw, count: count), as: UTF8.self)
     }
 
     private static func prepareDirectory(for url: URL) throws {

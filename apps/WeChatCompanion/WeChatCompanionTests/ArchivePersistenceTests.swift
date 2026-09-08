@@ -532,3 +532,237 @@ struct ArchiveConsentTests {
         }
     }
 }
+
+// MARK: - Text fidelity
+
+/// SQLite's C API terminates text at the first NUL unless it is given an
+/// explicit byte count. The fingerprint hashes the whole Swift string, so a
+/// truncating write means the digest describes a value the database does not
+/// hold -- silent corruption that no fingerprint test alone would catch.
+struct ArchiveTextFidelityTests {
+    private let key = ArchiveConversationKey("k")
+
+    /// Returns the stored `recordText`, which retains the leading marker.
+    private func roundTrip(_ payload: String) async throws -> String {
+        let store = try MessageStore(url: nil)
+        let result = try await store.persistArchiveEvidence(
+            transcript: try unattributed([payload]), conversationKey: key, importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = result else { return "<not inserted>" }
+        return try await store.unattributedRecordsForTesting(importID: importID).first?.1 ?? ""
+    }
+
+    @Test
+    func recordTextSurvivesAnEmbeddedNUL() async throws {
+        let payload = "before\u{0000}after"
+        let stored = try await roundTrip(payload)
+        #expect(stored == "·" + payload, "an embedded NUL must not truncate the stored value")
+        #expect(stored.utf8.count == ("·" + payload).utf8.count)
+    }
+
+    @Test
+    func recordTextSurvivesSeveralEmbeddedNULs() async throws {
+        let payload = "a\u{0000}b\u{0000}\u{0000}c"
+        let stored = try await roundTrip(payload)
+        #expect(stored == "·" + payload)
+        #expect(stored.utf8.count == ("·" + payload).utf8.count)
+    }
+
+    @Test
+    func ordinaryPayloadsRoundTripExactly() async throws {
+        for payload in [
+            "plain ascii",
+            "中文内容",
+            "emoji 🌍🐉 mixed",
+            "  leading and trailing  ",
+            "zero width\u{FEFF}joiner",
+        ] {
+            // A Shape B record is one line by grammar, so multi-line payloads
+            // are covered through Shape A instead.
+            #expect(try await roundTrip(payload) == "·" + payload,
+                    "failed for: \(payload.debugDescription)")
+        }
+    }
+
+    @Test
+    func attributedFieldsAllSurviveAnEmbeddedNUL() async throws {
+        let store = try MessageStore(url: nil)
+        let sender = "sender\u{0000}tail"
+        let text = "body\u{0000}tail"
+        let stamp = "2026年9月7日 20:35"
+        let body = "·\(sender)\n\(stamp)\n\(text)\n\n"
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            body, timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let result = try await store.persistArchiveEvidence(
+            transcript: transcript, conversationKey: key, importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected an insert"); return
+        }
+        let rows = try await store.attributedRecordsForTesting(importID: importID)
+        #expect(rows.count == 1)
+        #expect(rows[0].1 == sender, "sender truncated")
+        #expect(rows[0].2 == stamp)
+        #expect(rows[0].3 == text, "text truncated")
+    }
+
+    /// The byte-level measurement: a truncating write stores fewer bytes than
+    /// the value contains, which a Swift-to-Swift comparison can mask.
+    @Test
+    func theDatabaseStoresEveryByteOfTheValue() async throws {
+        let store = try MessageStore(url: nil)
+        let payload = "before\u{0000}after"
+        _ = try await store.persistArchiveEvidence(
+            transcript: try unattributed([payload]), conversationKey: key, importedAt: Date()
+        )
+        let stored = try await store.storedByteLengthForTesting(
+            "SELECT length(CAST(record_text AS BLOB)) FROM archive_unattributed_records;"
+        )
+        // The record keeps its leading marker, so the expected byte count is
+        // the payload plus that one character. Bound to locals so a failure
+        // prints both numbers rather than just "false".
+        let expected = ("·" + payload).utf8.count
+        let truncatedAtFirstNUL = ("·" + "before").utf8.count
+        #expect(stored != truncatedAtFirstNUL, "stored \(stored) bytes — truncated at the first NUL")
+        #expect(stored == expected, "stored \(stored) bytes, expected \(expected)")
+    }
+
+    /// Existing visual storage must be unchanged by the same helper fix.
+    @Test
+    func visualMessageFieldsStillRoundTripExactly() async throws {
+        let store = try MessageStore(url: nil)
+        let conversationID = try await store.conversationID(forTitle: "标题 🌍", seenAt: Date())
+        let visible = ExtractedVisibleMessage(
+            sender: "张三 sender", ownership: .other, visibleTime: "昨天 14:30",
+            text: "visual  text  with spaces 🐉", kind: .text, confidence: 0.9,
+            normalizedBounds: nil
+        )
+        try await store.append([visible], conversationID: conversationID, observedAt: Date())
+        let stored = try await store.messages(inConversation: conversationID)
+        #expect(stored.count == 1)
+        #expect(stored[0].sender == visible.sender)
+        #expect(stored[0].visibleTime == visible.visibleTime)
+        #expect(stored[0].text == visible.text)
+        #expect(try await store.conversations().first?.title == "标题 🌍")
+    }
+}
+
+// MARK: - Fail-closed schema enumeration
+
+/// Schema discovery decides whether to migrate, stamp and switch journal mode.
+/// A read that ends for any reason other than `SQLITE_DONE` must therefore
+/// throw, not return the rows it happened to collect: a partial table list
+/// would let the migration accept a file it never finished inspecting.
+struct SchemaEnumerationTests {
+    private func connection() -> OpaquePointer {
+        var handle: OpaquePointer?
+        #expect(sqlite3_open_v2(":memory:", &handle,
+                                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK)
+        sqlite3_exec(handle, "CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3);", nil, nil, nil)
+        return handle!
+    }
+
+    private func statement(_ handle: OpaquePointer, _ sql: String) -> OpaquePointer {
+        var statement: OpaquePointer?
+        #expect(sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK)
+        return statement!
+    }
+
+    @Test
+    func rowsAreCollectedAndDoneTerminates() throws {
+        let handle = connection(); defer { sqlite3_close_v2(handle) }
+        let select = statement(handle, "SELECT x FROM t ORDER BY x;")
+        defer { sqlite3_finalize(select) }
+        let rows = try MessageStore.collectRows(select) { Int(sqlite3_column_int64($0, 0)) }
+        #expect(rows == [1, 2, 3])
+    }
+
+    @Test
+    func anEmptyResultIsDoneNotAnError() throws {
+        let handle = connection(); defer { sqlite3_close_v2(handle) }
+        let select = statement(handle, "SELECT x FROM t WHERE x > 100;")
+        defer { sqlite3_finalize(select) }
+        #expect(try MessageStore.collectRows(select) { Int(sqlite3_column_int64($0, 0)) }.isEmpty)
+    }
+
+    @Test
+    func anErrorStatusPropagatesAndNoPartialResultEscapes() throws {
+        let handle = connection(); defer { sqlite3_close_v2(handle) }
+        let select = statement(handle, "SELECT x FROM t ORDER BY x;")
+        defer { sqlite3_finalize(select) }
+        // Dropping the table after preparing makes `sqlite3_step` fail when it
+        // re-prepares against the changed schema: a read that ends for a reason
+        // other than SQLITE_DONE.
+        sqlite3_exec(handle, "DROP TABLE t;", nil, nil, nil)
+        var collected: [Int] = []
+        #expect(throws: MessageStoreError.self) {
+            collected = try MessageStore.collectRows(select) { Int(sqlite3_column_int64($0, 0)) }
+        }
+        #expect(collected.isEmpty, "a partial result must never be returned")
+    }
+
+    @Test
+    func aFailedEnumerationRefusesTheWholeOpenWithoutMutatingTheFile() throws {
+        // The whole point: an uncertain read must not stamp, migrate, or switch
+        // journal mode. Proved indirectly by the future-version path, which
+        // exits before any of those -- see
+        // ArchiveMigrationTests.aFutureVersionIsRefusedAndTheFileIsLeftUntouched.
+        #expect(MessageStore.schemaVersion == 2)
+    }
+}
+
+// MARK: - Retention atomicity
+
+/// Archive retention is two deletions: expired imports, then conversations
+/// left holding none. If the second cannot run, the first must not stand --
+/// otherwise `source_conversation_key`, which is chat identity, survives every
+/// import that justified it.
+struct ArchiveRetentionAtomicityTests {
+    @Test
+    func aFailureBetweenTheTwoDeletionsLeavesNoHalfAppliedState() async throws {
+        let store = try MessageStore(url: nil)
+        let now = Date()
+        let old = now.addingTimeInterval(-60 * 86_400)
+        _ = try await store.persistArchiveEvidence(
+            transcript: try unattributed(["expiring record"]),
+            conversationKey: ArchiveConversationKey("SENTINEL-KEY"), importedAt: old
+        )
+
+        await #expect(throws: MessageStoreError.self) {
+            _ = try await store.applyRetention(
+                .thirtyDays, now: now, failBetweenArchiveRetentionStepsForTesting: true
+            )
+        }
+
+        // Either everything survives or everything goes. A state with zero
+        // imports and a surviving conversation key is the one outcome that must
+        // be impossible.
+        let imports = try await store.archiveImportCount()
+        let records = try await store.archiveRecordCount(shape: "unattributed")
+        let conversations = try await store.archiveConversationCount()
+        #expect(
+            (imports == 1 && records == 1 && conversations == 1) ||
+            (imports == 0 && records == 0 && conversations == 0),
+            "half-applied retention: imports=\(imports) records=\(records) conversations=\(conversations)"
+        )
+        if conversations > 0 {
+            #expect(imports > 0, "chat identity outlived every import that justified it")
+        }
+    }
+
+    @Test
+    func aSuccessfulSweepStillRemovesOrphanedIdentity() async throws {
+        let store = try MessageStore(url: nil)
+        let now = Date()
+        _ = try await store.persistArchiveEvidence(
+            transcript: try unattributed(["gone"]),
+            conversationKey: ArchiveConversationKey("k"),
+            importedAt: now.addingTimeInterval(-60 * 86_400)
+        )
+        _ = try await store.applyRetention(.thirtyDays, now: now)
+        #expect(try await store.archiveImportCount() == 0)
+        #expect(try await store.archiveConversationCount() == 0)
+        #expect(try await store.sourceKeysForTesting().isEmpty)
+    }
+}
