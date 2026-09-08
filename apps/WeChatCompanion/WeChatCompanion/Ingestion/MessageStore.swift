@@ -12,7 +12,7 @@ private final class DatabaseHandle: @unchecked Sendable {
     deinit { sqlite3_close_v2(pointer) }
 }
 
-enum MessageStoreError: Error, Equatable {
+enum MessageStoreError: Error, Equatable, Sendable {
     case cannotOpen(status: Int32)
     case statementFailed(status: Int32)
     /// The file carries tables but no `user_version`. Its provenance is

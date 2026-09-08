@@ -25,10 +25,22 @@ enum ArchivePersistenceResult: Sendable, Equatable {
     case alreadyImported(importID: Int64)
 }
 
-enum ArchivePersistenceError: Error, Equatable {
+enum ArchivePersistenceError: Error, Equatable, Sendable {
     /// Local persistence consent is off, so there is nowhere to write. The
     /// store is deliberately *not* opened as a side effect of trying.
+    ///
+    /// This means **the user has not consented**, and nothing else. It must
+    /// never stand in for a store that failed to open: telling someone to turn
+    /// on a setting they already turned on is worse than saying nothing.
     case localPersistenceConsentRequired
+    /// Consent is on, but the local store could not be opened -- an
+    /// incompatible or unreadable database. A different fact from missing
+    /// consent, and the user's setting is left exactly as they set it.
+    ///
+    /// The underlying `MessageStoreError` is kept on the history actor for
+    /// diagnostics rather than carried here, so this stays a small stable
+    /// contract that exposes no path and no schema detail.
+    case localStoreUnavailable
     /// The number of rows actually inserted disagreed with the transcript. The
     /// import is rolled back whole rather than left partial.
     case recordCountMismatch(expected: Int, inserted: Int)

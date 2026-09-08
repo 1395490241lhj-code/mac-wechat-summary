@@ -35,8 +35,29 @@ actor LocalMessageHistory {
     /// True only while a database is actually open.
     var hasOpenStore: Bool { store != nil }
 
-    /// Test and diagnostics seam. Never nil while enabled.
+    /// Test and diagnostics seam.
+    ///
+    /// `nil` while consent is off **or** when the local store failed closed --
+    /// an enabled consent no longer implies a usable store, because a database
+    /// this build refuses to open (a future schema, a stamp whose tables are
+    /// missing, an unversioned file) leaves consent on and readiness absent.
     func openStore() -> MessageStore? { store }
+
+    /// Whether the user has consented to local persistence. Independent of
+    /// whether a store could actually be opened.
+    var isConsentEnabled: Bool { isEnabled }
+
+    /// Aggregate readiness, safe to surface anywhere: it names a state, never a
+    /// path, a conversation or any content.
+    var storeState: LocalHistoryStoreState {
+        guard isEnabled else { return .disabled }
+        return store == nil ? .unavailable : .ready
+    }
+
+    /// Why the last open attempt failed, kept for diagnostics. Cleared on a
+    /// successful open and when consent is turned off, so it never lingers as
+    /// a stale explanation for a state that has since changed.
+    private(set) var lastOpenFailure: MessageStoreError?
 
     /// Turning this on creates the database if it does not exist yet and sweeps
     /// expired messages before anything new is written. Turning it off releases
@@ -50,6 +71,7 @@ actor LocalMessageHistory {
         } else {
             activeIngestor = nil
             store = nil
+            lastOpenFailure = nil
         }
     }
 
@@ -67,10 +89,18 @@ actor LocalMessageHistory {
     /// Scope is exactly this database. The Keychain credential, the remote
     /// consent flag, the persistence consent flag, the retention choice and the
     /// diagnostics files are all untouched.
+    /// Also the recovery path when the store is unavailable.
+    ///
+    /// Deletion owns the filesystem whether or not a store is open, so a user
+    /// sitting on a database this build refuses to open can clear it and get a
+    /// working store back. That is an honest way out that costs the migration
+    /// nothing: the app still never rewrites or downgrades an incompatible
+    /// file, it only deletes one when the user asks for deletion.
     func deleteAllHistory() async {
         try? await store?.deleteAllHistory()
         activeIngestor = nil
         store = nil
+        lastOpenFailure = nil
         removeDatabaseFiles()
         if isEnabled { await open() }
     }
@@ -90,8 +120,15 @@ actor LocalMessageHistory {
         conversationKey: ArchiveConversationKey,
         importedAt: Date = Date()
     ) async throws -> ArchivePersistenceResult {
-        guard isEnabled, let store else {
+        // Two different refusals. "Consent is off" is a fact about what the
+        // user asked for; "the store would not open" is a fact about this
+        // machine's database. Reporting the second as the first sends someone
+        // to a setting that is already on.
+        guard isEnabled else {
             throw ArchivePersistenceError.localPersistenceConsentRequired
+        }
+        guard let store else {
+            throw ArchivePersistenceError.localStoreUnavailable
         }
         return try await store.persistArchiveEvidence(
             transcript: transcript,
@@ -100,9 +137,32 @@ actor LocalMessageHistory {
         )
     }
 
+    /// Opens the store, or records why it could not be opened.
+    ///
+    /// The failure is deliberately **not** swallowed by `try?`. Consent stays
+    /// exactly as the user set it -- flipping it off here would make the app's
+    /// internal state disagree with the setting they can see -- and no
+    /// fallback is attempted: no fresh database beside the old one, no
+    /// recreate, no downgrade, no pretend-success in memory. An incompatible
+    /// file is left untouched, which is what makes the migration's fail-closed
+    /// guarantee mean anything.
     private func open() async {
         guard store == nil else { return }
-        guard let opened = try? MessageStore(url: url) else { return }
+        let opened: MessageStore
+        do {
+            opened = try MessageStore(url: url)
+        } catch let error as MessageStoreError {
+            lastOpenFailure = error
+            activeIngestor = nil
+            store = nil
+            return
+        } catch {
+            lastOpenFailure = .cannotOpen(status: -1)
+            activeIngestor = nil
+            store = nil
+            return
+        }
+        lastOpenFailure = nil
         store = opened
         let ingestor = MessageIngestor(store: opened, retention: retention)
         // Applied before the first new write, so a policy tightened while the
@@ -120,4 +180,19 @@ actor LocalMessageHistory {
             try? manager.removeItem(atPath: path)
         }
     }
+}
+
+/// Readiness of the local history store, separate from consent.
+///
+/// The three states are distinct facts and collapsing any two of them misleads:
+/// `disabled` is the user's choice, `unavailable` is this machine's database,
+/// and only `ready` means a write can succeed. Aggregate by construction --
+/// it names a state and never a path, a conversation or any content.
+enum LocalHistoryStoreState: String, Sendable, Equatable {
+    /// Local persistence consent is off. No database exists or is opened.
+    case disabled
+    /// Consent is on and the store is open.
+    case ready
+    /// Consent is on, but the store could not be opened and was left untouched.
+    case unavailable
 }

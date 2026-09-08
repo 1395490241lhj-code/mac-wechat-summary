@@ -766,3 +766,155 @@ struct ArchiveRetentionAtomicityTests {
         #expect(try await store.sourceKeysForTesting().isEmpty)
     }
 }
+
+// MARK: - Store lifecycle
+
+/// Consent intent and store readiness are different facts, and conflating them
+/// tells the user a lie: with consent ON and a database this build cannot open,
+/// an import that reports "consent required" sends someone to a setting they
+/// have already turned on.
+struct LocalHistoryLifecycleTests {
+    private let key = ArchiveConversationKey("k")
+
+    private func transcript() throws -> WeChatNativeTranscript {
+        try unattributed(["evidence"])
+    }
+
+    @Test
+    func consentOffIsReportedAsConsentAndCreatesNoDatabase() async throws {
+        let scratch = try Scratch()
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await #expect(throws: ArchivePersistenceError.localPersistenceConsentRequired) {
+            try await history.persistArchiveEvidence(
+                transcript: try transcript(), conversationKey: key
+            )
+        }
+        #expect(await history.storeState == .disabled)
+        for suffix in ["", "-wal", "-shm"] {
+            #expect(!FileManager.default.fileExists(atPath: scratch.databaseURL.path + suffix))
+        }
+    }
+
+    @Test
+    func consentOnWithAHealthyDatabaseIsReady() async throws {
+        let scratch = try Scratch()
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+        #expect(await history.storeState == .ready)
+        let result = try await history.persistArchiveEvidence(
+            transcript: try transcript(), conversationKey: key
+        )
+        #expect(result == .inserted(importID: 1, recordCount: 1))
+    }
+
+    /// The bug this suite exists for: consent is ON, the store failed to open,
+    /// and the reported reason must say so rather than blaming consent.
+    @Test
+    func consentOnWithAFutureDatabaseReportsUnavailableNotConsent() async throws {
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema, userVersion: 3)
+        let before = scratch.inspect {
+            (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
+        }
+
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+
+        // Consent intent survives an open failure -- the user's setting is not
+        // silently flipped off underneath them.
+        #expect(await history.isConsentEnabled)
+        #expect(await history.storeState == .unavailable)
+        #expect(await history.openStore() == nil)
+        #expect(await history.ingestor() == nil, "no ingestor may exist without a store")
+
+        await #expect(throws: ArchivePersistenceError.localStoreUnavailable) {
+            try await history.persistArchiveEvidence(
+                transcript: try transcript(), conversationKey: key
+            )
+        }
+        #expect(await history.lastOpenFailure == .schemaFromFuture(version: 3))
+
+        // Fail closed: the existing file is untouched.
+        let after = scratch.inspect {
+            (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
+        }
+        #expect(after.0 == "3")
+        #expect(after.0 == before.0)
+        #expect(after.1 == before.1, "journal mode must not change")
+        #expect(after.2 == before.2, "no table may be created")
+        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[2]!
+            .subtracting(MessageStore.requiredTables[1]!)))
+    }
+
+    @Test
+    func consentOnWithAMalformedV2DatabaseIsAlsoUnavailable() async throws {
+        // Stamped 2 but missing the archive tables it promises.
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema, userVersion: 2)
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+
+        #expect(await history.isConsentEnabled)
+        #expect(await history.storeState == .unavailable)
+        #expect(await history.lastOpenFailure == .schemaIncomplete(version: 2))
+        await #expect(throws: ArchivePersistenceError.localStoreUnavailable) {
+            try await history.persistArchiveEvidence(
+                transcript: try transcript(), conversationKey: key
+            )
+        }
+    }
+
+    @Test
+    func anUnversionedExistingDatabaseIsUnavailableNotConsent() async throws {
+        let scratch = try Scratch()
+        try scratch.seed(["CREATE TABLE someone_elses (id INTEGER PRIMARY KEY);"], userVersion: 0)
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+        #expect(await history.storeState == .unavailable)
+        #expect(await history.lastOpenFailure == .unversionedExistingSchema)
+    }
+
+    /// The honest recovery path: deletion already owns the filesystem even when
+    /// no store is open, so a user stuck on an incompatible file can clear it
+    /// and get a working store back without the app weakening its migration.
+    @Test
+    func deleteAllHistoryRecoversFromAnUnavailableStore() async throws {
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema, userVersion: 3)
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+        #expect(await history.storeState == .unavailable)
+
+        await history.deleteAllHistory()
+
+        // Consent is still on, so a fresh current-version store opens.
+        #expect(await history.isConsentEnabled)
+        #expect(await history.storeState == .ready)
+        #expect(await history.lastOpenFailure == nil)
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "2")
+
+        let result = try await history.persistArchiveEvidence(
+            transcript: try transcript(), conversationKey: key
+        )
+        #expect(result == .inserted(importID: 1, recordCount: 1))
+    }
+
+    @Test
+    func turningConsentOffFromUnavailableClearsTheFailure() async throws {
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema, userVersion: 3)
+        let history = LocalMessageHistory(url: scratch.databaseURL)
+        await history.setEnabled(true)
+        #expect(await history.storeState == .unavailable)
+
+        await history.setEnabled(false)
+        #expect(!(await history.isConsentEnabled))
+        #expect(await history.storeState == .disabled)
+        // Consent off is reported as consent again, not as a stale failure.
+        await #expect(throws: ArchivePersistenceError.localPersistenceConsentRequired) {
+            try await history.persistArchiveEvidence(
+                transcript: try transcript(), conversationKey: key
+            )
+        }
+    }
+}
