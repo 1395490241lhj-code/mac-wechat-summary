@@ -350,8 +350,13 @@ def _purge_home(hermes_home: Path) -> dict:
 
 def _audit(work: Path, credential: str, report: dict) -> dict:
     """Residue and credential audit over every disposable home this phase used."""
+    # Every disposable profile, not just the gate runs. Globbing `run_*` alone
+    # missed the offline probe profile, which had written three request dumps
+    # the audit then reported as zero -- a residue check whose scope is narrower
+    # than the thing it clears is worse than no check, because it reads as a
+    # pass.
     iso_root = work / "iso"
-    homes = sorted(p for p in iso_root.glob("run_*/hermes_home")) if iso_root.is_dir() else []
+    homes = sorted(p for p in iso_root.glob("*/hermes_home")) if iso_root.is_dir() else []
     dumps, sessions, backups = [], [], []
     for home in homes:
         dumps += [str(p.relative_to(work)) for p in (home / "sessions").glob("request_dump_*.json")] \
