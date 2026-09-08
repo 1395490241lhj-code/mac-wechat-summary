@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import message_source as ms  # noqa: E402
 import rion_reader_adapter as adapter  # noqa: E402
+import store_access  # noqa: E402
 import wechat_companion_mcp as bridge  # noqa: E402
 
 
@@ -613,3 +615,165 @@ def test_no_real_wechat_location_is_touched_by_this_suite(tmp_path, monkeypatch)
     assert container.exists() == before
     assert str(tmp_path).startswith(os.environ.get("TMPDIR", "/") .rstrip("/")
                                     ) or "pytest" in str(tmp_path)
+
+
+# --- Schema v2: version-specific required tables -----------------------------
+#
+# Widening SUPPORTED_SCHEMA_VERSIONS alone would accept a database stamped 2
+# whose archive tables do not exist -- the stamp asserting a shape the file does
+# not have, which is the failure the version gate exists to prevent.
+
+_V1_TABLES = """
+CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL UNIQUE,
+  first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL);
+CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL
+  REFERENCES conversations(id) ON DELETE CASCADE, sequence INTEGER NOT NULL, sender TEXT,
+  ownership TEXT NOT NULL, visible_time TEXT, text TEXT, kind TEXT NOT NULL,
+  confidence REAL NOT NULL, first_observed_at REAL NOT NULL);
+"""
+
+_V2_ARCHIVE_STATEMENTS = {
+    "archive_conversations": """
+        CREATE TABLE archive_conversations (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_conversation_key TEXT NOT NULL UNIQUE);
+    """,
+    "archive_imports": """
+        CREATE TABLE archive_imports (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          archive_conversation_id INTEGER NOT NULL, import_fingerprint TEXT NOT NULL UNIQUE,
+          fingerprint_format_version INTEGER NOT NULL, source_type TEXT NOT NULL,
+          transcript_shape TEXT NOT NULL, imported_at REAL NOT NULL,
+          archive_parser_version INTEGER NOT NULL, time_zone_identifier TEXT,
+          UNIQUE (id, transcript_shape));
+    """,
+    "archive_attributed_records": """
+        CREATE TABLE archive_attributed_records (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_id INTEGER NOT NULL, transcript_shape TEXT NOT NULL DEFAULT 'attributed',
+          sequence INTEGER NOT NULL, sender TEXT NOT NULL, sent_at REAL NOT NULL,
+          sent_at_text TEXT NOT NULL, text TEXT NOT NULL, UNIQUE (import_id, sequence));
+    """,
+    "archive_unattributed_records": """
+        CREATE TABLE archive_unattributed_records (id INTEGER PRIMARY KEY AUTOINCREMENT,
+          import_id INTEGER NOT NULL, transcript_shape TEXT NOT NULL DEFAULT 'unattributed',
+          sequence INTEGER NOT NULL, record_text TEXT NOT NULL, UNIQUE (import_id, sequence));
+    """,
+}
+
+_V2_ARCHIVE_TABLES = "".join(_V2_ARCHIVE_STATEMENTS.values())
+
+
+def _schema_db(tmp_path, *, version, extra=""):
+    path = tmp_path / f"schema-{version}.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(_V1_TABLES + extra)
+    connection.execute(f"PRAGMA user_version = {version};")
+    connection.commit()
+    connection.close()
+    return path
+
+
+def _verify(path):
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        return store_access.verify_schema(connection)
+    finally:
+        connection.close()
+
+
+def test_complete_schema_v1_is_accepted(tmp_path):
+    assert _verify(_schema_db(tmp_path, version=1)) == 1
+
+
+def test_complete_schema_v2_is_accepted(tmp_path):
+    assert _verify(_schema_db(tmp_path, version=2, extra=_V2_ARCHIVE_TABLES)) == 2
+
+
+def test_schema_v2_missing_an_archive_table_is_incomplete(tmp_path):
+    for dropped in _V2_ARCHIVE_STATEMENTS:
+        partial = "".join(
+            statement
+            for name, statement in _V2_ARCHIVE_STATEMENTS.items()
+            if name != dropped
+        )
+        path = tmp_path / f"missing-{dropped}.sqlite"
+        connection = sqlite3.connect(path)
+        connection.executescript(_V1_TABLES + partial)
+        connection.execute("PRAGMA user_version = 2;")
+        connection.commit()
+        connection.close()
+
+        with pytest.raises(store_access.BridgeUnavailable) as error:
+            _verify(path)
+        assert error.value.state == "schema_incomplete", dropped
+
+
+def test_schema_v1_tolerates_an_unrelated_additive_table(tmp_path):
+    extra = "CREATE TABLE something_additive (id INTEGER PRIMARY KEY);"
+    assert _verify(_schema_db(tmp_path, version=1, extra=extra)) == 1
+
+
+def test_a_future_schema_version_is_unsupported(tmp_path):
+    with pytest.raises(store_access.BridgeUnavailable) as error:
+        _verify(_schema_db(tmp_path, version=3, extra=_V2_ARCHIVE_TABLES))
+    assert error.value.state == "schema_unsupported"
+
+
+def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeypatch):
+    """Schema v2 archive rows must not reach anything Memory or MCP reads.
+
+    Memory sync consumes ``StoreMessageSource``, so proving the source cannot
+    see archive rows proves an import cannot masquerade as a visual message,
+    advance ``observed_through``, or show up in a recent-message sweep.
+    """
+    path = tmp_path / "v2.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(_V1_TABLES + _V2_ARCHIVE_TABLES)
+    connection.executescript(
+        """
+        INSERT INTO conversations(title, first_seen_at, last_seen_at) VALUES('chat', 1, 2);
+        INSERT INTO messages(conversation_id, sequence, sender, ownership, visible_time,
+                             text, kind, confidence, first_observed_at)
+          VALUES(1, 0, 'someone', 'other', '昨天', 'VISUAL-TEXT', 'text', 0.9, 1000);
+
+        INSERT INTO archive_conversations(source_conversation_key) VALUES('ARCHIVE-KEY');
+        INSERT INTO archive_imports(archive_conversation_id, import_fingerprint,
+            fingerprint_format_version, source_type, transcript_shape, imported_at,
+            archive_parser_version, time_zone_identifier)
+          VALUES(1, 'fp', 1, 'wechat_native_archive', 'attributed', 9999, 1, 'Asia/Shanghai');
+        INSERT INTO archive_attributed_records(import_id, sequence, sender, sent_at,
+            sent_at_text, text)
+          VALUES(1, 0, 'ARCHIVE-SENDER', 5000, '2026年9月7日 20:35', 'ARCHIVE-TEXT');
+        """
+    )
+    connection.execute("PRAGMA user_version = 2;")
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setenv(store_access.ALLOW_READ_ENV, "1")
+    monkeypatch.setenv(store_access.DB_PATH_ENV, str(path))
+    source = store_access.StoreMessageSource()
+
+    status = source.status()
+    assert status.ready is True
+    # One visual conversation and one visual message -- the archive rows are
+    # simply not part of this count.
+    assert status.detail is None or "ARCHIVE" not in str(status.detail)
+
+    conversations = source.list_conversations(limit=50)
+    rendered = json.dumps(
+        [c.__dict__ for c in conversations], default=str, ensure_ascii=False
+    )
+    assert "ARCHIVE-KEY" not in rendered
+
+    messages = source.get_messages(conversations[0].id, limit=100)
+    rendered = json.dumps([m.__dict__ for m in messages], default=str, ensure_ascii=False)
+    assert "VISUAL-TEXT" in rendered
+    for leaked in ("ARCHIVE-TEXT", "ARCHIVE-SENDER", "ARCHIVE-KEY"):
+        assert leaked not in rendered, f"{leaked} reached the visual read model"
+
+    # `imported_at` of 9999 is newer than the visual message's observation time;
+    # a recent sweep must still see only the visual row.
+    recent = source.get_recent_messages(since_observed_at=0.0, limit=100)
+    rendered = json.dumps([m.__dict__ for m in recent], default=str, ensure_ascii=False)
+    assert "VISUAL-TEXT" in rendered
+    assert "ARCHIVE-TEXT" not in rendered

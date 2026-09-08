@@ -54,11 +54,38 @@ except ImportError:  # pragma: no cover - imported by path from another cwd
 # --- Contract with the Swift store ------------------------------------------
 
 #: Schema versions this bridge understands, read from SQLite's ``user_version``.
+#:
+#: The contract verified here is **the version stamp plus the required table
+#: names**, and deliberately nothing more: no column, CHECK, index or foreign
+#: key is inspected. Every query in this module is a fixed statement over those
+#: tables, so checking more would couple the reader to details it never reads
+#: and would fail on a benign additive column. The writer may be stricter.
 #: The macOS app stamps it in ``MessageStore.migrate``. Anything else fails
 #: closed: the shape is never inferred from whatever tables happen to exist.
-SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1})
+SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2})
 
-REQUIRED_TABLES: Final[frozenset[str]] = frozenset({"conversations", "messages"})
+#: What each version promises, checked against the stamp rather than guessed
+#: from the file. Widening the accepted versions alone is not enough: a database
+#: stamped 2 whose archive tables are absent would otherwise be accepted, and
+#: the stamp would assert a shape the file does not have.
+#:
+#: Version 2 adds archive evidence tables. They are **not** exposed through any
+#: tool here -- the four message tools stay visual-only on both versions -- but
+#: a file claiming to be v2 must actually have them.
+REQUIRED_TABLES_BY_VERSION: Final[dict[int, frozenset[str]]] = {
+    1: frozenset({"conversations", "messages"}),
+    2: frozenset({
+        "conversations",
+        "messages",
+        "archive_conversations",
+        "archive_imports",
+        "archive_attributed_records",
+        "archive_unattributed_records",
+    }),
+}
+
+#: The v1 set, kept for callers that predate the per-version mapping.
+REQUIRED_TABLES: Final[frozenset[str]] = REQUIRED_TABLES_BY_VERSION[1]
 
 # --- Environment gate --------------------------------------------------------
 
@@ -166,7 +193,11 @@ def verify_schema(connection: sqlite3.Connection) -> int:
             "SELECT name FROM sqlite_master WHERE type = 'table';"
         )
     }
-    if not REQUIRED_TABLES.issubset(present):
+    # Subset, not equality: an unknown additive table is tolerated, which is
+    # what keeps future additive versions cheap. The version is never inferred
+    # from the tables -- the stamp is the claim, and these are checked against
+    # it.
+    if not REQUIRED_TABLES_BY_VERSION[version].issubset(present):
         raise BridgeUnavailable(
             "schema_incomplete", "The database is missing required tables."
         )

@@ -92,6 +92,16 @@ enum WeChatNativeTranscript: Sendable, Equatable {
     }
 
     var perMessageTimeAvailable: Bool { attributionAvailable }
+
+    /// The timezone to persist beside an import: the interpretation an
+    /// attributed transcript was read under, and `nil` for a shape that has no
+    /// time to interpret. The schema enforces the same pairing.
+    var timeZoneIdentifierForStorage: String? {
+        switch self {
+        case .attributed(let t): t.timeZoneIdentifier
+        case .unattributed: nil
+        }
+    }
 }
 
 enum WeChatTranscriptError: Error, Equatable, Sendable {

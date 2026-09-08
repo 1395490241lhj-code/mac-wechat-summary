@@ -310,7 +310,10 @@ struct MessageIngestionTests {
         let store = try makeStore()
         // Read-only consumers gate on this and fail closed when it is unknown.
         #expect(try await store.storedSchemaVersion() == MessageStore.schemaVersion)
-        #expect(MessageStore.schemaVersion == 1)
+        // v1 was visual capture only; v2 adds the archive evidence tables.
+        // Deliberately pinned: bumping it is a contract change the bridge and
+        // its `REQUIRED_TABLES_BY_VERSION` must be updated for in the same breath.
+        #expect(MessageStore.schemaVersion == 2)
     }
 
     // MARK: - Persistence guards
@@ -322,10 +325,22 @@ struct MessageIngestionTests {
         #expect(!source.contains("CGImage"))
         #expect(!source.contains("ObservedFrame"))
         #expect(!source.contains("normalizedBounds"))
-        // Chat content must never be logged.
-        #expect(!source.contains("print("))
+        // Chat content must never be logged. Matched as a *call*, not as a
+        // substring: `fingerprint(` legitimately contains "print(", and a guard
+        // that cannot tell the two apart would eventually be deleted rather
+        // than fixed.
+        #expect(!containsCall(source, "print"))
         #expect(!source.contains("NSLog"))
         #expect(!source.contains("os_log"))
+    }
+
+    /// True when `name(` appears as a call rather than as the tail of a longer
+    /// identifier.
+    private func containsCall(_ source: String, _ name: String) -> Bool {
+        let pattern = "(?<![A-Za-z0-9_.])\(name)\\("
+        let regex = try? NSRegularExpression(pattern: pattern)
+        let range = NSRange(source.startIndex..., in: source)
+        return regex?.firstMatch(in: source, range: range) != nil
     }
 
     @Test

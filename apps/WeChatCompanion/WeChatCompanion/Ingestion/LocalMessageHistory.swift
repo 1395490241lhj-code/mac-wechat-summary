@@ -75,6 +75,31 @@ actor LocalMessageHistory {
         if isEnabled { await open() }
     }
 
+    /// Persists already-parsed archive evidence, if the user has consented to
+    /// local persistence.
+    ///
+    /// **Choosing an archive is not consent to start writing chat text to
+    /// disk.** With the consent off this refuses and, critically, does *not*
+    /// call `open()`: an import attempt must not be the thing that creates the
+    /// database. That is why the gate lives here rather than inside
+    /// `MessageStore`, which stays a testable primitive with no opinion about
+    /// consent.
+    @discardableResult
+    func persistArchiveEvidence(
+        transcript: WeChatNativeTranscript,
+        conversationKey: ArchiveConversationKey,
+        importedAt: Date = Date()
+    ) async throws -> ArchivePersistenceResult {
+        guard isEnabled, let store else {
+            throw ArchivePersistenceError.localPersistenceConsentRequired
+        }
+        return try await store.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: conversationKey,
+            importedAt: importedAt
+        )
+    }
+
     private func open() async {
         guard store == nil else { return }
         guard let opened = try? MessageStore(url: url) else { return }
