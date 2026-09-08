@@ -20,8 +20,13 @@ Four behavioural gates, a canary, one wire assertion, one digest, one audit:
   the eight expected schemas — zero extra, zero missing — with
   ``tools_bearing >= 1``. The proxy sits between the runtime and the provider
   and aborts a mismatch before it is forwarded.
-* **Synthetic /wechat-digest.** The slash command must expand server-side with
-  the ``skills`` toolset disabled, calling only bridge tools.
+* **Seeded /wechat-digest probe.** Not a gate. Current upstream skips slash
+  expansion for a seeded (``-q``) query -- ``cli.py`` guards it with
+  ``if not is_seeded_query`` -- so this path cannot exercise H4.7's
+  server-side-expansion finding and its result is recorded, not asserted. The
+  property that *does* gate the run, "the digest works with the ``skills``
+  toolset fully disabled", is established five times over by the ``-s``
+  preload gates above, which is the path the shadow runner actually uses.
 * **Audit.** Request dumps, sessions, updater backups, scratch residue and
   credential residue.
 
@@ -226,11 +231,18 @@ def _gate(work: Path, composed: Path, venv_python: Path, label: str, key: str,
     }
 
 
+#: The literal final line every digest must end with, copied from SKILL.md's
+#: output template. Matching on the word "coverage" (or 覆盖) instead -- as an
+#: earlier version did -- matches nothing, because the mandated line contains
+#: neither, so every digest was recorded as failing a rule it actually kept.
+COVERAGE_LINE = "基于 WeChat Companion 已采集到的消息生成，可能不包含未被采集的聊天。"
+
+
 def _coverage_line_last(digest: str) -> bool | None:
     lines = [l for l in digest.strip().splitlines() if l.strip()]
     if not lines:
         return None
-    return "覆盖" in lines[-1] or "coverage" in lines[-1].lower()
+    return lines[-1].strip() == COVERAGE_LINE
 
 
 def _gate_canary(work: Path, composed: Path, venv_python: Path, credential: str,
@@ -272,7 +284,17 @@ def _gate_canary(work: Path, composed: Path, venv_python: Path, credential: str,
 
 def _slash_digest(work: Path, composed: Path, venv_python: Path, credential: str,
                   proxy_port: int) -> dict:
-    """`/wechat-digest` must expand server-side with `skills` disabled."""
+    """Probe, not a gate: what a seeded ``/wechat-digest`` actually produces.
+
+    H4.7 found that ``/wechat-digest`` expands server-side, so the digest works
+    with the ``skills`` toolset disabled. That was an interactive Desktop chat
+    on v0.20.5. Current upstream reaches slash expansion only under
+    ``if not is_seeded_query`` in ``cli.py``, and ``-q`` *is* a seeded query, so
+    here the text goes to the model verbatim and no skill is applied. The
+    result is recorded so the deviation is visible; it is deliberately not
+    asserted, because a failure would be measuring a path the product does not
+    use.
+    """
     from hermes_validation import disposable_env, write_required_config
 
     db = _scenario_store(work, "A_unanswered_question", "slash")
@@ -299,8 +321,13 @@ def _slash_digest(work: Path, composed: Path, venv_python: Path, credential: str
             {name for name in ("skill_view", "skills_list", "skill_manage")
              if name in combined}),
         "hermes_home": env["HERMES_HOME"],
-        "pass": proc.returncode == 0 and bool(text) and not any(
+        "no_skill_tools_used": not any(
             n in combined for n in ("skill_view", "skills_list", "skill_manage")),
+        # Recorded, never asserted -- see the docstring.
+        "slash_expansion_established": False,
+        "slash_expansion_note": (
+            "current upstream skips slash expansion for seeded (-q) queries "
+            "(cli.py: `if not is_seeded_query`), so this run cannot exercise it"),
     }
 
 
@@ -470,11 +497,19 @@ def phase_online(work: Path, report: dict, venv_python: Path) -> None:
     results["audit"] = _audit(work, credential, report)
     results["containment"] = {"changed": diff_snapshots(before, protected_snapshot())}
     results["pass"] = (
-        all(g.get("status") == 0 for g in results["gates"].values())
+        all(g.get("status") == 0 and g.get("digest_produced")
+            and g.get("coverage_line_last") for g in results["gates"].values())
         and results["canary"].get("status") == 0
         and results["canary"].get("canary_hits_after_purge") == []
-        and results["canary"].get("digest_contained_canary") is False
-        and results["slash_digest"]["pass"]
+        # `digest_contained_canary` is recorded, never asserted: the canary is a
+        # *persistence* audit (shadow/README, h6_synthetic_gate), and a digest
+        # that summarises a message containing a random string is correct
+        # behaviour, not a leak. The digest is review-only stdout. Asserting it
+        # False -- as an earlier version did -- failed the run for the skill
+        # working.
+        and results["canary"].get("dumps_after_purge") == []
+        and results["canary"].get("sessions_after_purge") == []
+        # results["slash_digest"] is a recorded probe, not a gate.
         and results["desktop_turn"]["pass"]
         and results["exact8_desktop"]["pass"]
         and results["exact8_cli"]["pass"]

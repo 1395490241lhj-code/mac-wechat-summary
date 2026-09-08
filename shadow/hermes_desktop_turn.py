@@ -80,8 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.skill and args.skill.is_file():
             message = args.skill.read_text(encoding="utf-8") + "\n\n" + args.prompt
         result = agent.run_conversation(message)
-        text = result if isinstance(result, str) else (
-            getattr(result, "content", None) or getattr(result, "text", None) or str(result))
+        text = _reply_text(result)
         args.response.write_text(text or "", encoding="utf-8")
         report["response_bytes"] = len(text or "")
         report["ok"] = bool(text)
@@ -92,6 +91,30 @@ def main(argv: list[str] | None = None) -> int:
 
     args.out.write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
     return 0 if report.get("ok") else 5
+
+
+def _reply_text(result) -> str:
+    """The assistant's reply, whatever shape the runtime returns it in.
+
+    ``run_conversation`` returns a mapping keyed ``final_response`` on this
+    build. Falling through to ``str(result)`` -- as an earlier version did --
+    stores the *repr of the whole dict*, which is non-empty and so passes a
+    "digest produced" check while containing no digest. A shape this code does
+    not recognise returns empty rather than a repr, so the gate fails closed.
+    """
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        for key in ("final_response", "response", "content", "text"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+    for attribute in ("final_response", "content", "text"):
+        value = getattr(result, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
 
 
 def _tool_names(agent) -> set[str]:
