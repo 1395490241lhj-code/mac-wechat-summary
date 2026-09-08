@@ -13,6 +13,10 @@ import Foundation
 struct WeChatArchiveMessage: Sendable, Equatable {
     /// Position in the transcript, from 0, in the order WeChat wrote it.
     let sequence: Int
+    /// Exactly the bytes WeChat wrote between the `·` marker and the end of
+    /// the line. Not trimmed, not normalised: until a real export shows that
+    /// the separator carries padding, any cleanup would be us editing the
+    /// user's data on a guess.
     let sender: String
     /// The parsed instant, to **minute** precision. Never claims seconds.
     let sentAt: Date
@@ -90,11 +94,16 @@ enum WeChatNativeTranscriptParser {
     static func parse(
         _ body: String, timeZone: TimeZone = defaultTimeZone
     ) throws -> [WeChatArchiveMessage] {
-        // Normalise line endings only. Nothing else about the body is touched.
-        let normalized = body
+        // Normalise line endings, and strip **one leading** byte-order mark.
+        //
+        // A BOM at the very start is an encoding marker. The same scalar
+        // anywhere else is U+FEFF ZERO WIDTH NO-BREAK SPACE -- ordinary text a
+        // user can and does send -- so removing it globally would silently
+        // rewrite message bodies. Only position 0 is an encoding question.
+        var normalized = body
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
-            .replacingOccurrences(of: "\u{FEFF}", with: "")
+        if normalized.hasPrefix("\u{FEFF}") { normalized.removeFirst() }
 
         let scalars = normalized as NSString
         let matches = headerExpression.matches(
@@ -135,7 +144,7 @@ enum WeChatNativeTranscriptParser {
 
             messages.append(WeChatArchiveMessage(
                 sequence: index,
-                sender: sender.trimmingCharacters(in: .whitespaces),
+                sender: sender,
                 sentAt: sentAt,
                 sentAtText: sentAtText,
                 text: text

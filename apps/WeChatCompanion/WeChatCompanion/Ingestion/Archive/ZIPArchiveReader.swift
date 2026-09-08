@@ -12,7 +12,12 @@ enum ZIPArchiveError: Error, Equatable, Sendable {
     /// The archive uses ZIP64 records. Refused rather than half-supported.
     case unsupportedZIP64
     case malformedCentralDirectory
+    /// The end-of-central-directory record contradicts itself or the file.
+    case inconsistentEndOfCentralDirectory
     case malformedLocalHeader
+    /// A local file header disagrees with the central directory about the same
+    /// entry -- method, encryption flags or name.
+    case inconsistentLocalHeader
     case entryCountOutsideSupportedRange
     case expandedSizeExceedsLimit
     case entryExceedsSizeLimit
@@ -66,6 +71,10 @@ struct ZIPArchiveReader {
         let uncompressedSize: Int
         let crc32: UInt32
         let isDeflated: Bool
+        fileprivate let method: UInt16
+        /// The name exactly as stored, for byte comparison against the copy in
+        /// the local file header.
+        fileprivate let rawName: Data
         fileprivate let localHeaderOffset: Int
 
         /// Lowercased path extension, or "" when the name carries none.
@@ -79,6 +88,7 @@ struct ZIPArchiveReader {
     let entries: [Entry]
     private let url: URL
     private let limits: Limits
+    private let fileSize: Int
 
     /// Parses and validates the whole central directory. Decompresses nothing.
     init(url: URL, limits: Limits = .standard) throws {
@@ -88,10 +98,17 @@ struct ZIPArchiveReader {
         let handle = try Self.open(url)
         defer { try? handle.close() }
         let fileSize = try Self.size(of: handle)
+        self.fileSize = fileSize
         guard fileSize >= 22 else { throw ZIPArchiveError.notAZIPArchive }
 
-        let directory = try Self.readCentralDirectory(handle, fileSize: fileSize)
+        // `readCentralDirectory` applies the entry-count limit *before*
+        // returning, so an archive claiming tens of thousands of entries is
+        // refused without parsing or allocating any of them.
+        let directory = try Self.readCentralDirectory(
+            handle, fileSize: fileSize, limits: limits
+        )
         var parsed: [Entry] = []
+        parsed.reserveCapacity(directory.entryCount)
         var total = 0
         var cursor = 0
 
@@ -147,7 +164,7 @@ struct ZIPArchiveReader {
         let handle = try Self.open(url)
         defer { try? handle.close() }
 
-        let dataOffset = try Self.dataOffset(of: entry, in: handle)
+        let dataOffset = try Self.locateData(of: entry, in: handle, fileSize: fileSize)
         try handle.seek(toOffset: UInt64(dataOffset))
 
         var crc = CRC32()
@@ -205,20 +222,38 @@ struct ZIPArchiveReader {
         return data
     }
 
+    /// Finds the real end-of-central-directory record.
+    ///
+    /// Scanning backwards for the signature is not enough on its own: a ZIP
+    /// comment is arbitrary bytes that sit *after* the record, so an archive
+    /// carrying `PK\u{5}\u{6}` in its comment would otherwise hand us a forged
+    /// record in preference to the genuine one. The record is only accepted
+    /// when its own declared comment length lands exactly on end-of-file, which
+    /// is a property the real record has and a planted signature does not.
+    private static func locateEndOfCentralDirectory(in tail: Data) throws -> Int {
+        var index = tail.count - 22
+        while index >= 0 {
+            if u32(tail, index) == 0x0605_4B50 {
+                let commentLength = Int(u16(tail, index + 20))
+                if index + 22 + commentLength == tail.count { return index }
+            }
+            index -= 1
+        }
+        throw ZIPArchiveError.notAZIPArchive
+    }
+
     private static func readCentralDirectory(
-        _ handle: FileHandle, fileSize: Int
+        _ handle: FileHandle, fileSize: Int, limits: Limits
     ) throws -> (bytes: Data, entryCount: Int) {
-        // The end-of-central-directory record sits within the last 22 bytes
-        // plus a comment of at most 65535, so that is the whole search window.
+        // The record sits within the last 22 bytes plus a comment of at most
+        // 65535, so that is the whole search window.
         let window = min(fileSize, 22 + 0xFFFF)
         let tail = try read(handle, at: fileSize - window, count: window)
-        guard let eocd = lastIndex(of: 0x0605_4B50, in: tail) else {
-            throw ZIPArchiveError.notAZIPArchive
-        }
-        guard tail.count - eocd >= 22 else { throw ZIPArchiveError.notAZIPArchive }
+        let eocd = try locateEndOfCentralDirectory(in: tail)
 
         let disk = u16(tail, eocd + 4)
         let diskWithDirectory = u16(tail, eocd + 6)
+        let entriesOnThisDisk = Int(u16(tail, eocd + 8))
         let entryCount = Int(u16(tail, eocd + 10))
         let directorySize = Int(u32(tail, eocd + 12))
         let directoryOffset = Int(u32(tail, eocd + 16))
@@ -228,9 +263,19 @@ struct ZIPArchiveReader {
               directorySize != 0xFFFF_FFFF,
               directoryOffset != 0xFFFF_FFFF
         else { throw ZIPArchiveError.unsupportedZIP64 }
-        // Multi-disk archives are refused rather than reassembled.
+        // Multi-disk archives are refused rather than reassembled. A
+        // single-disk archive must also agree with itself about how many
+        // entries it has.
         guard disk == 0, diskWithDirectory == 0 else { throw ZIPArchiveError.notAZIPArchive }
+        guard entriesOnThisDisk == entryCount else {
+            throw ZIPArchiveError.inconsistentEndOfCentralDirectory
+        }
         guard entryCount >= 1 else { throw ZIPArchiveError.entryCountOutsideSupportedRange }
+        // Before the directory is read or a single record parsed: an archive
+        // declaring tens of thousands of entries never reaches the parse loop.
+        guard entryCount <= limits.maximumEntryCount else {
+            throw ZIPArchiveError.entryCountOutsideSupportedRange
+        }
         guard directoryOffset >= 0,
               directorySize >= 0,
               directoryOffset + directorySize <= fileSize
@@ -292,6 +337,8 @@ struct ZIPArchiveReader {
             uncompressedSize: Int(uncompressed),
             crc32: crc,
             isDeflated: method == 8,
+            method: method,
+            rawName: rawName,
             localHeaderOffset: localHeaderOffset
         )
         return (entry, end)
@@ -315,22 +362,57 @@ struct ZIPArchiveReader {
         else { throw ZIPArchiveError.malformedLocalHeader }
     }
 
-    private static func dataOffset(of entry: Entry, in handle: FileHandle) throws -> Int {
+    /// Where an entry's bytes start, after checking that the local header
+    /// describes the same entry the central directory does.
+    ///
+    /// Sizes are deliberately **not** taken from here: a data-descriptor entry
+    /// (flag bit 3) legitimately writes zeros for them, so the central
+    /// directory stays the size authority. Everything that describes *this
+    /// copy of the data* -- the compression method, the encryption flags, the
+    /// name -- must agree, because a disagreement means the two records are
+    /// about different things and there is no safe way to pick one.
+    private static func locateData(
+        of entry: Entry, in handle: FileHandle, fileSize: Int
+    ) throws -> Int {
         let header = try? read(handle, at: entry.localHeaderOffset, count: 30)
         guard let header, u32(header, 0) == 0x0403_4B50 else {
             throw ZIPArchiveError.malformedLocalHeader
         }
-        // Sizes are read from the central directory, never from here: with a
-        // data descriptor (flag bit 3) the local header carries zeros.
+        let flags = u16(header, 6)
+        let method = u16(header, 8)
         let nameLength = Int(u16(header, 26))
         let extraLength = Int(u16(header, 28))
-        return entry.localHeaderOffset + 30 + nameLength + extraLength
+
+        guard flags & 0x1 == 0, flags & 0x40 == 0 else {
+            throw ZIPArchiveError.encryptedEntry
+        }
+        guard method == entry.method, nameLength == entry.rawName.count else {
+            throw ZIPArchiveError.inconsistentLocalHeader
+        }
+        let nameOffset = entry.localHeaderOffset + 30
+        guard let localName = try? read(handle, at: nameOffset, count: nameLength),
+              localName == entry.rawName
+        else { throw ZIPArchiveError.inconsistentLocalHeader }
+
+        let dataOffset = nameOffset + nameLength + extraLength
+        guard dataOffset >= 0, dataOffset + entry.compressedSize <= fileSize else {
+            throw ZIPArchiveError.malformedLocalHeader
+        }
+        return dataOffset
     }
 
     // MARK: - Inflate
 
-    /// Raw DEFLATE, streamed. `COMPRESSION_ZLIB` in Apple's Compression
-    /// framework is RFC 1951 raw deflate, which is exactly what ZIP stores.
+    /// Raw DEFLATE, streamed.
+    ///
+    /// `COMPRESSION_ZLIB` in Apple's Compression framework is RFC 1951 raw
+    /// DEFLATE -- no zlib wrapper, no header, no Adler-32 trailer -- which is
+    /// exactly the payload ZIP method 8 stores. The name is the only confusing
+    /// part of it. Cross-checked empirically rather than taken on the
+    /// documentation's word: archives written by Python's `zipfile` and by
+    /// `/usr/bin/zip` both decode here byte-for-byte, CRC included (E-019).
+    /// That is the whole reason no ZIP dependency is needed for the payloads;
+    /// only the container had to be written.
     ///
     /// Both buffers are owned by this function, so the pointers handed to the
     /// stream stay valid for its whole life -- a `Data`'s bytes borrowed inside
@@ -404,15 +486,6 @@ struct ZIPArchiveReader {
             | UInt32(data[base + 3]) << 24
     }
 
-    private static func lastIndex(of signature: UInt32, in data: Data) -> Int? {
-        guard data.count >= 4 else { return nil }
-        var index = data.count - 4
-        while index >= 0 {
-            if u32(data, index) == signature { return index }
-            index -= 1
-        }
-        return nil
-    }
 }
 
 /// CRC-32 (IEEE 802.3), the checksum ZIP stores per entry.

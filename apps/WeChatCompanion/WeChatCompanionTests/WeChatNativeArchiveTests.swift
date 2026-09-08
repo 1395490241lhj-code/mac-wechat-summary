@@ -20,9 +20,19 @@ private struct ZIPBuilder {
         var isSymlink = false
         var crcOverride: UInt32?
         var uncompressedSizeOverride: UInt32?
+        /// Written into the local file header only, leaving the central
+        /// directory saying something else.
+        var localMethodOverride: UInt16?
+        var localNameOverride: String?
+        var localExtraLengthOverride: UInt16?
     }
 
     var entries: [Entry] = []
+    /// Bytes after the end-of-central-directory record.
+    var comment = Data()
+    var commentLengthOverride: UInt16?
+    var entryCountOverride: UInt16?
+    var entriesOnDiskOverride: UInt16?
 
     mutating func add(
         _ name: String,
@@ -32,7 +42,10 @@ private struct ZIPBuilder {
         flags: UInt16 = 0,
         isSymlink: Bool = false,
         crcOverride: UInt32? = nil,
-        uncompressedSizeOverride: UInt32? = nil
+        uncompressedSizeOverride: UInt32? = nil,
+        localMethodOverride: UInt16? = nil,
+        localNameOverride: String? = nil,
+        localExtraLengthOverride: UInt16? = nil
     ) {
         entries.append(Entry(
             name: name,
@@ -42,7 +55,10 @@ private struct ZIPBuilder {
             flags: flags,
             isSymlink: isSymlink,
             crcOverride: crcOverride,
-            uncompressedSizeOverride: uncompressedSizeOverride
+            uncompressedSizeOverride: uncompressedSizeOverride,
+            localMethodOverride: localMethodOverride,
+            localNameOverride: localNameOverride,
+            localExtraLengthOverride: localExtraLengthOverride
         ))
     }
 
@@ -60,12 +76,15 @@ private struct ZIPBuilder {
             let name = Data(entry.name.utf8)
             let offset = UInt32(file.count)
 
+            let localName = entry.localNameOverride.map { Data($0.utf8) } ?? name
             file += Self.u32(0x0403_4B50)
-            file += Self.u16(20) + Self.u16(entry.flags) + Self.u16(method)
+            file += Self.u16(20) + Self.u16(entry.flags)
+            file += Self.u16(entry.localMethodOverride ?? method)
             file += Self.u16(0) + Self.u16(0)
             file += Self.u32(checksum) + Self.u32(UInt32(payload.count)) + Self.u32(uncompressed)
-            file += Self.u16(UInt16(name.count)) + Self.u16(0)
-            file += name
+            file += Self.u16(UInt16(localName.count))
+            file += Self.u16(entry.localExtraLengthOverride ?? 0)
+            file += localName
             file += payload
 
             // Unix "made by", so the symlink bit in the external attributes is
@@ -85,8 +104,11 @@ private struct ZIPBuilder {
         file += directory
         file += Self.u32(0x0605_4B50)
         file += Self.u16(0) + Self.u16(0)
-        file += Self.u16(UInt16(entries.count)) + Self.u16(UInt16(entries.count))
-        file += Self.u32(UInt32(directory.count)) + Self.u32(directoryOffset) + Self.u16(0)
+        file += Self.u16(entriesOnDiskOverride ?? UInt16(entries.count))
+        file += Self.u16(entryCountOverride ?? UInt16(entries.count))
+        file += Self.u32(UInt32(directory.count)) + Self.u32(directoryOffset)
+        file += Self.u16(commentLengthOverride ?? UInt16(comment.count))
+        file += comment
         try file.write(to: url)
     }
 
@@ -246,6 +268,34 @@ struct WeChatNativeTranscriptParserTests {
         #expect(messages.count == 3)
         #expect(Set(messages.map(\.sequence)).count == 3)
         #expect(messages[0].sentAt == messages[2].sentAt)
+    }
+
+    @Test
+    func aByteOrderMarkIsStrippedOnlyAtTheStart() throws {
+        // Leading U+FEFF is an encoding marker. The same scalar inside a body
+        // is ZERO WIDTH NO-BREAK SPACE -- ordinary text -- and deleting it
+        // would silently rewrite what the user sent.
+        let interior = "前\u{FEFF}后"
+        let messages = try WeChatNativeTranscriptParser.parse(
+            "\u{FEFF}" + transcript([("张三", m35, interior), ("李四", m36, "\u{FEFF}开头")])
+        )
+        #expect(messages[0].text == interior)
+        #expect(messages[0].text.contains("\u{FEFF}"))
+        // A BOM at the start of a *body* is body text, not an encoding marker.
+        #expect(messages[1].text == "\u{FEFF}开头")
+        #expect(messages[0].sender == "张三")
+    }
+
+    @Test
+    func senderIsKeptVerbatimAndNeverTrimmed() throws {
+        // WeChat has not been observed padding the sender line. Until a real
+        // export shows otherwise, trimming would be editing the user's data on
+        // a guess -- so whatever sits between "·" and the newline is the sender.
+        let messages = try WeChatNativeTranscriptParser.parse(
+            transcript([(" 张三 ", m35, "哈哈"), ("李\u{00A0}四", m36, "收到")])
+        )
+        #expect(messages[0].sender == " 张三 ")
+        #expect(messages[1].sender == "李\u{00A0}四")
     }
 
     @Test
@@ -520,6 +570,130 @@ struct WeChatNativeArchiveSafetyTests {
     }
 
     @Test
+    func anOversizedEntryCountIsRefusedBeforeAnyRecordIsParsed() throws {
+        // The EOCD claims 5000 entries; the central directory holds one. A
+        // reader that gated the count *after* the parse loop would walk off the
+        // end of the directory and report `malformedCentralDirectory`. Getting
+        // `entryCountOutsideSupportedRange` instead is the proof that the limit
+        // ran first and nothing was parsed or allocated.
+        let scratch = try Scratch()
+        var builder = ZIPBuilder()
+        builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        builder.entryCountOverride = 5_000
+        builder.entriesOnDiskOverride = 5_000
+        let url = scratch.url.appendingPathComponent("many.zip")
+        try builder.write(to: url)
+
+        expectArchiveError(.entryCountOutsideSupportedRange) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func everyEntryIsVerified_notJustTheTranscript() throws {
+        // The transcript is intact; an attachment is not. An accepted archive
+        // means the *whole* archive was verified, so this must be refused.
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]), deflated: true)
+            builder.add("images/1.jpg", "corrupted attachment", crcOverride: 0xDEAD_BEEF)
+        }
+        expectArchiveError(.integrityCheckFailed) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func anEOCDSignatureInsideTheCommentDoesNotReplaceTheRealRecord() throws {
+        // The comment sits after the record, so a backwards scan finds a
+        // planted signature first. Only the record whose own comment length
+        // lands exactly on end-of-file is the real one.
+        let scratch = try Scratch()
+        var builder = ZIPBuilder()
+        builder.add("聊天记录.txt", transcript([("张三", m35, "哈哈"), ("李四", m36, "收到")]))
+        builder.comment = Data([0x50, 0x4B, 0x05, 0x06]) + Data(repeating: 0, count: 26)
+        let url = scratch.url.appendingPathComponent("planted.zip")
+        try builder.write(to: url)
+
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        #expect(archive.messages.count == 2)
+    }
+
+    @Test
+    func mismatchedDiskEntryCountsAreRejected() throws {
+        let scratch = try Scratch()
+        var builder = ZIPBuilder()
+        builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        builder.entriesOnDiskOverride = 2  // the total still says 1
+        let url = scratch.url.appendingPathComponent("disks.zip")
+        try builder.write(to: url)
+
+        expectArchiveError(.inconsistentEndOfCentralDirectory) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func aCommentLengthThatDoesNotReachEndOfFileIsRejected() throws {
+        let scratch = try Scratch()
+        var builder = ZIPBuilder()
+        builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        builder.comment = Data(repeating: 0x41, count: 8)
+        builder.commentLengthOverride = 3  // claims 3, wrote 8
+        let url = scratch.url.appendingPathComponent("comment.zip")
+        try builder.write(to: url)
+
+        expectArchiveError(.notAZIPArchive) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func aLocalHeaderMethodThatContradictsTheCentralDirectoryIsRejected() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            // Central directory says deflate; the local header claims stored.
+            $0.add(
+                "聊天记录.txt", transcript([("张三", m35, "x")]),
+                deflated: true, localMethodOverride: 0
+            )
+        }
+        expectArchiveError(.inconsistentLocalHeader) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func aLocalHeaderNameThatContradictsTheCentralDirectoryIsRejected() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            // Same byte length, different bytes: caught by comparison, not size.
+            $0.add(
+                "聊天记录.txt", transcript([("张三", m35, "x")]),
+                localNameOverride: "聊天纪录.txt"
+            )
+        }
+        expectArchiveError(.inconsistentLocalHeader) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
+    func anEntryWhoseDataRunsPastEndOfFileIsRejected() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            // A huge declared extra field pushes the data start past the file.
+            $0.add(
+                "聊天记录.txt", transcript([("张三", m35, "x")]),
+                localExtraLengthOverride: 60_000
+            )
+        }
+        expectArchiveError(.malformedLocalHeader) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+    }
+
+    @Test
     func picksTheRecognizableTranscriptWithTheMostMessages() throws {
         let scratch = try Scratch()
         let url = try scratch.zip { builder in
@@ -585,7 +759,7 @@ struct WeChatNativeArchiveBoundaryTests {
         let scratch = try Scratch()
         let secret = "私密内容不应出现在报告里"
         let url = try scratch.zip { builder in
-            builder.add("聊天记录.txt", transcript([("张三", m35, secret)]), deflated: true)
+            builder.add("与某人的聊天记录.txt", transcript([("张三", m35, secret)]), deflated: true)
             builder.add("images/1.jpg", "x")
         }
         let summary = WeChatNativeArchiveSummary(
@@ -597,6 +771,70 @@ struct WeChatNativeArchiveBoundaryTests {
         #expect(report.contains("message count: 1"))
         #expect(report.contains("first timestamp: \(m35)"))
         #expect(report.contains("jpg=1"))
+    }
+
+    @Test
+    func theSummaryIdentifiesTheTranscriptWithoutNamingIt() throws {
+        // Nobody has opened a real export, so whether a transcript filename
+        // carries a chat title or a contact's name is unknown. The report must
+        // not bet a private name on that assumption.
+        let scratch = try Scratch()
+        let revealingName = "与张三的聊天记录.txt"
+        let url = try scratch.zip {
+            $0.add(revealingName, transcript([("张三", m35, "哈哈")]))
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        let report = WeChatNativeArchiveSummary(archive).reportLines.joined(separator: "\n")
+
+        #expect(archive.transcriptEntryName == revealingName)  // known internally
+        #expect(!report.contains(revealingName))               // never reported
+        #expect(!report.contains("张三"))
+        #expect(report.contains("extension=txt"))
+        #expect(report.contains("index=0"))
+    }
+
+    @Test
+    func theInventoryReportsShapeWithoutAnyFilename() throws {
+        // Replaces pasting `unzip -l` of a private export: Phase B needs the
+        // tree's shape, not WeChat's choice of names.
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("与李四的聊天记录.txt", transcript([("李四", m35, "哈哈")]))
+            builder.add("images/私密照片.jpg", String(repeating: "x", count: 2_048))
+            builder.add("images/another.jpg", "y")
+            builder.add("video/家庭录像.mp4", "z")
+        }
+        let inventory = try WeChatNativeArchiveInventory.read(contentsOf: url)
+        let report = inventory.reportLines.joined(separator: "\n")
+
+        #expect(inventory.fileCount == 4)
+        #expect(inventory.maximumPathDepth == 2)
+        #expect(inventory.topLevelDirectoryCount == 2)
+        for name in ["与李四的聊天记录", "私密照片", "家庭录像", "another", "images", "video"] {
+            #expect(!report.contains(name), "inventory must not contain \(name)")
+        }
+        #expect(report.contains("jpg: count=2"))
+        #expect(report.contains("mp4: count=1"))
+        // Sizes are bucketed, never exact.
+        #expect(report.contains("<10KiB"))
+        #expect(!report.contains("2048"))
+    }
+
+    @Test
+    func theInventoryWorksOnAnArchiveWithNoRecognizableTranscript() throws {
+        // The case most worth diagnosing on a real export is the one where the
+        // transcript did not parse at all.
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("readme.txt", "not a transcript")
+            builder.add("data/blob.bin", "x")
+        }
+        #expect(throws: WeChatNativeArchiveError.noRecognizableTranscript) {
+            _ = try WeChatNativeArchiveReader.read(contentsOf: url)
+        }
+        let inventory = try WeChatNativeArchiveInventory.read(contentsOf: url)
+        #expect(inventory.fileCount == 2)
+        #expect(inventory.topLevelDirectoryCount == 1)
     }
 }
 
@@ -635,6 +873,13 @@ struct WeChatNativeArchiveFixtureTests {
     func realArchiveAcceptance() throws {
         let path = try #require(Self.fixturePath)
         let url = URL(fileURLWithPath: path)
+
+        // The inventory first, and separately: it is the part that still says
+        // something useful when the transcript does not parse, which is exactly
+        // the failure worth diagnosing on a first real export.
+        let inventory = try? WeChatNativeArchiveInventory.read(contentsOf: url)
+        let shape = inventory?.reportLines.joined(separator: "\n") ?? "inventory: unavailable"
+
         let summary: WeChatNativeArchiveSummary
         do {
             summary = WeChatNativeArchiveSummary(
@@ -642,11 +887,11 @@ struct WeChatNativeArchiveFixtureTests {
             )
         } catch {
             let reason = "\(type(of: error)).\(error)"
-            print("DUKOU FIXTURE\n" + WeChatNativeArchiveSummary(failure: reason)
+            print("DUKOU FIXTURE\n" + shape + "\n" + WeChatNativeArchiveSummary(failure: reason)
                 .reportLines.joined(separator: "\n"))
             throw error
         }
-        print("DUKOU FIXTURE\n" + summary.reportLines.joined(separator: "\n"))
+        print("DUKOU FIXTURE\n" + shape + "\n" + summary.reportLines.joined(separator: "\n"))
         #expect(summary.isValid)
         #expect(summary.messageCount > 0)
     }
