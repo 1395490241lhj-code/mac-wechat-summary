@@ -249,6 +249,11 @@ INTERNAL_NAMES = (
     "message_count", "conversation_count", "reader_configured", "schema_version",
     "first_observed_at", "before_sequence", "since_observed_at",
     "logical_message_id", "mcp__wechat_companion__", "mcp__wechat_memory__",
+    # H4.1 / K3: one H4 run attempted `skill_manage`, then narrated the misfire
+    # to the user ("上面的调用是误操作，未产生实际改动"). A digest naming a
+    # runtime tool -- especially to explain a failed call -- is the same
+    # output-hygiene failure as leaking a field name, so it fails the same gate.
+    "skill_manage", "skills_list", "skill_view",
 )
 
 

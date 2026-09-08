@@ -342,6 +342,28 @@ def test_internal_field_names_are_forbidden_in_user_visible_output(prose):
     assert "依据：msg:…" in prose
 
 
+def test_no_tool_outside_the_declared_surface(prose):
+    """H4.1 / K3 regression: one of 17 H4 runs attempted `skill_manage`.
+
+    The call errored and changed nothing -- it sat inside the then-permitted
+    `skills` toolset, so it was a deviation rather than a security event -- but
+    nothing pinned the rule that forbids it. This does.
+
+    The structural boundary is enforced elsewhere (the exact-8 wire assertion,
+    and `skills` being disabled outright). This test pins the *written* rule, so
+    the two cannot drift apart silently.
+    """
+    assert "Do not reach for any other tool to work around that" in prose
+    assert "out of scope for this skill" in prose
+    assert "everything else is still out of scope" in prose
+
+
+def test_mutating_skill_tools_are_never_named_as_available(skill_text):
+    """`skill_manage` and friends must appear nowhere in the skill's tool list."""
+    for forbidden in ("skill_manage", "skills_list", "skill_view"):
+        assert forbidden not in skill_text, forbidden
+
+
 # --- Output contract ---------------------------------------------------------
 
 def test_all_output_headings_are_specified(skill_text):
