@@ -110,13 +110,17 @@ actor MessageIngestor: MessageIngesting {
         }
 
         do {
-            let conversationID = try await store.conversationID(
-                forTitle: title, seenAt: frame.capturedAt
-            )
-            let tail = try await store.reconciliationTail(conversationID: conversationID)
-            let head = try await store.headKeys(
-                conversationID: conversationID, limit: MessageStore.reconciliationWindow
-            )
+            // Read-only: a conversation this frame turns out to add nothing to
+            // must not be brought into existence just by looking it up.
+            let conversationID = try await store.existingConversationID(forTitle: title)
+            var tail: [MessageIdentityKey] = []
+            var head: [MessageIdentityKey] = []
+            if let conversationID {
+                tail = try await store.reconciliationTail(conversationID: conversationID)
+                head = try await store.headKeys(
+                    conversationID: conversationID, limit: MessageStore.reconciliationWindow
+                )
+            }
             let reconciliation = FrameReconciler.reconcile(
                 incoming: visible.map(MessageIdentityKey.init),
                 storedTail: tail,
@@ -125,27 +129,39 @@ actor MessageIngestor: MessageIngesting {
 
             switch reconciliation {
             case .nothingNew:
+                // A chat sitting still was still seen, and used to have its
+                // last-seen stamp refreshed by the lookup itself. Kept, but
+                // only for a conversation that already exists: this can update
+                // identity, never create it.
+                if let conversationID {
+                    try await store.touchConversation(
+                        conversationID, seenAt: frame.capturedAt
+                    )
+                }
                 metrics.framesWithNothingNew += 1
             case let .appended(_, range):
-                try await store.append(
+                try await store.write(
                     Array(visible[range]),
-                    conversationID: conversationID,
-                    observedAt: frame.capturedAt
+                    toConversationTitled: title,
+                    seenAt: frame.capturedAt,
+                    placement: .append
                 )
                 metrics.messagesAppended += range.count
             case let .gap(range):
-                try await store.append(
+                try await store.write(
                     Array(visible[range]),
-                    conversationID: conversationID,
-                    observedAt: frame.capturedAt
+                    toConversationTitled: title,
+                    seenAt: frame.capturedAt,
+                    placement: .append
                 )
                 metrics.messagesAppended += range.count
                 metrics.continuityGaps += 1
             case let .prepended(_, range):
-                try await store.prepend(
+                try await store.write(
                     Array(visible[range]),
-                    conversationID: conversationID,
-                    observedAt: frame.capturedAt
+                    toConversationTitled: title,
+                    seenAt: frame.capturedAt,
+                    placement: .prepend
                 )
                 metrics.messagesPrepended += range.count
             }

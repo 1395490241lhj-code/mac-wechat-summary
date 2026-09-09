@@ -712,6 +712,110 @@ struct SchemaEnumerationTests {
     }
 }
 
+// MARK: - Ingestion identity atomicity
+
+/// A conversation title is chat identity. Creating it and writing the messages
+/// that justify it must be one unit: a failed append that leaves the title
+/// behind produces exactly the orphan retention is built to prevent, and under
+/// "Until I delete it" nothing would ever sweep it away.
+struct IngestionIdentityAtomicityTests {
+    private func visible(_ text: String) -> ExtractedVisibleMessage {
+        ExtractedVisibleMessage(text: text, kind: .text, confidence: 0.9)
+    }
+
+    @Test
+    func aFailedAppendLeavesNoConversationBehind() async throws {
+        let store = try MessageStore(url: nil)
+
+        await #expect(throws: MessageStoreError.self) {
+            _ = try await store.write(
+                [self.visible("never stored")],
+                toConversationTitled: "SENTINEL-CHAT",
+                seenAt: Date(),
+                placement: .append,
+                failAfterIdentityForTesting: true
+            )
+        }
+
+        #expect(try await store.conversationSummaries().isEmpty)
+        #expect(try await store.existingConversationID(forTitle: "SENTINEL-CHAT") == nil)
+    }
+
+    @Test
+    func aSuccessfulWriteStillCreatesTheConversationAndItsMessages() async throws {
+        let store = try MessageStore(url: nil)
+        let seen = Date()
+
+        let id = try await store.write(
+            [visible("first"), visible("second")],
+            toConversationTitled: "SENTINEL-CHAT",
+            seenAt: seen,
+            placement: .append
+        )
+
+        let summaries = try await store.conversationSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries.first?.title == "SENTINEL-CHAT")
+        #expect(summaries.first?.retainedMessageCount == 2)
+        #expect(try await store.messageCount(inConversation: id) == 2)
+        #expect(try await store.messages(inConversation: id).map(\.text) == ["first", "second"])
+    }
+
+    @Test
+    func untilDeletedCannotPreserveAnOrphanFromAFailedAppend() async throws {
+        // "Until I delete it" makes applyRetention a no-op, so it can never
+        // clean up after ingestion. The write itself has to leave nothing.
+        let store = try MessageStore(url: nil)
+
+        await #expect(throws: MessageStoreError.self) {
+            _ = try await store.write(
+                [self.visible("never stored")],
+                toConversationTitled: "SENTINEL-CHAT",
+                seenAt: Date(),
+                placement: .append,
+                failAfterIdentityForTesting: true
+            )
+        }
+
+        #expect(try await store.applyRetention(.untilDeleted) == 0)
+        #expect(try await store.conversationSummaries().isEmpty)
+    }
+
+    @Test
+    func ingestionThroughTheIngestorSurvivesTheChange() async throws {
+        // The end-to-end path still creates, appends and refreshes normally.
+        let store = try MessageStore(url: nil)
+        let ingestor = MessageIngestor(store: store)
+        let first = Date(timeIntervalSince1970: 1_700_000_000)
+
+        await ingestor.ingest(
+            ExtractedConversationFrame(
+                capturedAt: first,
+                chat: ExtractedChatIdentity(title: "SENTINEL-CHAT", confidence: 0.9),
+                messages: [visible("a"), visible("b")]
+            )
+        )
+        // The same frame again: nothing new, and no second conversation.
+        await ingestor.ingest(
+            ExtractedConversationFrame(
+                capturedAt: first.addingTimeInterval(60),
+                chat: ExtractedChatIdentity(title: "SENTINEL-CHAT", confidence: 0.9),
+                messages: [visible("a"), visible("b")]
+            )
+        )
+
+        let summaries = try await store.conversationSummaries()
+        #expect(summaries.count == 1)
+        #expect(summaries.first?.retainedMessageCount == 2)
+        // The steady-state frame still refreshed when the chat was last seen.
+        #expect(summaries.first?.lastCapturedAt == first.addingTimeInterval(60))
+        let metrics = await ingestor.snapshot()
+        #expect(metrics.messagesAppended == 2)
+        #expect(metrics.framesWithNothingNew == 1)
+        #expect(metrics.persistenceFailures == 0)
+    }
+}
+
 // MARK: - Live-message retention atomicity
 
 /// Live-message retention is the same two deletions as the archive half:

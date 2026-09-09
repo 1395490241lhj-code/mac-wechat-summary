@@ -484,6 +484,74 @@ actor MessageStore {
         return id
     }
 
+    /// The conversation's id, or nil when this title has never been stored.
+    ///
+    /// Read-only on purpose. Reconciliation needs to know what is already
+    /// stored *before* anything is written, and asking that question must not
+    /// itself create a conversation row.
+    func existingConversationID(forTitle title: String) throws -> Int64? {
+        try query(
+            "SELECT id FROM conversations WHERE title = ?;",
+            bind: { statement in Self.bind(statement, 1, title) },
+            row: { sqlite3_column_int64($0, 0) }
+        ).first
+    }
+
+    /// Refreshes an existing conversation's last-seen stamp. Updates only:
+    /// it takes an id, so it cannot bring a conversation into existence.
+    func touchConversation(_ id: Int64, seenAt: Date) throws {
+        try run(
+            "UPDATE conversations SET last_seen_at = MAX(last_seen_at, ?) WHERE id = ?;"
+        ) { statement in
+            sqlite3_bind_double(statement, 1, seenAt.timeIntervalSince1970)
+            sqlite3_bind_int64(statement, 2, id)
+        }
+    }
+
+    /// Where reconciliation decided the messages belong.
+    enum MessagePlacement: Sendable {
+        case append
+        case prepend
+    }
+
+    /// Creates or refreshes the conversation and writes its messages as ONE
+    /// unit, returning the conversation id.
+    ///
+    /// Identity and content have to land together. Creating the conversation
+    /// first and appending second leaves a title with no message behind it if
+    /// the append fails -- the same "chat identity outliving every reason to
+    /// hold it" that retention must never produce, arriving through ingestion
+    /// instead. Refreshing `last_seen_at` is part of the same unit: a chat
+    /// whose "last captured" moved without anything being captured is a lie
+    /// the ledger would faithfully repeat.
+    @discardableResult
+    func write(
+        _ messages: [ExtractedVisibleMessage],
+        toConversationTitled title: String,
+        seenAt: Date,
+        placement: MessagePlacement,
+        failAfterIdentityForTesting: Bool = false
+    ) throws -> Int64 {
+        try Self.exec(handle, "BEGIN IMMEDIATE;")
+        do {
+            let id = try conversationID(forTitle: title, seenAt: seenAt)
+            if failAfterIdentityForTesting {
+                throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+            }
+            switch placement {
+            case .append:
+                try append(messages, conversationID: id, observedAt: seenAt)
+            case .prepend:
+                try prepend(messages, conversationID: id, observedAt: seenAt)
+            }
+            try Self.exec(handle, "COMMIT;")
+            return id
+        } catch {
+            try? Self.exec(handle, "ROLLBACK;")
+            throw error
+        }
+    }
+
     /// The identity keys the reconciler aligns a frame against, oldest first.
     func reconciliationTail(conversationID: Int64) throws -> [MessageIdentityKey] {
         try recentMessages(
