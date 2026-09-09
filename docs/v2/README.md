@@ -37,6 +37,9 @@ Git history and the reports together — never one old phase report in isolation
 23. `M2_2F_RELEASE_PACKAGING_GATE.md` — Release signing of the nested helper **PASS**; notarization/stapling/Gatekeeper **NOT RUN** (no Developer ID identity or notary credential)
 24. `M2_3_MEMORY_SKILL_INTEGRATION.md` — the production skill learns Memory (v1.0.0 → v1.1.0); default 4-tool behaviour intact, 7/7 live Memory scenarios, citations validated — **PASS**
 25. `M2_4_REAL_VISUAL_MEMORY_UX_GATE.md` — first real-data run: capture → Sync Now → canonical store → 9 tools all **worked**; answer quality **not established** (dataset too small to exercise Memory; both grading methods inconclusive) — **FAIL, not established**
+26. `H5A_ACCESS_MATERIAL_GATE.md` — H5A stops before any database access: no valid access material exists locally, so the phase halts by its own rule
+27. `H5A_PROVIDER_AND_LICENSING_REVIEW.md` — research only: who is supposed to produce the access material, and the Rion licensing record
+28. `D030_ACCESS_MATERIAL_EXCEPTION.md` — the working record behind **D-030** (Active, recorded 2026-09-08); the Decision itself lives in the vault's `Decisions.md`
 
 ## Known supersessions
 
@@ -88,6 +91,12 @@ Verified from the documents themselves:
   true on its own date. `M2_3` is the first intentional change (v1.0.0 →
   v1.1.0, blob `81d276ea` → `7c57580`), and the older statements are not
   edited.
+- **`H5A_PROVIDER_AND_LICENSING_REVIEW`'s open question is now decided.** That
+  report states a Decision "is needed" and that it is not writing one. It was
+  written since: **D-030** is Active as of 2026-09-08. For its scope, gates and
+  status see the vault's `Decisions.md` and
+  `docs/v2/D030_ACCESS_MATERIAL_EXCEPTION.md` — not the H5A report, which is
+  preserved unedited as sealed evidence.
 - **The CLI audit is research, not approval.** Its header states *"architecture
   research only; no implementation decision or production approval"*.
 
