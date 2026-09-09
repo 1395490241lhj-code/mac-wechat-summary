@@ -46,7 +46,9 @@
 		A00000000000000000000092 /* FrameReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000092 /* FrameReconciler.swift */; };
 		A00000000000000000000093 /* MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000093 /* MessageStore.swift */; };
 		A00000000000000000000094 /* MessageIngestor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000094 /* MessageIngestor.swift */; };
+		A000000000000000000000A0 /* CaptureLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A0 /* CaptureLedger.swift */; };
 		B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000095 /* FrameReconcilerTests.swift */; };
+		B000000000000000000000A1 /* CaptureLedgerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A1 /* CaptureLedgerTests.swift */; };
 		B00000000000000000000096 /* MessageIngestionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000096 /* MessageIngestionTests.swift */; };
 		A00000000000000000000018 /* GeminiModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000071 /* GeminiModel.swift */; };
 		B00000000000000000000001 /* DiagnosticPrivacyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* DiagnosticPrivacyTests.swift */; };
@@ -112,7 +114,9 @@
 		C00000000000000000000092 /* FrameReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/FrameReconciler.swift; sourceTree = "<group>"; };
 		C00000000000000000000093 /* MessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageStore.swift; sourceTree = "<group>"; };
 		C00000000000000000000094 /* MessageIngestor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageIngestor.swift; sourceTree = "<group>"; };
+		C000000000000000000000A0 /* CaptureLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/CaptureLedger.swift; sourceTree = "<group>"; };
 		C00000000000000000000095 /* FrameReconcilerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameReconcilerTests.swift; sourceTree = "<group>"; };
+		C000000000000000000000A1 /* CaptureLedgerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureLedgerTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000096 /* MessageIngestionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageIngestionTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000071 /* GeminiModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extraction/Providers/GeminiModel.swift; sourceTree = "<group>"; };
 		C00000000000000000000011 /* DiagnosticPrivacyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticPrivacyTests.swift; sourceTree = "<group>"; };
@@ -182,6 +186,7 @@
 				C00000000000000000000092 /* FrameReconciler.swift */,
 				C00000000000000000000093 /* MessageStore.swift */,
 				C00000000000000000000094 /* MessageIngestor.swift */,
+				C000000000000000000000A0 /* CaptureLedger.swift */,
 				C00000000000000000000097 /* RetentionPolicy.swift */,
 				C0000000000000000000009A /* LocalPersistenceConsentState.swift */,
 				C0000000000000000000009B /* MemorySync.swift */,
@@ -211,6 +216,7 @@
 				C00000000000000000000061 /* ExtractionFailureDiagnosticsTests.swift */,
 				C00000000000000000000081 /* GeminiModelSelectionTests.swift */,
 				C00000000000000000000095 /* FrameReconcilerTests.swift */,
+				C000000000000000000000A1 /* CaptureLedgerTests.swift */,
 				C00000000000000000000096 /* MessageIngestionTests.swift */,
 				C00000000000000000000099 /* LocalPersistenceConsentTests.swift */,
 				C0000000000000000000009C /* MemorySyncTests.swift */,
@@ -372,6 +378,7 @@
 				A00000000000000000000092 /* FrameReconciler.swift in Sources */,
 				A00000000000000000000093 /* MessageStore.swift in Sources */,
 				A00000000000000000000094 /* MessageIngestor.swift in Sources */,
+				A000000000000000000000A0 /* CaptureLedger.swift in Sources */,
 				A00000000000000000000097 /* RetentionPolicy.swift in Sources */,
 				A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */,
 				A0000000000000000000009B /* MemorySync.swift in Sources */,
@@ -400,6 +407,7 @@
 				B0000000000000000000000C /* ExtractionFailureDiagnosticsTests.swift in Sources */,
 				B0000000000000000000000D /* GeminiModelSelectionTests.swift in Sources */,
 				B00000000000000000000095 /* FrameReconcilerTests.swift in Sources */,
+				B000000000000000000000A1 /* CaptureLedgerTests.swift in Sources */,
 				B00000000000000000000096 /* MessageIngestionTests.swift in Sources */,
 				B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */,
 				B0000000000000000000009C /* MemorySyncTests.swift in Sources */,

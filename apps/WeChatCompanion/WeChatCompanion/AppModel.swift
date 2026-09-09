@@ -14,6 +14,9 @@ final class AppModel {
     /// Memory only, never encoded or saved.
     var capturePreview: ObservedFrame?
     var extractionMetrics = ExtractionMetrics()
+    /// Which conversations have been captured and how much is still kept.
+    /// Aggregates only -- this never carries message text.
+    var captureLedger = CaptureLedger.empty
     /// In-memory only. Cleared when the app exits; never written to disk.
     var latestExtraction: ExtractedConversationFrame?
     /// Transient text-field buffer, cleared as soon as the key reaches the Keychain.
@@ -236,6 +239,7 @@ final class AppModel {
         }
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
+        await refreshCaptureLedger()
     }
 
     /// Applies immediately, including a sweep of anything the new policy has
@@ -245,6 +249,8 @@ final class AppModel {
         retentionPolicy = policy
         consentDefaults.set(policy.rawValue, forKey: Self.retentionPolicyKey)
         await messageHistory.setRetention(policy)
+        // The sweep may have just removed messages the ledger is counting.
+        await refreshCaptureLedger()
     }
 
     /// Destructive: removes every locally stored conversation and message,
@@ -256,6 +262,7 @@ final class AppModel {
     func deleteLocalMessageHistory() async {
         await messageHistory.deleteAllHistory()
         await applyExtractionConfiguration()
+        await refreshCaptureLedger()
     }
 
     private func applyExtractionConfiguration() async {
@@ -380,9 +387,17 @@ final class AppModel {
         capturePreview = nil
     }
 
+    /// The ledger also has to follow user actions that change what is kept --
+    /// consent, retention and deletion -- because capture polling may not be
+    /// running when any of them happens.
+    func refreshCaptureLedger() async {
+        captureLedger = await messageHistory.captureLedger()
+    }
+
     private func refreshCaptureMetrics() async {
         captureMetrics = await session.snapshot()
         capturePreview = await session.latestPreview()
+        await refreshCaptureLedger()
     }
 
     private func startMetricsPolling() {
