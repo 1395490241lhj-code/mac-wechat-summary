@@ -600,20 +600,36 @@ actor MessageStore {
     func applyRetention(
         _ policy: RetentionPolicy,
         now: Date = Date(),
-        failBetweenArchiveRetentionStepsForTesting: Bool = false
+        failBetweenArchiveRetentionStepsForTesting: Bool = false,
+        failBetweenMessageRetentionStepsForTesting: Bool = false
     ) throws -> Int {
         guard let maximumAge = policy.maximumAge else { return 0 }
         let cutoff = now.addingTimeInterval(-maximumAge).timeIntervalSince1970
 
         let before = try totalMessageCount()
-        try run("DELETE FROM messages WHERE first_observed_at < ?;") { statement in
-            sqlite3_bind_double(statement, 1, cutoff)
+        // One unit, for the same reason the archive half is one unit: expiring
+        // the messages and dropping the conversations they justified must
+        // succeed or fail together. Stopping in between leaves a conversation
+        // title with no message behind it -- chat identity outliving every
+        // reason to hold it, which retention must never produce.
+        try Self.exec(handle, "BEGIN IMMEDIATE;")
+        do {
+            try run("DELETE FROM messages WHERE first_observed_at < ?;") { statement in
+                sqlite3_bind_double(statement, 1, cutoff)
+            }
+            if failBetweenMessageRetentionStepsForTesting {
+                throw MessageStoreError.statementFailed(status: SQLITE_ERROR)
+            }
+            try run("""
+                DELETE FROM conversations WHERE id NOT IN (
+                    SELECT DISTINCT conversation_id FROM messages
+                );
+                """)
+            try Self.exec(handle, "COMMIT;")
+        } catch {
+            try? Self.exec(handle, "ROLLBACK;")
+            throw error
         }
-        try run("""
-            DELETE FROM conversations WHERE id NOT IN (
-                SELECT DISTINCT conversation_id FROM messages
-            );
-            """)
         let removed = before - (try totalMessageCount())
         let archiveRemoved = try applyArchiveRetention(
             cutoff: cutoff, failBetweenStepsForTesting: failBetweenArchiveRetentionStepsForTesting

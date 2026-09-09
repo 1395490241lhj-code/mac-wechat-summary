@@ -712,6 +712,62 @@ struct SchemaEnumerationTests {
     }
 }
 
+// MARK: - Live-message retention atomicity
+
+/// Live-message retention is the same two deletions as the archive half:
+/// expired messages, then conversations left holding none. The conversation
+/// title IS chat identity, so a half-applied sweep that keeps the title after
+/// deleting every message it belonged to is the outcome retention must never
+/// produce -- the rule `ArchiveRetentionAtomicityTests` already states.
+struct MessageRetentionAtomicityTests {
+    @Test
+    func aFailureBetweenTheTwoDeletionsLeavesNoConversationWithoutMessages() async throws {
+        let store = try MessageStore(url: nil)
+        let now = Date()
+        let old = now.addingTimeInterval(-60 * 86_400)
+        let conversationID = try await store.conversationID(forTitle: "SENTINEL-CHAT", seenAt: old)
+        try await store.append(
+            [ExtractedVisibleMessage(text: "expiring", kind: .text, confidence: 0.9)],
+            conversationID: conversationID,
+            observedAt: old
+        )
+
+        await #expect(throws: MessageStoreError.self) {
+            _ = try await store.applyRetention(
+                .thirtyDays, now: now, failBetweenMessageRetentionStepsForTesting: true
+            )
+        }
+
+        // Either everything survives or everything goes. A surviving title with
+        // no messages is the one state that must be impossible.
+        let summaries = try await store.conversationSummaries()
+        for summary in summaries {
+            #expect(
+                summary.retainedMessageCount > 0,
+                "chat identity outlived every message that justified it"
+            )
+        }
+    }
+
+    @Test
+    func aSuccessfulSweepRemovesTheConversationWithItsLastMessage() async throws {
+        let store = try MessageStore(url: nil)
+        let now = Date()
+        let old = now.addingTimeInterval(-60 * 86_400)
+        let conversationID = try await store.conversationID(forTitle: "SENTINEL-CHAT", seenAt: old)
+        try await store.append(
+            [ExtractedVisibleMessage(text: "expiring", kind: .text, confidence: 0.9)],
+            conversationID: conversationID,
+            observedAt: old
+        )
+
+        _ = try await store.applyRetention(.thirtyDays, now: now)
+
+        // No orphan row, so the ledger can never show it as "0 messages kept".
+        #expect(try await store.conversationSummaries().isEmpty)
+    }
+}
+
 // MARK: - Retention atomicity
 
 /// Archive retention is two deletions: expired imports, then conversations
