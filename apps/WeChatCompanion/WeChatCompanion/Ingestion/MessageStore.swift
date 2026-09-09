@@ -368,6 +368,32 @@ actor MessageStore {
         }
     }
 
+    /// Every conversation with the number of messages the store still holds
+    /// for it, newest activity first.
+    ///
+    /// One grouped statement rather than a count per conversation, because the
+    /// ledger refreshes on the capture cadence. Read-only: it adds no table,
+    /// no column and no schema version.
+    func conversationSummaries() throws -> [CapturedConversationSummary] {
+        try query(
+            """
+            SELECT c.id, c.title, c.first_seen_at, c.last_seen_at, COUNT(m.id)
+            FROM conversations AS c
+            LEFT JOIN messages AS m ON m.conversation_id = c.id
+            GROUP BY c.id
+            ORDER BY c.last_seen_at DESC, c.id DESC;
+            """
+        ) { statement in
+            CapturedConversationSummary(
+                id: sqlite3_column_int64(statement, 0),
+                title: Self.string(statement, 1) ?? "",
+                retainedMessageCount: Int(sqlite3_column_int64(statement, 4)),
+                firstCapturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                lastCapturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            )
+        }
+    }
+
     func conversation(titled title: String) throws -> ConversationRecord? {
         try conversations().first { $0.title == title }
     }

@@ -479,6 +479,8 @@ private struct ChatsView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+                CaptureLedgerSection(ledger: model.captureLedger)
+
                 if let failure = model.extractionMetrics.lastFailure {
                     GroupBox("Last Failure Diagnosis") {
                         VStack(spacing: 0) {
@@ -539,6 +541,91 @@ private struct ChatsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Chats")
+    }
+}
+
+/// Which conversations have actually been captured, how much of each is still
+/// kept, and whether capture has obvious gaps.
+///
+/// Aggregates only. No message text, no preview and no navigation into a
+/// conversation: this section answers "did capture work, and on what", which
+/// needs counts and times, not content.
+private struct CaptureLedgerSection: View {
+    let ledger: CaptureLedger
+
+    private var presentation: CaptureLedgerPresentation {
+        CaptureLedgerPresentation(ledger: ledger)
+    }
+
+    var body: some View {
+        let shown = presentation
+        GroupBox("Captured Conversations") {
+            VStack(alignment: .leading, spacing: 0) {
+                if let message = shown.emptyMessage {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(Array(shown.conversations.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { Divider() }
+                        CapturedConversationRow(row: row)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        if let note = shown.retentionNote {
+            Text(note)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+
+        if !shown.healthRows.isEmpty {
+            GroupBox("Capture Health") {
+                VStack(spacing: 0) {
+                    ForEach(Array(shown.healthRows.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { Divider() }
+                        LabeledContent(row.label) {
+                            Text(row.value).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+
+        ForEach(shown.guidance, id: \.self) { advice in
+            Text(advice)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct CapturedConversationRow: View {
+    let row: CaptureLedgerPresentation.ConversationRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(row.title)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 12)
+                Text(row.retainedCount)
+                    .foregroundStyle(.secondary)
+            }
+            Text("First captured \(row.firstCaptured) · Last captured \(row.lastCaptured)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

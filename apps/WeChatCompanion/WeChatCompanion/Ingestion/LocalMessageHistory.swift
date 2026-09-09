@@ -54,6 +54,23 @@ actor LocalMessageHistory {
         return store == nil ? .unavailable : .ready
     }
 
+    /// What the Chats tab shows: which conversations were captured, how much
+    /// of each is still kept, and the ingestion health counters.
+    ///
+    /// Fails soft. A store that cannot be read reports its state and empty
+    /// conversations rather than throwing into the UI refresh loop, because a
+    /// ledger is a status view -- an unreadable store is an answer, not an
+    /// error to surface as a crash.
+    func captureLedger() async -> CaptureLedger {
+        let state = storeState
+        guard state == .ready, let store else {
+            return CaptureLedger(storeState: state)
+        }
+        let conversations = (try? await store.conversationSummaries()) ?? []
+        let health = await activeIngestor?.snapshot() ?? IngestionMetrics()
+        return CaptureLedger(storeState: state, conversations: conversations, health: health)
+    }
+
     /// Why the last open attempt failed, kept for diagnostics. Cleared on a
     /// successful open and when consent is turned off, so it never lingers as
     /// a stale explanation for a state that has since changed.
