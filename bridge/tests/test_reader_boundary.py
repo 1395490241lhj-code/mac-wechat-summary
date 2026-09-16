@@ -777,3 +777,49 @@ def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeyp
     rendered = json.dumps([m.__dict__ for m in recent], default=str, ensure_ascii=False)
     assert "VISUAL-TEXT" in rendered
     assert "ARCHIVE-TEXT" not in rendered
+
+
+# --- D-017: an isolated schema provider stays isolated ------------------------
+
+#: Every Python tree that is product core or a generic abstraction. A
+#: WeChat-specific schema provider may exist in this repository, but nothing
+#: here may depend on one: the Reader contract is the only data boundary
+#: product core is allowed to know.
+PRODUCT_TREES = ("bridge", "memory", "shadow", "ai", "core")
+
+#: The candidate provider. Isolated by construction today; this test is what
+#: keeps it isolated when someone is in a hurry.
+CANDIDATE_PROVIDER = "wechatdb"
+
+
+def test_no_product_module_imports_the_candidate_schema_provider():
+    """`wechatdb` is a candidate provider, not a wired one.
+
+    It parses a plaintext WeChat 4.1+ schema and is exercised against synthetic
+    fixtures only. Until it has been proven against a real database and adopted
+    through the Reader contract, an import of it from product core would be a
+    production routing decision made by an import statement.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[2]
+    candidates = [root / "app.py", root / "mcp_server.py"]
+    for tree_name in PRODUCT_TREES:
+        candidates.extend(sorted((root / tree_name).rglob("*.py")))
+
+    offenders: list[str] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        parsed = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            if any(name.split(".")[0] == CANDIDATE_PROVIDER for name in names):
+                offenders.append(str(path.relative_to(root)))
+
+    assert offenders == [], offenders
