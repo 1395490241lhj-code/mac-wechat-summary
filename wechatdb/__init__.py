@@ -7,6 +7,7 @@ Nothing here decrypts, locates, or opens a WeChat database. See
 from .msg_types import classify, decode_text, maybe_decompress, unpack_local_type
 from .parser import (
     MessageRecord,
+    MessageSchemaError,
     conversation_tables,
     load_name2id,
     normalise_timestamp,
@@ -16,6 +17,7 @@ from .parser import (
 
 __all__ = [
     "MessageRecord",
+    "MessageSchemaError",
     "classify",
     "conversation_tables",
     "decode_text",

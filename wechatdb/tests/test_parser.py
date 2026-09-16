@@ -432,3 +432,66 @@ def test_the_parser_holds_no_key_path_or_decryption():
             for forbidden in ("pragma key", "xwechat_files", "containers",
                               "com.tencent", "/users/"):
                 assert forbidden not in lowered, (module, literal)
+
+
+# -- regressions ---------------------------------------------------------------
+
+def test_a_reliable_sender_does_not_cost_the_payload_its_first_line(tmp_path):
+    """A colon and a newline are ordinary text, not always a sender prefix.
+
+    The legacy 4.0 group prefix is a fallback. When `real_sender_id` has
+    already answered, the payload is content and every line of it belongs to
+    the user, including a first line that happens to look like a label.
+    """
+    connection = fixtures.new_database(tmp_path / "prefix.db")
+    ids = fixtures.add_names(connection, ["wxid_fixture_b"])
+    table = fixtures.add_conversation(connection, DIRECT)
+    fixtures.insert(
+        connection, table, local_type=1, create_time=SECONDS,
+        real_sender_id=ids["wxid_fixture_b"],
+        message_content="Note:\nbuy milk".encode("utf-8"),
+    )
+
+    [record] = list(parse_database(connection))
+
+    assert record.sender_id == "wxid_fixture_b"
+    assert record.content == "Note:\nbuy milk"
+
+
+def test_a_malformed_conversation_table_fails_instead_of_reading_as_empty(tmp_path):
+    """A table that cannot be read is a different answer from an empty one.
+
+    Returning zero rows for a table whose shape the parser does not understand
+    reports "this conversation has no messages", which is a claim the parser
+    is in no position to make.
+    """
+    connection = fixtures.new_database(tmp_path / "malformed.db")
+    table = fixtures.table_name(DIRECT)
+    # Correctly named, and missing a column the parser requires.
+    connection.execute(
+        f'CREATE TABLE "{table}" ('
+        " local_id INTEGER PRIMARY KEY,"
+        " local_type INTEGER,"
+        " message_content BLOB)"
+    )
+    connection.execute(
+        f'INSERT INTO "{table}" (local_type, message_content) VALUES (1, ?)',
+        (b"a row that exists and would be lost",),
+    )
+
+    with pytest.raises(parser.MessageSchemaError) as raised:
+        list(parse_database(connection))
+
+    message = str(raised.value)
+    assert table in message
+    assert "create_time" in message
+    # The refusal is about schema, never about content.
+    assert "a row that exists" not in message
+
+
+def test_a_well_formed_but_empty_conversation_table_is_simply_empty(tmp_path):
+    """The control for the test above: empty is an answer, and it still works."""
+    connection = fixtures.new_database(tmp_path / "empty.db")
+    fixtures.add_conversation(connection, DIRECT)
+
+    assert list(parse_database(connection)) == []

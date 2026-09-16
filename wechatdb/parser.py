@@ -77,9 +77,14 @@ _SENDER_PREFIX = re.compile(r"^([A-Za-z0-9_\-@.]{2,64}):\r?\n")
 #: A media digest as it appears in ``packed_info_data`` or an ``md5`` attribute.
 _MEDIA_DIGEST = re.compile(rb"[0-9a-fA-F]{32}")
 
-#: Columns this layer reads. A database missing one is not fatal: the value is
-#: reported absent, because a 4.1 build that drops a column is a coverage gap
-#: and not a reason to refuse every row in the table.
+#: Columns without which a conversation table cannot be read at all. A table
+#: missing one of these is malformed, not empty, and is refused rather than
+#: read as a conversation with no messages.
+MANDATORY_COLUMNS: tuple[str, ...] = ("local_id", "create_time")
+
+#: Columns this layer reads. Missing an *optional* one is not fatal: the value
+#: is reported absent, because a 4.1 build that drops one is a coverage gap and
+#: not a reason to refuse every row in the table.
 _WANTED_COLUMNS = (
     "local_id",
     "server_id",
@@ -90,6 +95,15 @@ _WANTED_COLUMNS = (
     "source",
     "packed_info_data",
 )
+
+
+class MessageSchemaError(Exception):
+    """A table named like a conversation does not have the shape of one.
+
+    Carries the table name and the missing column names, and never carries a
+    row, a sender, or any message text: it is returned to a caller and is safe
+    to log.
+    """
 
 
 @dataclass(frozen=True)
@@ -210,9 +224,13 @@ def parse_conversation(
     session_id = (session_names or {}).get(digest) or f"msg_{digest}"
 
     available = {row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+    missing = [name for name in MANDATORY_COLUMNS if name not in available]
+    if missing:
+        raise MessageSchemaError(
+            f"Conversation table {table} is missing required "
+            f"column(s): {', '.join(missing)}."
+        )
     columns = [name for name in _WANTED_COLUMNS if name in available]
-    if "local_id" not in columns or "create_time" not in columns:
-        return
     selection = ", ".join(f'"{name}"' for name in columns)
     rows = connection.execute(
         f'SELECT {selection} FROM "{table}"'  # noqa: S608
@@ -244,7 +262,7 @@ def _record(
 ) -> MessageRecord:
     base_type, appmsg_type = unpack_local_type(values.get("local_type"))
     payload = decode_text(values.get("message_content"))
-    prefix_sender, payload = _split_sender_prefix(payload)
+    sender_id, payload = _sender(values, name2id, payload)
 
     if base_type == APPMSG_MARKER and appmsg_type is None:
         # A bare 49: the type is only in the XML. Reading it there is the
@@ -254,7 +272,6 @@ def _record(
             appmsg_type = int(declared)
 
     kind = classify(base_type, appmsg_type)
-    sender_id = _sender(values, name2id, prefix_sender)
 
     return MessageRecord(
         session_id=session_id,
@@ -280,26 +297,36 @@ def _split_sender_prefix(payload: str) -> tuple[str | None, str]:
 def _sender(
     values: Mapping[str, object],
     name2id: Mapping[int, str],
-    prefix_sender: str | None,
-) -> str | None:
-    """The sender's identifier, by descending reliability.
+    payload: str,
+) -> tuple[str | None, str]:
+    """The sender's identifier, and the payload the content is read from.
 
-    ``real_sender_id`` through ``Name2Id`` is the 4.1+ answer and is preferred.
-    The payload prefix is the 4.0 answer and still appears. ``source`` names the
-    real chat user for a message relayed through another conversation; it is
-    last because it answers a slightly different question.
+    Reliability order, unchanged: ``real_sender_id`` through ``Name2Id`` is the
+    4.1+ answer and is preferred. The payload prefix is the 4.0 answer and still
+    appears. ``source`` names the real chat user for a message relayed through
+    another conversation; it is last because it answers a slightly different
+    question.
+
+    The payload is returned alongside because **the legacy prefix is removed
+    only when it is the answer.** A colon followed by a newline is ordinary
+    text: a message reading ``Note:\nbuy milk`` begins with a label, not with a
+    sender, and stripping it because a more reliable source had not been
+    consulted yet silently deleted the user's first line.
     """
     raw = values.get("real_sender_id")
     if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
         resolved = name2id.get(raw)
         if resolved:
-            return resolved
+            return resolved, payload
+    prefix_sender, remainder = _split_sender_prefix(payload)
     if prefix_sender:
-        return prefix_sender
+        return prefix_sender, remainder
     source = decode_text(values.get("source"))
     if source:
-        return xml_tag(source, "realChatUserName") or xml_tag(source, "fromusr")
-    return None
+        found = xml_tag(source, "realChatUserName") or xml_tag(source, "fromusr")
+        if found:
+            return found, payload
+    return None, payload
 
 
 def _content(kind: str, payload: str) -> str | None:
