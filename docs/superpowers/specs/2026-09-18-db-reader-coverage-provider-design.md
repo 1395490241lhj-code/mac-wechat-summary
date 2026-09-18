@@ -1,30 +1,38 @@
 # Coverage-aware database reader provider — design
 
 **Date:** 2026-09-18
-**Branch:** `feature/hermes-validation-isolation` (unmerged; `head_commit` stays `a928976`)
-**Status:** Design only. Nothing here is implemented, wired, routed, or enabled.
-**Governing decisions:** D-017 (*amended: provider isolation*), D-002, D-005,
-D-011, D-022, D-023, D-030 (**lapsed**), R-003.
-**Governing evidence:** E-022, F-036, F-037, `docs/v2/DB_READER_INTERFACE_GATE.md`,
-`docs/v2/READER_BOUNDARY_INTEGRATION.md`.
+**Branch:** `feature/hermes-validation-isolation` (unmerged; vault `head_commit` stays `a928976`)
+**Status:** Design only. Nothing here is implemented, wired, routed, enabled, or shipped.
+**Governing decisions:** D-002, D-005, D-011, D-017 (*Amended: provider isolation*),
+D-019, D-020, D-022, D-023, D-030 (**lapsed**), R-003.
+**Governing evidence:** E-018, E-022, F-016, F-036, F-037,
+`docs/v2/DB_READER_INTERFACE_GATE.md`.
+**Records decision:** D-031 — *source-authored coverage belongs in the Reader
+boundary; memory composes it rather than inferring it.*
 
 ---
 
-## 0. One-paragraph summary
+## 0. Summary
 
-`wechatdb/` can read one plaintext WeChat 4.1+ message database and turn its
-conversation tables into `MessageRecord`s. A real WeChat container is not one
-database; it is several, and a single conversation's history is spread across
-them. Today nothing in this repository can say *which* of those files it looked
-at, which it could not characterise, which it could not open, or whether the
-answer it produced is complete for the window that was asked about. This spec
-designs the missing layer: a **provider-internal** orchestration package that
-discovers the parts of a source, routes a time-windowed query across them,
-resolves identities, and emits a **generic, source-neutral** result envelope
-whose coverage semantics make an incomplete read structurally impossible to
-mistake for a complete one. The existing `wechatdb` parser is unchanged. Product
-core still depends on nothing but the Reader contract. Promotion remains
-unapproved, and this document does not promote anything.
+`wechatdb/` can parse one plaintext WeChat 4.1+ message database into
+`MessageRecord`s. A real container is not one database, and today nothing in
+this repository can state which parts of a source it read, which it could not
+characterise, which refused, or whether the answer is complete for the window
+that was asked for. Worse, the one place that *does* publish a coverage claim —
+`memory/memory_ingest.py` — derives it from `len(messages) < message_limit`,
+which is a guess about the source made by a layer that cannot see inside it.
+
+This spec moves coverage to where the evidence is. The generic Reader boundary
+gains four frozen, stdlib-only types — `ReadWindow`, `ReadFreshness`,
+`ReadCoverage`, `ReadResult[T]` — and becomes the single owner of the four
+`COVERAGE_*` tokens that `memory/memory_store.py` defines today. Each source
+authors its own coverage; memory composes what sources said instead of inferring
+it from a length. A clean-room, provider-internal orchestration package
+(discovery, routing, identity) is designed around the existing `wechatdb` parser
+so a multi-part source can state honest coverage, with no shard or schema
+vocabulary reaching any generic type.
+
+Nothing is promoted. Visual capture remains the production path.
 
 ---
 
@@ -32,1003 +40,280 @@ unapproved, and this document does not promote anything.
 
 ### 1.1 What is true today
 
-- `wechatdb/parser.py` is a schema layer over **one already-open
-  `sqlite3.Connection`**. It enumerates `Msg_<32hex>` tables in that one
-  connection, resolves senders through that one connection's `Name2Id`, and
-  yields `MessageRecord`. It opens nothing and locates nothing, deliberately.
-- E-022 opened exactly **one** real current message database. It held 90 tables:
-  84 `Msg_<32hex>` conversation tables plus `Name2Id`, 379,458 rows, one shared
-  17-column layout. Bounded samples parsed with zero schema or parse failures
-  (F-037).
-- The generic Reader contract in `bridge/message_source.py` — `MessageSource`,
-  `SourceStatus`, `NormalizedConversation`, `NormalizedMessage`,
-  `MessageSourceError` — answers four questions and carries **no** coverage
-  statement at all. An empty list means "the source answered and found nothing".
-- `memory/` already owns a mature, well-tested coverage and freshness
-  vocabulary (`observed_complete` / `observed_partial` / `unavailable` /
-  `not_observed`; `observed_through` / `complete_through` / `latest_message_at`;
-  no `is_fresh`, no threshold). That vocabulary lives **above** the reader, in
-  the memory store, and is populated by the ingestor — not by the reader itself.
-- The production read path is **visual capture / OCR**.
-  `selected_source_name()` in `bridge/store_access.py` defaults to `visual` when
-  `WECHAT_COMPANION_MESSAGE_SOURCE` is unset, so a default build never
-  constructs an external reader and never depends on one being importable.
+- **The generic boundary carries no coverage at all.**
+  `bridge/message_source.py` publishes `MessageSource` (line ~199),
+  `NormalizedMessage` (~144), `NormalizedConversation` (~119), `SourceStatus`
+  (~92) and `MessageSourceError` (~76). Its three collection methods return bare
+  `list[...]`. An empty list means "the source answered and found nothing" —
+  a claim the source is frequently not entitled to make.
+- **The module is deliberately dependency-free.**
+  `bridge/tests/test_reader_boundary.py::test_the_protocol_depends_on_no_reader_technology`
+  restricts its imports to `{__future__, dataclasses, typing}` and fails on the
+  identifiers `rion`, `subprocess`, `sqlcipher`, `wechat`, `json`, `argv`,
+  `zstd`, `sqlite`.
+- **Coverage vocabulary already exists, one layer too high.**
+  `memory/memory_store.py` owns `COVERAGE_COMPLETE="observed_complete"`,
+  `COVERAGE_PARTIAL="observed_partial"`, `COVERAGE_UNAVAILABLE="unavailable"`,
+  `COVERAGE_NOT_OBSERVED="not_observed"`, plus `CoverageRecord`,
+  `CoverageVerdict`, `ComposedCoverage` and `compose_coverage`.
+  `memory/memory_retrieval.py` carries `coverage` / `truncated` /
+  `coverage_by_source`; `memory/memory_freshness.py` carries
+  `observed_through` / `complete_through`. None of it is reachable from a reader.
+- **The one coverage claim in the system is inferred, and can be wrong.**
+  `MemoryIngestor.ingest_from_source` sets
+  `complete = len(messages) < message_limit`. A source that truncated
+  *internally* — below the caller's limit — is recorded as
+  `observed_complete`. This is not hypothetical:
+  `RionReaderAdapter.get_recent_messages` runs a bounded sweep capped at
+  `RECENT_CONVERSATION_SCAN_LIMIT = 50` conversations, and that bound never
+  reaches a caller. A 3-message answer to a 200-message request is currently
+  recorded as complete.
+- **A real page signal is discarded.** `RionReaderAdapter` parses the reader's
+  `query` object and drops `has_more` and `next_offset` on the floor. The
+  fixtures in `bridge/tests/test_reader_boundary.py` carry
+  `"query": {"has_more": False, "next_offset": 3}` — the evidence arrives and is
+  thrown away.
+- **Dependency direction is settled.** `memory → message_source`, never the
+  reverse. `memory/tests/test_layering.py::test_the_memory_layer_imports_nothing_new`
+  already lists `message_source` in `ALLOWED_IMPORTS`;
+  `memory/memory_ingest.py` already imports it, with a `sys.path` fallback for
+  the packaged worker.
+- **Isolation is enforced, not intended.**
+  `test_no_product_module_imports_the_candidate_schema_provider` fails if
+  `bridge`, `memory`, `shadow`, `ai`, `core`, `app.py` or `mcp_server.py`
+  imports `wechatdb`.
+- **The production read path is visual capture / OCR.**
+  `selected_source_name()` defaults to `visual`; a default build never
+  constructs a database reader.
 
 ### 1.2 The gap
 
-Three distinct failures follow from having a one-database parser and a
-coverage-free contract:
+Four failures follow, and they are the same failure wearing four hats — *a
+partial read that looks like a complete one*, which the `message_source` module
+docstring already names as the one thing this boundary exists to prevent.
 
-1. **Silent omission by file.** A container whose parts are partly unreadable —
-   a locked file, a file whose schema is not recognised, a file the locator
-   never listed — produces a shorter answer that looks exactly like a complete
-   short answer. Nothing in the current types can express "there were five
-   parts and I read three."
-2. **Silent omission by traversal.** A `limit`-bounded read across several
-   parts must stop somewhere. Stopping is safe only when the parts not visited
-   provably cannot contain a message in the requested window. Nothing today can
-   distinguish a stop that is provable from a stop that is a guess.
-3. **Silent staleness.** A source that records its own "latest message" per
-   session can be compared against the newest message actually read. When the
-   source says there is something newer than what came back, that is a fact the
-   caller must see. Nothing today carries it.
-
-Each of these is the same failure the project already names as the one thing
-this boundary exists to prevent: *a quiet fallback would make a partial read
-look like a complete one* (`bridge/message_source.py` module docstring).
+1. **Omission by length.** Coverage inferred from item count is wrong whenever a
+   source truncates below the caller's limit.
+2. **Omission by part.** A multi-part source with one unreadable part returns a
+   shorter answer indistinguishable from a complete short answer.
+3. **Omission by traversal.** A bounded traversal must stop somewhere. Nothing
+   distinguishes a stop whose remainder is provably irrelevant from a guess.
+4. **Silent staleness.** A source that records its own newest moment can be
+   compared against the newest message actually read. When they disagree, that
+   is a fact the caller must see — and it must degrade *freshness*, never
+   silently alter the data or masquerade as a structural gap.
 
 ### 1.3 Why now
 
-F-037's conclusion is explicit: the open question is no longer whether the
-parser understands a real schema, it is *"whether to promote this candidate
-behind the Reader contract without weakening D-017 or importing acquisition
-capability into the product."* A promotion decision cannot be made against a
-component that cannot state its own coverage. This design supplies what the
-promotion gate would have to be measured against. It does not pass that gate.
+F-037 closed the schema-feasibility question for the tested current `message_0`.
+[[Next Actions]] states the remaining question plainly: *"Should `wechatdb`
+remain an evidence-only candidate, or be promoted into a real provider behind
+the existing Reader contract?"* A component that cannot state its own coverage
+cannot be evaluated against that question. This design supplies what the
+promotion gate would measure. It does not pass that gate, and §12 keeps it shut.
 
 ---
 
-## 2. Non-goals
+## 2. Goals and non-goals
 
-Explicitly out of scope. None of these is deferred work with a hidden plan;
-each is a boundary this design must not cross.
+### 2.1 Goals
 
-1. **No acquisition capability of any kind.** No key derivation, no salt, no
-   `PRAGMA key`, no SQLCipher, no decryption, no process-memory access, no
-   LLDB, no debugger attach, no `task_for_pid`, no code-signature manipulation,
-   no WeChat container discovery, no plaintext cache, no shadow copy, no temp
-   database. D-005 and R-003 are untouched.
-2. **No production routing change.** `selected_source_name()` keeps `visual` as
-   its default. The MCP surface stays **exactly four** tools. Nothing in
-   `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`, or the app imports the
-   provider.
-3. **No FTS implementation and no cache implementation.** §9 states only how a
-   future search or timeline surface would *reuse* the envelope described here.
-   No index, no materialised view, no memoisation, no warm store.
-4. **No replacement of `wechatdb`.** Its scope is fixed by §5.3 and its source
-   is not edited by this design.
-5. **No replacement of Rion.** D-017's external-reader architecture stands. This
-   is a second candidate, not a deletion of the first.
-6. **No adoption of `wx-cli-again`.** See §3, alternative B, and §11.
-7. **No promotion.** No wiring, no default change, no environment variable, no
-   settings toggle, no operator-visible surface.
-8. **No real-data work.** D-030 has lapsed, no access material is retained, and
-   nothing in this design attempts, requires, or justifies obtaining any. Every
-   fixture in §12 is synthetic and built in code.
-9. **No new dependency.** Python standard library only (`sqlite3`,
-   `dataclasses`, `hashlib`, `re`, `typing`), matching what `wechatdb` already
-   uses.
-10. **No cross-source deduplication, promotion, or equivalence.** D-019's rule
-    stands: equivalence is never inferred. This design produces one source's
-    answer about one source.
+1. One owner for the coverage vocabulary, at the boundary where reads happen.
+2. A generic, source-neutral read envelope in which an incomplete answer is
+   structurally unable to present itself as a complete one.
+3. Freshness as a first-class, orthogonal fact with a closed token vocabulary —
+   no boolean, no threshold.
+4. Source-authored coverage from **every** source, including the two that exist
+   today, so memory composes evidence instead of inventing it.
+5. A provider-internal design for multi-part discovery, routing and identity
+   that leaks no shard or schema vocabulary into any generic type.
+6. A synthetic test matrix sufficient to gate a future promotion decision.
 
----
+### 2.2 Non-goals
 
-## 3. Alternatives and trade-offs
+Each is a boundary this design must not cross, not deferred work with a hidden
+plan.
 
-### Alternative A — keep the current single-database candidate unchanged
-
-Leave `wechatdb` exactly as it is and make no orchestration layer at all.
-
-| | |
-|---|---|
-| **For** | Zero new code. Zero new surface. The isolation boundary is already proven by `test_no_product_module_imports_the_candidate_schema_provider`. Nothing can regress. |
-| **Against** | It cannot answer the promotion question. A single-database parser handed a multi-part container answers about one part and cannot say so. Every one of the three failures in §1.2 remains structurally unexpressible. |
-| **Cost of choosing it** | The promotion decision stays blocked indefinitely, because there is nothing to gate. |
-
-**This is the status quo and it remains in force until the gates in §11 are
-met.** Rejecting A as the permanent end state is not the same as leaving it
-today; today it is exactly what is true.
-
-### Alternative B — adopt `wx-cli-again` wholesale
-
-Take the external project's implementation as the reader.
-
-| | |
-|---|---|
-| **For** | It reportedly already handles multi-file containers, so the routing problem would be someone else's. |
-| **Against** | **(a)** Licence and provenance are unreviewed; the H5A provider and licensing review process exists precisely because this cannot be assumed. **(b)** Such a tool's value is concentrated in acquisition, which non-goal 1 forbids in the shipped dependency graph — adopting it wholesale imports exactly the capability D-005 excludes. **(c)** It would put WeChat schema knowledge somewhere product core depends on, which is what D-017 forbids. **(d)** R-003 already records the rule about not invoking or vendoring a stock `wechat-cli`; adopting a successor wholesale is the same route under a new name. **(e)** It drags an entire foreign runtime into the graph for a capability we need a thin slice of. |
-| **Verdict** | **Rejected.** |
-
-**`wx-cli-again` is a STUDY-only, clean-room behavioural reference.** It may be
-read to understand *what behaviour a correct multi-part reader exhibits* —
-that a container is partitioned, that a conversation spans partitions, that a
-session table carries its own latest-message timestamp. It supplies
-**questions**, not answers. **No code, no SQL text, no query shape copied
-verbatim, no test fixture, no fixture data, no comment, and no identifier
-naming scheme may be copied from it into this repository.** Everything in §6–§8
-is expressed in this project's own vocabulary and derived from this project's
-own `wechatdb` and `memory/` conventions. This mirrors how F-036's schema
-knowledge was handled: public schema references were read as a source of schema
-*facts*, and **no code was copied**.
-
-### Alternative C — clean-room provider orchestration around our `wechatdb` — **RECOMMENDED**
-
-Add one new isolated package that owns discovery, routing, identity and
-coverage assembly, uses the existing `wechatdb` parser unchanged for the
-per-table work, and emits a generic result envelope.
-
-| | |
-|---|---|
-| **For** | **(a)** D-017 is satisfied by construction: all shard and schema vocabulary stays inside the provider package, and the generic envelope is source-neutral. **(b)** `wechatdb` keeps its single, provable responsibility. **(c)** No acquisition capability is introduced — the provider is *handed* its inputs by an injected locator and never searches a filesystem. **(d)** Coverage honesty becomes a **type invariant**, not a convention: a `ReaderCoverage` claiming completeness while holding a downgrade reason cannot be constructed. **(e)** The whole thing is testable without any real data, which is the only kind of testing currently available. **(f)** It produces exactly the artefact the promotion gate needs. |
-| **Against** | New code that is not wired, and therefore carries a maintenance cost with no immediate product benefit. Some routing behaviour depends on a structural assumption about the container that only one real database has ever been examined against (§5.5). |
-| **Mitigation for the second point** | The design is built so that the assumption being *false* degrades coverage rather than corrupting an answer: a part whose time bounds cannot be established is always visited and never permits an early stop. Correctness does not depend on the assumption; only efficiency does. |
-
-**Recommendation: C.**
+1. **No acquisition capability.** No key, salt, passphrase, cipher parameter,
+   `PRAGMA key`, SQLCipher, decryption, process-memory read, LLDB or debugger
+   attach, `task_for_pid`, code-signature operation, container discovery,
+   plaintext cache, shadow copy, or temporary database. D-005 and R-003 are
+   untouched.
+2. **No production wiring in this phase.** `selected_source_name()` keeps
+   `visual`. The MCP surface stays exactly four tools; the memory surface stays
+   exactly five. Nothing in product core imports a provider.
+3. **No standing database input.** D-030 lapsed; this design neither requires
+   nor justifies obtaining access material. Every fixture is synthetic.
+4. **No replacement of `wechatdb`.** Its source is not edited by this design.
+5. **No replacement of Rion.** D-017's external-reader architecture stands.
+6. **No adoption of `wx-cli-again`.** STUDY only — §14.
+7. **No FTS, cache, or search optimisation.** Deferred entirely; §7.6 states
+   only the constraint any future one must satisfy.
+8. **No cross-source deduplication, promotion or equivalence.** D-019 stands:
+   equivalence is never inferred.
+9. **No new dependency.** Standard library only.
 
 ---
 
-## 4. Architecture
-
-### 4.1 Dependency direction — the load-bearing rule
+## 3. Architecture
 
 ```
-  product core                generic contract              isolated provider
- ┌──────────────┐            ┌──────────────────┐          ┌──────────────────┐
- │ bridge/      │            │ bridge/          │          │ wechatprovider/  │
- │   MCP tools  │──imports──▶│   message_source │◀─imports─│   discovery      │
- │ memory/      │            │                  │          │   routing        │
- │ shadow/      │            │  MessageSource   │          │   identity       │
- │ ai/  core/   │            │  NormalizedMsg   │          │   coverage       │
- │ app          │            │  ReaderResult    │          │   provider       │
- └──────────────┘            │  ReaderCoverage  │          └────────┬─────────┘
-        ▲                    │  CoverageAware-  │                   │ imports
-        │                    │        Reader    │                   ▼
-        └── NEVER imports ───┴──────────────────┘          ┌──────────────────┐
-            wechatprovider or wechatdb                     │ wechatdb/        │
-                                                           │   parser (as-is) │
-                                                           └──────────────────┘
+  product core                   generic boundary                isolated provider
+ ┌────────────────┐         ┌───────────────────────┐        ┌────────────────────┐
+ │ bridge/  MCP   │         │ bridge/message_source │        │ wechatprovider/    │
+ │ memory/        │──uses──▶│                       │◀─uses──│   ShardDiscovery   │
+ │ shadow/ ai/    │         │  MessageSource        │        │   ShardRouter      │
+ │ core/   app    │         │  Normalized{Msg,Conv} │        │   IdentityResolver │
+ └────────────────┘         │  SourceStatus         │        │   ProviderResult   │
+         ▲                  │  MessageSourceError   │        └─────────┬──────────┘
+         │                  │  COVERAGE_* (owner)   │                  │ uses
+         │                  │  ReadWindow           │                  ▼
+         │                  │  ReadFreshness        │        ┌────────────────────┐
+         │                  │  ReadCoverage         │        │ wechatdb/ parser   │
+         │                  │  ReadResult[T]        │        │   (UNCHANGED)      │
+         │                  └───────────────────────┘        └────────────────────┘
+         │                              ▲
+         │                              │ imports COVERAGE_* and the read types
+         │                  ┌───────────┴───────────┐
+         └── NEVER imports  │ memory/memory_store   │
+             wechatdb or    │ memory/memory_ingest  │
+             wechatprovider │ memory/memory_query   │
+                            └───────────────────────┘
+
+  existing sources, both of which will author their own coverage:
+      bridge/store_access.StoreMessageSource        (visual — production path)
+      bridge/rion_reader_adapter.RionReaderAdapter  (external reader)
 ```
 
-Three arrows, and the absent one is the point:
+Four rules, and the absent arrow is the point:
 
-- **Provider → generic** is allowed and required. The provider must construct
-  `NormalizedMessage` and `ReaderResult`.
-- **Provider → `wechatdb`** is allowed and required.
-- **Generic → provider** and **product core → provider** are **forbidden**,
-  enforced by test, not by intention (§11, G2).
+- **Provider → generic** is required: the provider constructs the read types.
+- **Provider → `wechatdb`** is required and is the only consumer of the parser.
+- **memory → generic** is required and already exists.
+- **Generic → provider**, **generic → memory**, and **product core → provider**
+  are forbidden, enforced by test (§10, T-11) rather than by intention.
 
-`wechatprovider` uses the repository's established flat cross-tree import style,
-identical to `memory/memory_sync.py`'s `from message_source import ...`: it
-requires `bridge/` on `sys.path`, supplied by the caller. No new import
-mechanism is introduced.
-
-### 4.2 New package layout
-
-```
-wechatprovider/
-  __init__.py          exports; the package docstring states the boundary
-  shards.py            ShardEntry, ShardDescriptor, ShardInventory,
-                       ShardTimeBounds, ShardLocator, ShardOpener,
-                       ExplicitPathLocator, ReadOnlySqliteOpener, ShardError
-  discovery.py         ShardDiscovery
-  routing.py           ShardRouter, RoutingStep, RoutingExclusion,
-                       RoutingPlan, TraversalOutcome
-  identity.py          IdentityResolver, ResolvedIdentity
-  coverage.py          assemble_coverage  (provider → generic projection)
-  provider.py          WeChatDatabaseProvider
-  pytest.ini           testpaths = tests   (matching wechatdb/)
-  tests/
-    __init__.py
-    fixtures.py        synthetic multi-part containers, built in code
-    test_discovery.py
-    test_routing.py
-    test_identity.py
-    test_coverage.py
-    test_provider.py
-    test_isolation.py
-```
-
-### 4.3 Generic additions
-
-`bridge/message_source.py` gains the reader result envelope (§7). It gains
-**nothing else**, and its existing guard
-`test_the_protocol_depends_on_no_reader_technology` — which restricts its
-imports to `{__future__, dataclasses, typing}` and forbids the identifiers
-`rion`, `subprocess`, `sqlcipher`, `wechat`, `json`, `argv`, `zstd`, `sqlite` —
-**must keep passing unmodified**. That test is the interface-leakage guard and
-is not to be relaxed.
-
-`MessageSource` itself is **not changed**. Adding coverage to its four methods
-would change a published wire shape and a contract three live callers depend
-on. The new `CoverageAwareReader` Protocol sits beside it.
+`wechatprovider/` would use the repository's established flat cross-tree import
+style — `from message_source import ...` with `bridge/` supplied on `sys.path`
+by the caller, identical to `memory/memory_ingest.py`. No new import mechanism.
 
 ---
 
-## 5. Data flow
+## 4. Data flow
 
-### 5.1 `read_recent(window, limit)`
+### 4.1 A windowed read through a multi-part provider
 
 ```
-1. locator.entries()
-      → tuple[ShardEntry]              opaque name + opaque handle; no path in
-                                       any provider-owned vocabulary
+1. ShardLocator.entries()          injected; lists exactly what it was given
+                                   no glob, no walk, no default root
 
-2. ShardDiscovery.catalogue()
-      → ShardInventory                 every entry classified KNOWN or UNKNOWN
-                                       by name shape alone. Nothing is opened.
-                                       Nothing is dropped.
+2. ShardDiscovery.catalogue()      classify by name shape alone; open nothing
+   → ShardInventory                every entry becomes exactly one descriptor
+                                   nothing is ever dropped
 
-3. ShardDiscovery.probe(inventory)
-      → ShardInventory                 each KNOWN message part is opened
-                                       read-only and schema-checked:
-                                         opens + recognised → READABLE + bounds
-                                         otherwise          → UNAVAILABLE + token
-                                       key set is identical to step 2's.
+3. ShardDiscovery.probe()          open read-only; recognise schema; take
+   → ShardInventory                time bounds and conversation digests
+                                   key set is identical to step 2's
 
-4. ShardRouter.plan(inventory, window=..., limit=...)
-      → RoutingPlan                    every inventory key appears exactly once
-                                       in steps ∪ excluded, each with a reason.
+4. ShardRouter.plan(window, limit) every key lands in steps ∪ excluded,
+   → RoutingPlan                   exactly once, each with a reason token
 
-5. for step in plan.steps:                         (newest-first by max bound)
-       connection = opener.open(entry)
-       session_names, display_names = resolver.mappings(descriptor)
-       for table in wechatdb.conversation_tables(connection):
-           records = wechatdb.parse_conversation(
-               connection, table,
-               name2id=…, session_names=…, display_names=…)
-           collect records inside `window`
-       if collected > limit: break        # one over the limit — see below
-   outcome = router.classify_stop(plan, visited=…, collected=…, …)
-   truncated = collected > limit
-   records = records[:limit]
+5. traversal                       per planned part, per table:
+                                     wechatdb.parse_conversation(...)
+                                   collect limit + 1 matching records
+   → ProviderReadOutcome           so "there is more" is measured, not inferred
 
-   # `limit + 1` records are collected so that "there is more" is *measured*
-   # rather than inferred from a full page. This is the same technique
-   # `memory_retrieval.MemoryRetriever.search` already uses, for the same
-   # reason: a traversal that returns exactly `limit` records and assumes
-   # truncation reports a gap that may not exist, and one that assumes
-   # completeness hides a gap that does.
+6. ShardRouter.classify_stop()     exhausted | safe | unsafe
+   → TraversalOutcome
 
-6. records → NormalizedMessage         provider-internal projection (§6.6)
+7. IdentityResolver.mappings()     (session_names, display_names) — the exact
+                                   pair wechatdb.parse_conversation accepts
 
-7. assemble_coverage(inventory, plan, outcome, window, truncated,
-                     latest_read_at, source_latest_at)
-      → ReaderCoverage
+8. ProviderResult → ReadResult     the single translation point; all shard and
+   assemble ReadCoverage           schema vocabulary stops here
+   assemble ReadFreshness
 
-8. ReaderResult(messages=…, coverage=…, source=SOURCE_DATABASE,
-                identity_resolution=resolver.state)
+9. ReadResult[NormalizedMessage]   items + coverage. Nothing else.
 ```
 
-### 5.2 `read_conversation(conversation_id, window, limit)`
+### 4.2 The same shape for a source that is not composite
 
-Identical, with two differences: step 4 additionally excludes any part that does
-not contain the conversation's table (reason `conversation_absent`), and step 5
-parses only that one table per part. The union across parts is what makes
-routing necessary: the same conversation table name may exist in more than one
-part of the container.
+A non-composite source skips steps 1–7 entirely and assembles a `ReadCoverage`
+from what it does know. `StoreMessageSource` knows whether it filled the
+caller's limit and knows `MAX(first_observed_at)` over the requested scope from
+one indexed query. `RionReaderAdapter` knows the reader's own `has_more`, and
+knows whether its internal conversation sweep hit
+`RECENT_CONVERSATION_SCAN_LIMIT`. Both are enough to author honest coverage;
+neither requires the shard machinery.
 
-### 5.3 `wechatdb`'s scope, restated and unchanged
+### 4.3 What no source ever does
 
-`wechatdb` remains: **one open connection, one table → provider records.** It
-gains no knowledge of parts, of other files, of routing, of coverage, or of
-windows. The provider calls the functions it already exports —
-`conversation_tables`, `load_name2id`, `parse_conversation`,
-`normalise_timestamp`, `MessageRecord`, `MessageSchemaError` — and injects the
-`session_names` and `display_names` mappings that `parse_conversation` already
-accepts. **The `IdentityResolver` exists to produce exactly those two mappings**,
-which is why identity resolution requires no change to the parser at all.
-
-`parse_database` (whole-connection) stays exported and stays tested; the
-provider does not use it, because it needs per-table control for routing.
-
-### 5.4 What the provider never does
-
-It never writes. It never creates a file. It never checkpoints or truncates a
-WAL. It never copies a database. It never opens anything the locator did not
-hand it. It never constructs a path. It never takes a path from a client
-request.
-
-### 5.5 The one structural assumption, and why correctness does not rest on it
-
-**Assumption (graded Hypothesis).** A multi-part WeChat container is roughly
-time-partitioned: newer parts hold newer messages, so a newest-first traversal
-can stop early once the remaining parts are provably older than the window.
-
-**Evidence.** None from this project. E-022 opened one part and characterised
-its interior; it established nothing about how parts relate to each other.
-Treat any statement to the contrary as unsupported.
-
-**Why the design is safe anyway.** Early stop is gated on *measured* bounds, not
-on the assumption. A part whose `bounds_source` is `absent` can never be
-excluded and can never be skipped past — it is always visited. If the
-assumption is false in some container, the router simply never finds a safe
-stop, visits everything, and the answer is still complete. The assumption buys
-efficiency, never correctness.
+Falls back to another source; substitutes a different answer for the one asked;
+writes, creates, checkpoints, truncates or copies anything; constructs a path;
+takes a path from a client request; or puts coverage inside a message.
 
 ---
 
-## 6. Provider-internal interfaces (`wechatprovider/`)
+## 5. The generic boundary — exact type shapes
 
-Everything in this section is **provider vocabulary** and must never appear in a
-generic module.
+Everything in this section lands in `bridge/message_source.py`. It stays
+stdlib-only: `TypeVar` and `Generic` come from `typing`, which the existing
+guard already permits, so
+`test_the_protocol_depends_on_no_reader_technology` keeps passing **unmodified**.
+No identifier here contains a forbidden substring, and no value names a vendor,
+a schema, a transport, a path or a file.
 
-### 6.1 Parts — `wechatprovider/shards.py`
+### 5.1 Coverage tokens — moved, not duplicated
 
-```python
-# --- status: the four states a part can be in --------------------------------
-
-SHARD_KNOWN: str = "known"              # catalogued by name; not opened
-SHARD_READABLE: str = "readable"        # opened, schema recognised, bounds taken
-SHARD_UNKNOWN: str = "unknown"          # listed, but cannot be characterised
-SHARD_UNAVAILABLE: str = "unavailable"  # recognised, but cannot be read
-
-SHARD_STATUSES: frozenset[str] = frozenset({
-    SHARD_KNOWN, SHARD_READABLE, SHARD_UNKNOWN, SHARD_UNAVAILABLE,
-})
-
-# --- role --------------------------------------------------------------------
-
-SHARD_ROLE_MESSAGE: str = "message"          # holds Msg_<32hex> tables
-SHARD_ROLE_IDENTITY: str = "identity"        # holds contact / session / room data
-SHARD_ROLE_UNRECOGNISED: str = "unrecognised"
-
-# --- how a part's time bounds were established -------------------------------
-
-BOUNDS_SCANNED: str = "scanned"    # MIN/MAX(create_time) over its own tables
-BOUNDS_DECLARED: str = "declared"  # a metadata table in the part declared them
-BOUNDS_ABSENT: str = "absent"      # not establishable; forces full traversal
-
-
-class ShardError(Exception):
-    """A part could not be characterised or read.
-
-    ``state`` is a fixed lowercase token from :data:`SHARD_ERROR_STATES`.
-    ``detail`` is a fixed sentence. Neither ever carries a path, a filename, a
-    sender, message text, SQL, or output captured from anything else.
-    """
-
-    def __init__(self, state: str, detail: str) -> None: ...
-    state: str
-    detail: str
-
-
-SHARD_ERROR_STATES: frozenset[str] = frozenset({
-    "shard_absent",                # the handle no longer resolves
-    "shard_open_refused",          # the opener could not open it read-only
-    "shard_schema_unrecognised",   # opened, but not a shape this provider reads
-    "shard_read_refused",          # opened and recognised, but a read failed
-    "locator_unavailable",         # the locator itself cannot list
-})
-
-
-@dataclass(frozen=True)
-class ShardEntry:
-    """One thing the locator listed. ``handle`` is opaque to everything but the
-    opener, which is what keeps filesystem vocabulary out of this package."""
-
-    name: str
-    handle: object
-
-
-@dataclass(frozen=True)
-class ShardTimeBounds:
-    """When the messages in one part were created, in Unix **seconds**.
-
-    Every value passes through :func:`wechatdb.normalise_timestamp` before it
-    lands here. A part mixing second- and millisecond-valued creation times
-    would otherwise report a maximum in the year 5138 and dominate every
-    routing decision.
-    """
-
-    min_timestamp: int | None
-    max_timestamp: int | None
-    row_count: int | None
-    bounds_source: str
-
-    @property
-    def is_established(self) -> bool:
-        """True only when both ends are known and were not guessed."""
-
-    def overlaps(self, start: float | None, end: float | None) -> bool:
-        """Whether this part can contain a message in ``[start, end]``.
-
-        Returns ``True`` whenever the bounds are not established: an unknown
-        part may contain anything, and saying otherwise is the omission this
-        design exists to prevent.
-        """
-
-    def strictly_older_than(self, moment: float) -> bool:
-        """``max_timestamp < moment`` and the bounds are established.
-
-        ``False`` for unestablished bounds, so an unknown part never satisfies
-        an early-stop condition.
-        """
-
-
-@dataclass(frozen=True)
-class ShardDescriptor:
-    """One part of a source, and everything known about it.
-
-    ``key`` is a stable opaque identifier derived from the entry name
-    (blake2b, 48 bits, hex). It is **not** a path and **not** a filename: it is
-    safe to log, safe to return, and stable across runs.
-    """
-
-    key: str
-    role: str
-    status: str
-    ordinal: int | None          # the part's own sequence number, when declared
-    bounds: ShardTimeBounds | None
-    reason: str | None           # a SHARD_ERROR_STATES token when not readable
-    #: Which conversations this part holds, as the table digests
-    #: ``wechatdb.conversation_tables`` already yields. Captured during the
-    #: probe that opened the part, so conversation routing needs no second
-    #: open and no callback. ``None`` for any part that is not READABLE.
-    #: Held in memory only; never emitted, logged or returned.
-    conversation_digests: frozenset[str] | None
-
-    def __post_init__(self) -> None:
-        """Rejects: an unrecognised status or role; ``READABLE`` with a reason;
-        ``UNKNOWN``/``UNAVAILABLE`` without one; bounds or conversation digests
-        on a non-readable part."""
-
-
-@dataclass(frozen=True)
-class ShardInventory:
-    """Every part the locator listed. Nothing is ever dropped from here."""
-
-    shards: tuple[ShardDescriptor, ...]
-
-    def __post_init__(self) -> None:
-        """Rejects duplicate keys. Duplicate keys would silently collapse two
-        parts into one, which is omission by another name."""
-
-    def by_status(self, status: str) -> tuple[ShardDescriptor, ...]: ...
-    def by_role(self, role: str) -> tuple[ShardDescriptor, ...]: ...
-    def get(self, key: str) -> ShardDescriptor | None: ...
-
-    @property
-    def keys(self) -> frozenset[str]: ...
-
-    def census(self, *, role: str = SHARD_ROLE_MESSAGE) -> ReaderSegmentCensus:
-        """The generic projection consumed by coverage assembly. Counts only.
-
-        Counts parts whose role is ``role`` — **plus every part whose role is**
-        ``SHARD_ROLE_UNRECOGNISED``, which always counts toward ``unknown``,
-        for every role. This is the whole point of the ``UNKNOWN`` state: if
-        nobody can say what an entry is, nobody can say it is not a message
-        part, and filtering it out by role would make it invisible to message
-        coverage — silent omission produced by a filter.
-
-        A part that *is* characterised, and belongs to a different role, is
-        correctly excluded: an unreadable identity part does not make messages
-        unobserved (§13 Q3).
-        """
-
-
-@runtime_checkable
-class ShardLocator(Protocol):
-    """Supplies the parts. Injected, never discovered.
-
-    There is no default implementation that searches anything. The shipped
-    implementation is :class:`ExplicitPathLocator`, which lists exactly the
-    entries it was constructed with.
-    """
-
-    def entries(self) -> tuple[ShardEntry, ...]: ...
-
-
-@runtime_checkable
-class ShardOpener(Protocol):
-    """Turns one entry into a read-only connection, or raises ShardError."""
-
-    def open(self, entry: ShardEntry) -> sqlite3.Connection: ...
-
-
-@dataclass(frozen=True)
-class ExplicitPathLocator:
-    """Lists exactly what it was given. No glob, no walk, no default root."""
-
-    paths: tuple[str, ...]
-
-    def entries(self) -> tuple[ShardEntry, ...]: ...
-
-
-class ReadOnlySqliteOpener:
-    """Opens ``file:<path>?mode=ro`` and nothing else.
-
-    ``immutable=1`` is **forbidden here and asserted against by test**. It would
-    make SQLite ignore the write-ahead log, silently dropping every
-    not-yet-checkpointed message — a silent omission produced by an
-    optimisation flag. When the log cannot be read, the correct outcome is
-    ``shard_open_refused`` and an ``UNAVAILABLE`` part, which downgrades
-    coverage where a caller can see it.
-    """
-
-    def open(self, entry: ShardEntry) -> sqlite3.Connection: ...
-```
-
-### 6.2 `ShardDiscovery` — `wechatprovider/discovery.py`
+The four tokens move to `bridge/message_source.py`, which becomes their **single
+owner**. `memory/memory_store.py` imports them from there and re-exports them
+through its existing `__all__`, so every current caller — `memory_ingest`,
+`memory_retrieval`, `memory_query`, the tests — keeps working with no edit.
 
 ```python
-class ShardDiscovery:
-    """Finds the parts of a source and says what it could and could not learn.
-
-    Two passes, deliberately separate, because they cost different amounts.
-    ``catalogue`` reads names. ``probe`` opens files. Readiness reporting uses
-    the first; reading uses both. Neither ever drops an entry.
-    """
-
-    def __init__(self, locator: ShardLocator, opener: ShardOpener) -> None: ...
-
-    def catalogue(self) -> ShardInventory:
-        """Name-shape classification only. Opens nothing.
-
-        Every entry becomes exactly one descriptor:
-
-        * name matches this provider's message-part shape  → ``KNOWN`` /
-          ``SHARD_ROLE_MESSAGE``, with ``ordinal`` taken from the name
-        * name matches this provider's identity-part shape → ``KNOWN`` /
-          ``SHARD_ROLE_IDENTITY``
-        * anything else → ``UNKNOWN`` / ``SHARD_ROLE_UNRECOGNISED``,
-          ``reason='shard_schema_unrecognised'``
-
-        Raises :class:`ShardError` ``locator_unavailable`` only when the
-        locator itself cannot list. An empty listing is an empty inventory,
-        which is an answer, not an error.
-        """
-
-    def probe(
-        self,
-        inventory: ShardInventory,
-        *,
-        roles: tuple[str, ...] = (SHARD_ROLE_MESSAGE,),
-    ) -> ShardInventory:
-        """Opens each ``KNOWN`` part in ``roles`` and re-classifies it.
-
-        * opens, and at least one conversation table satisfies
-          ``wechatdb.MANDATORY_COLUMNS`` (or the part is legitimately empty of
-          conversation tables) → ``READABLE``, with bounds and with the part's
-          conversation digests, both taken in that one open
-        * opens, but no recognised shape → ``UNAVAILABLE``,
-          ``shard_schema_unrecognised``
-        * will not open → ``UNAVAILABLE``, ``shard_open_refused``
-        * handle does not resolve → ``UNAVAILABLE``, ``shard_absent``
-        * ``wechatdb.MessageSchemaError`` while establishing bounds →
-          ``UNAVAILABLE``, ``shard_read_refused``
-
-        A part outside ``roles`` is returned untouched, still ``KNOWN``.
-
-        **Invariant, asserted:** the returned inventory's ``keys`` equal the
-        input's. Probing may change what is known about a part; it may never
-        change how many parts there are.
-        """
-
-    def bounds(self, connection: sqlite3.Connection) -> ShardTimeBounds:
-        """``MIN``/``MAX`` creation time across the part's conversation tables,
-        normalised to seconds. ``BOUNDS_ABSENT`` when the part has no
-        conversation table, or when any table refuses the read."""
-```
-
-### 6.3 `ShardRouter` — `wechatprovider/routing.py`
-
-```python
-# --- why a part is in the plan ----------------------------------------------
-
-ROUTE_WINDOW_OVERLAP: str = "window_overlap"
-ROUTE_BOUNDS_UNESTABLISHED: str = "bounds_unestablished"
-ROUTE_CONVERSATION_PRESENT: str = "conversation_present"
-
-# --- why a part is not ------------------------------------------------------
-
-EXCLUDE_WINDOW_DISJOINT: str = "window_disjoint"
-EXCLUDE_NOT_READABLE: str = "not_readable"
-EXCLUDE_ROLE_MISMATCH: str = "role_mismatch"
-EXCLUDE_CONVERSATION_ABSENT: str = "conversation_absent"
-
-# --- how a traversal ended --------------------------------------------------
-
-STOP_EXHAUSTED: str = "exhausted"   # every planned part was visited
-STOP_SAFE: str = "safe"             # stopped; the remainder provably cannot match
-STOP_UNSAFE: str = "unsafe"         # stopped; the remainder is not accounted for
-
-
-@dataclass(frozen=True)
-class RoutingStep:
-    shard_key: str
-    order: int          # 0 first; newest-first by established max bound
-    reason: str
-
-
-@dataclass(frozen=True)
-class RoutingExclusion:
-    shard_key: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class RoutingPlan:
-    steps: tuple[RoutingStep, ...]
-    excluded: tuple[RoutingExclusion, ...]
-    window: ReaderWindow
-    limit: int
-
-    def __post_init__(self) -> None:
-        """Rejects a plan in which any key appears twice, or in both lists."""
-
-    @property
-    def accounted_keys(self) -> frozenset[str]: ...
-
-
-@dataclass(frozen=True)
-class TraversalOutcome:
-    visited: tuple[str, ...]
-    unvisited: tuple[str, ...]
-    early_stop: str
-    stop_reasons: tuple[str, ...]   # ShardDescriptor keys' reasons, deduplicated
-
-
-class ShardRouter:
-    """Decides which parts a windowed query must touch, and in what order.
-
-    Ordering is newest-first by established ``max_timestamp``. A part whose
-    bounds are not established sorts **first**, before every part with bounds:
-    it must be visited, and visiting it first means a later early stop is
-    evaluated against a remainder that is entirely bounded.
-    """
-
-    def plan(
-        self,
-        inventory: ShardInventory,
-        *,
-        window: ReaderWindow,
-        limit: int,
-        conversation_digest: str | None = None,
-    ) -> RoutingPlan:
-        """Every part accounted for, exactly once, with a reason.
-
-        Included when all hold:
-
-        1. ``status is SHARD_READABLE`` — anything else is excluded as
-           ``not_readable`` and is separately reflected in coverage;
-        2. ``role is SHARD_ROLE_MESSAGE`` — else ``role_mismatch``;
-        3. ``bounds.overlaps(window.start, window.end)`` — unestablished bounds
-           always overlap, so such a part is always included with reason
-           ``bounds_unestablished``;
-        4. when ``conversation_digest`` is given, it is in the part's
-           ``conversation_digests`` — else ``conversation_absent``. The router
-           opens nothing: the digests were captured by the probe that already
-           opened the part.
-
-        **Invariant, asserted:** ``plan.accounted_keys == inventory.keys``.
-        This is the structural form of "no silent omission": a part cannot
-        leave the inventory without a recorded reason.
-        """
-
-    def classify_stop(
-        self,
-        plan: RoutingPlan,
-        *,
-        visited: tuple[str, ...],
-        inventory: ShardInventory,
-        oldest_collected_at: float | None,
-        collected: int,
-    ) -> TraversalOutcome:
-        """Whether stopping here leaves the answer explainable.
-
-        ``STOP_EXHAUSTED`` when every planned part was visited. Otherwise the
-        stop is ``STOP_SAFE`` only when **every** unvisited planned part
-        satisfies ``bounds.strictly_older_than(boundary)``, where ``boundary``
-        is ``oldest_collected_at`` if ``collected`` is non-zero and
-        ``window.start`` otherwise. Any other stop is ``STOP_UNSAFE``.
-
-        Because ``strictly_older_than`` is ``False`` for unestablished bounds,
-        a part with unknown bounds can never be stepped over.
-
-        A traversal only ends early because ``limit + 1`` records were
-        collected — the router already excluded window-disjoint parts when it
-        planned — so a stop is always accompanied by truncation. Safety and
-        truncation nonetheless stay separate facts: truncation says the
-        *returned* set was cut short, and safety says whether the *unvisited*
-        remainder is accounted for. Only the second decides whether
-        ``observed_through`` can be stated (§8.2 step 6): an unvisited part
-        with unestablished bounds might hold something newer than anything
-        collected, so after an unsafe stop the read cannot claim how far
-        forward it looked.
-
-        ``UNKNOWN`` and ``UNAVAILABLE`` parts do **not** make a stop unsafe:
-        they were never visitable, so the traversal did not skip them. They are
-        accounted for separately, and always, by coverage assembly (§8). The
-        two mechanisms are kept apart so that neither can mask the other.
-        """
-```
-
-### 6.4 `IdentityResolver` — `wechatprovider/identity.py`
-
-```python
-IDENTITY_SCOPE_SESSION: str = "session"
-IDENTITY_SCOPE_GROUP_MEMBER: str = "group_member"
-IDENTITY_SCOPE_SELF: str = "self"
-IDENTITY_SCOPE_UNKNOWN: str = "unknown"
-
-NAME_SOURCE_REMARK: str = "contact_remark"
-NAME_SOURCE_CHATROOM_NICKNAME: str = "chatroom_member_nickname"
-NAME_SOURCE_NICKNAME: str = "contact_nickname"
-NAME_SOURCE_UNRESOLVED: str = "unresolved"
-
-
-@dataclass(frozen=True)
-class ResolvedIdentity:
-    """One identifier, and the best name this provider can honestly give it."""
-
-    identifier: str
-    display_name: str | None
-    name_source: str
-    scope: str
-
-    def __post_init__(self) -> None:
-        """Rejects a ``display_name`` paired with ``NAME_SOURCE_UNRESOLVED``,
-        and an absent name paired with any other source. The two always agree."""
-
-
-class IdentityResolver:
-    """Contact, session and group-member names, from the source's own tables.
-
-    Resolution is a lookup, never an inference. There is no fuzzy match, no
-    edit distance, no tokenisation, no model, and no heuristic — the same rule
-    D-022 already fixed for conversation discovery, applied one layer down.
-
-    **Precedence, deterministic:** a per-room member nickname beats a contact
-    remark beats a contact nickname. Precedence is a fixed order over distinct
-    *kinds* of name, so it is never a choice between two equally good answers.
-
-    **Ambiguity is refused, never resolved.** When one identifier yields two
-    different names from the *same* kind of source, the answer is
-    ``display_name=None`` / ``NAME_SOURCE_UNRESOLVED``, and ``state`` degrades
-    to ``IDENTITY_RESOLVED_PARTIAL``. Picking one would be inventing a fact.
-
-    Identity resolution failure is **not** a coverage failure. A missing name
-    does not make a message unobserved, and this class never touches coverage.
-    Its ``state`` travels on its own field of the result envelope.
-    """
-
-    def __init__(self, inventory: ShardInventory, opener: ShardOpener) -> None: ...
-
-    @property
-    def state(self) -> str:
-        """``IDENTITY_RESOLVED_COMPLETE`` when every identity part in the
-        inventory was readable and no ambiguity was hit;
-        ``IDENTITY_RESOLVED_PARTIAL`` when some names were refused as
-        ambiguous, or some identity part was unreadable while another was
-        readable; ``IDENTITY_SOURCE_UNAVAILABLE`` when no identity part was
-        readable, **including when the locator listed none at all**."""
-
-    def session_names(self) -> dict[str, str]:
-        """``md5(username) -> username``, the mapping
-        :func:`wechatdb.parse_conversation` already accepts as ``session_names``.
-
-        The digest is computed with ``hashlib.md5(..., usedforsecurity=False)``
-        and is used purely as a lookup index into table names. Empty when no
-        identity part was readable — in which case the parser's own documented
-        fallback applies and a conversation identifies itself by digest rather
-        than by an invented name.
-        """
-
-    def display_names(
-        self, *, session_identifier: str | None = None
-    ) -> dict[str, str]:
-        """``sender identifier -> display name``, the mapping
-        :func:`wechatdb.parse_conversation` already accepts as ``display_names``.
-
-        Scoped to one session when ``session_identifier`` is given, so a
-        per-room nickname applies only in that room. Identifiers that resolve
-        ambiguously are **absent from the mapping**, which makes the parser's
-        existing ``sender_name`` fallback to ``sender_id`` the correct outcome
-        with no parser change.
-        """
-
-    def resolve(
-        self, identifier: str, *, session_identifier: str | None = None
-    ) -> ResolvedIdentity:
-        """One identifier, for callers that want the provenance of the name."""
-
-    def mappings(
-        self, descriptor: ShardDescriptor
-    ) -> tuple[dict[str, str], dict[str, str]]:
-        """``(session_names, display_names)`` for one message part, in the
-        exact shape the parser takes. This is the whole integration surface
-        between identity resolution and ``wechatdb``."""
-```
-
-### 6.5 `WeChatDatabaseProvider` — `wechatprovider/provider.py`
-
-```python
-class WeChatDatabaseProvider:
-    """Orchestrates discovery, routing, parsing and identity into one envelope.
-
-    The only class in this package that constructs a generic type, and
-    therefore the only place the provider's vocabulary is translated away.
-
-    Implements :class:`CoverageAwareReader`. It deliberately does **not**
-    implement :class:`MessageSource`: that Protocol's list-returning methods
-    cannot express a partial answer, and satisfying it would mean either
-    dropping coverage or raising on every imperfect read. Which contract the
-    bridge consumes is the promotion decision (§11), not this design.
-    """
-
-    name: str = SOURCE_DATABASE
-
-    def __init__(
-        self,
-        *,
-        discovery: ShardDiscovery,
-        router: ShardRouter,
-        opener: ShardOpener,
-        resolver_factory: Callable[[ShardInventory], IdentityResolver],
-    ) -> None: ...
-
-    def status(self) -> SourceStatus:
-        """Readiness from ``catalogue()`` alone. Opens nothing, counts nothing.
-
-        ``conversation_count`` and ``message_count`` stay ``None``: counting
-        would mean a scan, and the existing contract says an unknown count is
-        reported as unknown rather than estimated.
-
-        States: ``ready`` (at least one known message part, no unrecognised
-        entry); ``ready_with_unrecognised_segments`` (ready, but the listing
-        held entries this provider cannot characterise — reported rather than
-        hidden, and ``ready`` is still ``True``); ``source_unconfigured`` (the
-        locator listed nothing); ``source_unrecognised`` (entries exist, none
-        is a known part). Never raises.
-        """
-
-    def list_conversations(self, limit: int) -> list[NormalizedConversation]:
-        """Conversations across every readable message part, deduplicated by
-        table digest, ``last_seen_at`` being the newest across parts.
-
-        ``first_seen_at`` is ``None``, per the existing contract: a database
-        read does not know when this Mac first saw a chat.
-        """
-
-    def read_conversation(
-        self, conversation_id: int, *, window: ReaderWindow, limit: int
-    ) -> ReaderResult:
-        """One conversation across every part that holds it.
-
-        Raises :class:`MessageSourceError` ``conversation_unknown`` for an id
-        this provider has never listed — matching the existing adapter's rule
-        that an unknown conversation is refused, never fabricated.
-        """
-
-    def read_recent(self, *, window: ReaderWindow, limit: int) -> ReaderResult:
-        """Every conversation, newest first, within the window.
-
-        Both read methods collect up to ``limit + 1`` matching records and
-        return the first ``limit``, so ``ReaderCoverage.truncated`` is measured
-        rather than inferred from a full page (§5.1).
-        """
-```
-
-### 6.6 Record → message projection
-
-Provider-internal, in `provider.py`. `MessageRecord` → `NormalizedMessage`:
-
-| `NormalizedMessage` field | Value | Why |
-|---|---|---|
-| `id` | `conversation_identifier(session_id) ^ local_id`, masked to 48 bits | stable, positive, JSON-safe |
-| `conversation_id` | `conversation_identifier(session_id)` | blake2b-48 of the session identifier |
-| `sequence` | `record.local_id` | the source's own ordering within a conversation |
-| `sender` | `record.sender_name` | already falls back to `sender_id`; `None` when neither resolves |
-| `ownership` | `"own"` when the sender equals the resolved self identity, else `"other"` | when self identity is unresolved, **every** message is `"other"` and `identity_resolution` is not `COMPLETE` — never guessed |
-| `visible_time` | `None` | a database read never saw a rendered time; inventing one would claim the user saw something |
-| `text` | `record.content` | `None` for a purely binary payload, per the parser's documented rule |
-| `kind` | `record.message_type` | the parser's kind vocabulary is already the bridge's |
-| `confidence` | `1.0` | a decoded row is exact; there is no estimator on this path |
-| `first_observed_at` | `float(record.timestamp)` | the contract already documents that a database source supplies the message's own creation time here |
-| `source` | `SOURCE_DATABASE` | carried in the record, omitted from `payload()` |
-
-`conversation_identifier` is defined in `wechatprovider/provider.py` with the
-same construction the bridge adapter already uses — blake2b, 48 bits, big-endian
-— and a test asserts the two agree for the same input, so two readers can never
-disagree about what a conversation's id is.
-
----
-
-## 7. Generic types (`bridge/message_source.py`)
-
-Source-neutral. **No `Msg_*`, no `message_N.db`, no `Name2Id`, no
-`real_sender_id`, no `local_type`, no "shard", no "WeChat", no SQL, no path.**
-
-### 7.1 Coverage vocabulary — reused verbatim
-
-```python
-#: The source was read and the whole requested window was covered.
+#: The source accounted for the whole requested window.
 COVERAGE_COMPLETE: str = "observed_complete"
 
-#: The source was read, but the window was not covered in full.
+#: The source was read, and the window was not covered in full, or the source
+#: cannot say that it was.
 COVERAGE_PARTIAL: str = "observed_partial"
 
-#: The source was asked and could not answer at all.
+#: The source was asked and could not answer for the requested scope.
 COVERAGE_UNAVAILABLE: str = "unavailable"
 
-#: Nothing was observed for this window.
+#: Nothing has been observed for the requested scope. Distinct from a complete
+#: empty read, and never stored as a coverage row (§6.8).
 COVERAGE_NOT_OBSERVED: str = "not_observed"
 
-READER_COVERAGE_STATES: frozenset[str] = frozenset({
+#: Every status a read may carry, including NOT_OBSERVED. Deliberately a
+#: different set from ``memory_store.COVERAGE_STATES``, which is the smaller
+#: set a stored row may carry.
+READ_COVERAGE_STATES: frozenset[str] = frozenset({
     COVERAGE_COMPLETE, COVERAGE_PARTIAL,
     COVERAGE_UNAVAILABLE, COVERAGE_NOT_OBSERVED,
 })
 ```
 
-**Why the tokens are redeclared rather than imported — the reuse decision.**
-The existing type is `memory_store.CoverageVerdict`, and it fits the *concept*
-cleanly, but it cannot be imported here for two independent reasons:
+**Why moved rather than mirrored.** Two copies of a token pinned by an equality
+test is still two copies: such a test proves they are equal today and does
+nothing about the day someone adds a fifth state to one side. The direction of
+the move is the one the repository already uses — `memory` imports
+`message_source`, and `message_source` imports nothing — so the move creates no
+cycle and needs no new import inside the guarded module, because a string
+constant has no import.
 
-1. **Dependency direction.** `memory/memory_sync.py` imports
-   `message_source`. Importing `memory_store` from `message_source` would
-   invert that and create a cycle between the two trees.
-2. **The interface-leakage guard.** `test_the_protocol_depends_on_no_reader_technology`
-   restricts this module's imports to `{__future__, dataclasses, typing}`. Any
-   cross-tree import fails it. Relaxing that test to permit one import would
-   remove the guard that keeps this module source-neutral, which is a much
-   worse trade than four duplicated string constants.
+`memory_store.COVERAGE_STATES` — the storable subset — stays where it is. It is
+a statement about the store's schema, not about the vocabulary.
 
-Additionally, `CoverageVerdict` is shaped for a *store's* question (what has
-ever been ingested) rather than a *read's* question (what this call covered):
-it has no window, no truncation, no segment census, and no source-boundary
-comparison.
-
-**The minimal extension is therefore: reuse the vocabulary exactly, define a
-reader-side type, and pin the two together by test.** G5 (§11) asserts
-constant-by-constant equality with `memory_store`'s four tokens, so the two
-layers can never drift. A future ingestor mapping `ReaderCoverage` onto a
-`CoverageRecord` is then a field copy with no translation table.
-
-### 7.2 Downgrade reasons
-
-```python
-REASON_SEGMENT_UNKNOWN: str = "segment_unknown"
-REASON_SEGMENT_UNPROBED: str = "segment_unprobed"
-REASON_SEGMENT_UNAVAILABLE: str = "segment_unavailable"
-REASON_RESULT_LIMIT: str = "result_limit_reached"
-REASON_UNEXPLAINED_REMAINDER: str = "traversal_stopped_with_unexplained_remainder"
-REASON_SOURCE_AHEAD: str = "source_reports_newer_than_read"
-REASON_SOURCE_BOUNDARY_UNKNOWN: str = "source_boundary_unknown"
-
-READER_COVERAGE_REASONS: frozenset[str] = frozenset({
-    REASON_SEGMENT_UNKNOWN,
-    REASON_SEGMENT_UNPROBED,
-    REASON_SEGMENT_UNAVAILABLE,
-    REASON_RESULT_LIMIT,
-    REASON_UNEXPLAINED_REMAINDER,
-    REASON_SOURCE_AHEAD,
-    REASON_SOURCE_BOUNDARY_UNKNOWN,
-})
-```
-
-Seven fixed tokens. A reason outside the set is rejected at construction. No
-reason ever carries a count, a name, a path, or free text.
-
-### 7.3 Window, census, staleness
+### 5.2 `ReadWindow`
 
 ```python
 @dataclass(frozen=True)
-class ReaderWindow:
-    """The requested time bounds, in Unix seconds. ``None`` means unbounded.
+class ReadWindow:
+    """The scope a read was asked for, in Unix seconds. ``None`` is unbounded.
 
-    Always carried on the result, so completeness is never unqualified:
-    ``observed_complete`` means complete **for this window**, never complete
+    Carried on every coverage, so completeness is never unqualified:
+    ``observed_complete`` means complete *for this window* and never complete
     for all of history.
     """
 
@@ -1036,612 +321,855 @@ class ReaderWindow:
     end: float | None = None
 
     def __post_init__(self) -> None:
-        """Rejects ``start > end``. An inverted window is a caller defect, not
-        an empty result."""
+        """Rejects ``start > end``: an inverted window is a caller defect, not
+        an empty answer."""
+
+    @property
+    def is_bounded(self) -> bool:
+        return self.start is not None or self.end is not None
 
     @property
     def is_open_ended(self) -> bool:
         return self.end is None
 
-
-@dataclass(frozen=True)
-class ReaderSegmentCensus:
-    """How many parts of a composite source were in each state.
-
-    Source-neutral: a "segment" is any independently readable part a source is
-    composed of. A source that is not composite reports ``None`` instead of a
-    census, which is a different claim from a census of zeroes.
-    """
-
-    known: int          # catalogued, not opened for this read
-    readable: int       # opened and understood
-    unknown: int        # present, not characterisable
-    unavailable: int    # understood, not readable
-
-    def __post_init__(self) -> None:
-        """Rejects a negative count."""
-
-    @property
-    def total(self) -> int: ...
-
-    @property
-    def fully_accounted(self) -> bool:
-        """True only when every part was opened and understood."""
-        return self.total > 0 and self.readable == self.total
-
-
-#: The read reached the newest thing the source claims to have.
-STALENESS_AT_SOURCE_BOUNDARY: str = "read_reached_source_boundary"
-
-#: The source's own records name something newer than the newest message read.
-STALENESS_SOURCE_AHEAD: str = "source_reports_newer_than_read"
-
-#: One of the two values needed for the comparison is absent.
-STALENESS_NOT_COMPARABLE: str = "source_boundary_unknown"
-
-READER_STALENESS_STATES: frozenset[str] = frozenset({
-    STALENESS_AT_SOURCE_BOUNDARY, STALENESS_SOURCE_AHEAD,
-    STALENESS_NOT_COMPARABLE,
-})
+    def contains(self, moment: float) -> bool: ...
 ```
 
-Two token strings appear in both §7.2 and §7.3 —
-`source_reports_newer_than_read` and `source_boundary_unknown`. That is
-deliberate: the same fact is named the same way wherever it appears, so a
-reader does not have to learn two words for it. The two *sets* stay separate
-and are validated separately, because a staleness state is not a downgrade
-reason: §8.2 step 4 shows the case where the staleness state is
-`SOURCE_AHEAD` and the reason is correctly absent.
-
-### 7.4 `ReaderCoverage`
+### 5.3 `ReadFreshness`
 
 ```python
+#: The read and the source's own newest moment agree: nothing the source knows
+#: about is newer than what came back.
+FRESHNESS_CONSISTENT: str = "evidence_consistent"
+
+#: The source's own records name something newer than the newest item read.
+#: A statement about two timestamps, not a verdict about age.
+FRESHNESS_POTENTIALLY_STALE: str = "evidence_potentially_stale"
+
+#: One of the two values needed for the comparison is absent, so no comparison
+#: was made. Not a synonym for consistent.
+FRESHNESS_UNKNOWN: str = "freshness_unknown"
+
+READ_FRESHNESS_STATES: frozenset[str] = frozenset({
+    FRESHNESS_CONSISTENT, FRESHNESS_POTENTIALLY_STALE, FRESHNESS_UNKNOWN,
+})
+
+
 @dataclass(frozen=True)
-class ReaderCoverage:
-    """What one read is entitled to claim about the window it was asked for.
+class ReadFreshness:
+    """Whether a read reached what the source itself claims to hold.
 
-    Coverage, truncation and source-boundary comparison are three different
-    facts and are kept on three different fields, the same discipline the
-    memory layer already applies to coverage, freshness and latest-message.
-    Collapsing them into one verdict is what produces "it said complete and it
-    wasn't".
+    There is no ``fresh`` boolean and no threshold, deliberately and in the
+    same spirit as D-023: this layer reports the two moments and their
+    relation. Whether a gap matters is a product or agent decision made with
+    both numbers in view, never a verdict handed down here.
 
-    There is no ``is_fresh`` and no staleness threshold. ``staleness`` is the
-    literal outcome of comparing two timestamps the source itself supplied;
-    whether the gap matters is a product or agent decision made with both
-    numbers in view, not a verdict this layer hands down.
+    ``read_through`` is the newest item this read actually returned.
+    ``source_reported_at`` is the newest moment the source states it holds for
+    the requested scope, from the source's own records.
     """
 
     status: str
-    window: ReaderWindow
-    reasons: tuple[str, ...] = ()
-    truncated: bool = False
-    observed_through: float | None = None
-    complete_through: float | None = None
-    staleness: str = STALENESS_NOT_COMPARABLE
-    source_latest_at: float | None = None
-    latest_read_at: float | None = None
-    segments: ReaderSegmentCensus | None = None
+    read_through: float | None = None
+    source_reported_at: float | None = None
 
     def __post_init__(self) -> None:
-        """Enforces the coverage invariants (§8.3). Raises ReaderContractError."""
+        """Enforces, raising :class:`ReadContractError`:
+
+        1. ``status in READ_FRESHNESS_STATES``
+        2. ``status == FRESHNESS_UNKNOWN`` **iff** either moment is ``None``
+        3. ``status == FRESHNESS_POTENTIALLY_STALE`` **iff**
+           ``source_reported_at > read_through``
+        """
+
+    @classmethod
+    def compare(
+        cls, *, read_through: float | None, source_reported_at: float | None
+    ) -> "ReadFreshness":
+        """The single place the comparison is made.
+
+        Exact, with no tolerance, no rounding beyond the second-normalisation
+        every timestamp already receives, and no constant other than the
+        comparison itself.
+        """
+```
+
+### 5.4 `ReadCoverage`
+
+```python
+#: The caller's limit cut the answer short.
+READ_REASON_LIMIT_REACHED: str = "limit_reached"
+
+#: Part of the read refused. Spelled identically to the token
+#: ``memory_ingest`` already uses, so no translation table exists.
+READ_REASON_SOURCE_ERROR: str = "source_error"
+
+#: The source holds a part it could not characterise at all.
+READ_REASON_SEGMENT_UNKNOWN: str = "segment_unknown"
+
+#: The source holds a part it understood but could not read.
+READ_REASON_SEGMENT_UNAVAILABLE: str = "segment_unavailable"
+
+#: The read stopped without accounting for what it had not visited.
+READ_REASON_TRAVERSAL_INCOMPLETE: str = "traversal_incomplete"
+
+#: The source cannot say whether more exists beyond what it returned.
+READ_REASON_COMPLETENESS_UNSTATED: str = "completeness_unstated"
+
+#: The source names material newer than this read, inside the requested window.
+READ_REASON_SOURCE_AHEAD: str = "source_ahead_of_read"
+
+READ_REASONS: frozenset[str] = frozenset({
+    READ_REASON_LIMIT_REACHED,
+    READ_REASON_SOURCE_ERROR,
+    READ_REASON_SEGMENT_UNKNOWN,
+    READ_REASON_SEGMENT_UNAVAILABLE,
+    READ_REASON_TRAVERSAL_INCOMPLETE,
+    READ_REASON_COMPLETENESS_UNSTATED,
+    READ_REASON_SOURCE_AHEAD,
+})
+
+
+@dataclass(frozen=True)
+class ReadCoverage:
+    """What one read is entitled to claim about the window it was asked for.
+
+    Structure, truncation and freshness are three different facts on three
+    different fields. Collapsing them into one verdict is what produces "it
+    said complete and it wasn't".
+    """
+
+    status: str
+    window: ReadWindow
+    freshness: ReadFreshness
+    reasons: tuple[str, ...] = ()
+    observed_through: float | None = None
+    complete_through: float | None = None
+    truncated: bool = False
+    item_count: int = 0
+
+    def __post_init__(self) -> None:
+        """Enforces §6.3, raising :class:`ReadContractError`."""
 
     @property
     def is_complete(self) -> bool:
         return self.status == COVERAGE_COMPLETE
 
     @property
-    def source_ahead_of_read(self) -> bool:
-        """The source names something newer than the newest message read.
+    def windowed(self) -> bool:
+        """Whether the caller constrained the scope.
 
-        Not a staleness verdict and not a threshold: it is exactly
-        ``staleness == STALENESS_SOURCE_AHEAD``, which is exactly
-        ``source_latest_at > latest_read_at`` on two values the source gave.
-        Whether that matters depends on the window, and §8.2 says how.
+        Derived from ``window`` rather than stored, because a stored flag can
+        contradict the window sitting beside it. Windowed and truncated are
+        different facts: a windowed read can be perfectly complete for its
+        window, and a truncated read is incomplete whatever its window.
         """
-        return self.staleness == STALENESS_SOURCE_AHEAD
+        return self.window.is_bounded
 
     def payload(self) -> dict[str, Any]:
-        """Tokens, counts and timestamps only. Never a name, path or text."""
+        """Tokens, counts and timestamps only. Never a name, path, or text."""
 
 
-class ReaderContractError(Exception):
-    """A result was assembled that claims more than its evidence supports.
+class ReadContractError(Exception):
+    """A read claimed more than its evidence supports.
 
-    Raised at construction, never caught to produce a softer answer. This is a
-    programming defect in a provider, not a runtime condition a caller handles.
+    Raised at construction and never caught to produce a softer answer: this
+    is a defect in a source, not a runtime condition a caller handles.
     """
 ```
 
-### 7.5 `ReaderResult` and `CoverageAwareReader`
+### 5.5 `ReadResult[T]`
 
 ```python
-IDENTITY_RESOLVED_COMPLETE: str = "resolved_complete"
-IDENTITY_RESOLVED_PARTIAL: str = "resolved_partial"
-IDENTITY_SOURCE_UNAVAILABLE: str = "identity_source_unavailable"
-
-READER_IDENTITY_STATES: frozenset[str] = frozenset({
-    IDENTITY_RESOLVED_COMPLETE, IDENTITY_RESOLVED_PARTIAL,
-    IDENTITY_SOURCE_UNAVAILABLE,
-})
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
-class ReaderResult:
-    """Messages plus what the reader is entitled to claim about them.
+class ReadResult(Generic[T]):
+    """Items plus what the source is entitled to claim about them.
 
-    An empty ``messages`` is not an answer on its own: it means "nothing
-    matched", which equals "nothing exists" only when ``coverage`` says the
-    window was actually covered. ``trustworthy_empty`` is the one property a
-    caller must read before writing "no messages".
-
-    ``identity_resolution`` is deliberately **not** part of coverage. An
-    unresolvable display name does not make a message unobserved; it makes it
-    unnamed. Keeping the two apart stops a missing contact table from
-    reporting the messages as incomplete, and stops a complete message read
-    from implying every name in it is real.
+    An empty ``items`` is not an answer on its own. It equals "there is
+    nothing" only when ``coverage`` says the window was actually covered, and
+    :attr:`trustworthy_empty` is the one property a caller must read before
+    writing "no messages".
     """
 
-    messages: tuple[NormalizedMessage, ...]
-    coverage: ReaderCoverage
-    source: str
-    identity_resolution: str = IDENTITY_RESOLVED_COMPLETE
+    items: tuple[T, ...]
+    coverage: ReadCoverage
 
     def __post_init__(self) -> None:
-        """Rejects an unknown ``source`` or ``identity_resolution``; rejects
-        messages carried alongside ``unavailable`` or ``not_observed``
-        coverage; rejects a message whose ``source`` differs from the
-        envelope's."""
+        """Rejects ``coverage.item_count != len(items)``, and rejects items
+        carried alongside ``unavailable`` or ``not_observed`` coverage."""
 
     @property
     def trustworthy_empty(self) -> bool:
-        return not self.messages and self.coverage.status == COVERAGE_COMPLETE
+        return not self.items and self.coverage.status == COVERAGE_COMPLETE
+```
 
-    def payload(self) -> dict[str, Any]:
-        """``{"messages": [...], "coverage": {...}, "source": ...,
-        "identity_resolution": ...}``.
+`ReadResult` carries **items and coverage, and nothing else**. Provenance stays
+where it already is: on the bridge's response envelope, which names the source
+for the whole answer, exactly as it does today.
 
-        Each message uses the unchanged ``NormalizedMessage.payload()``, so the
-        per-message wire shape is byte-identical to the one the bridge has
-        always returned and per-message provenance stays inside the process.
-        """
+### 5.6 What `MessageSource` becomes
 
-
+```python
 @runtime_checkable
-class CoverageAwareReader(Protocol):
-    """A source that states its own coverage. ``MessageSource`` is unchanged
-    and this Protocol does not replace it; nothing consumes this Protocol
-    today. Which of the two the bridge consumes is the promotion decision."""
-
+class MessageSource(Protocol):
     name: str
 
     def status(self) -> SourceStatus: ...
-    def list_conversations(self, limit: int) -> list[NormalizedConversation]: ...
-    def read_conversation(
-        self, conversation_id: int, *, window: ReaderWindow, limit: int
-    ) -> ReaderResult: ...
-    def read_recent(
-        self, *, window: ReaderWindow, limit: int
-    ) -> ReaderResult: ...
+
+    def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]: ...
+
+    def get_messages(
+        self, conversation_id: int, limit: int, before_sequence: int | None = None
+    ) -> ReadResult[NormalizedMessage]: ...
+
+    def get_recent_messages(
+        self, since_observed_at: float, limit: int
+    ) -> ReadResult[NormalizedMessage]: ...
 ```
+
+Three decisions are load-bearing here.
+
+1. **Collections return `ReadResult[...]`, not bare lists.** A list cannot
+   express a partial answer, so a source holding one is forced to choose between
+   discarding its coverage and raising on every imperfect read. Both are the
+   failure this design exists to remove.
+2. **`status()` keeps returning `SourceStatus`.** Readiness is not per-read
+   coverage. "Can you answer at all" and "how much of this window did you cover"
+   are different questions with different lifetimes, and a source that is ready
+   can still answer partially.
+3. **Coverage is envelope metadata and never enters a message.**
+   `NormalizedMessage.payload()` keeps its exact ten keys. A per-message
+   coverage field would push the difference between sources out to the skill,
+   which is what the payload projection exists to prevent.
+
+The change to the Protocol is staged, not flag-day; §11 sequences it so no
+caller is ever broken and the four MCP tools' wire shape never moves.
 
 ---
 
-## 8. Coverage semantics
+## 6. Coverage semantics
 
-### 8.1 The five distinctions, and where each one lives
+### 6.1 What each status means
 
-| Required distinction | Expressed by |
-|---|---|
-| **complete for the window** | `status == COVERAGE_COMPLETE` **and** `window` carried beside it, so the claim is always qualified |
-| **partial / unknown** | `status == COVERAGE_PARTIAL` with at least one reason; `segment_unknown` / `segment_unprobed` name the unknown case specifically; `status == COVERAGE_NOT_OBSERVED` is the "nothing was looked at" case |
-| **potentially stale** | `staleness == STALENESS_SOURCE_AHEAD`, with both compared values carried (`source_latest_at`, `latest_read_at`); when the newer message falls inside the requested window it also adds `source_reports_newer_than_read` and downgrades `status` |
-| **windowed / truncated** | `window` (the requested scope, always present) and `truncated` + `result_limit_reached` (the answer was cut short) — two different facts on two different fields |
-| **source unavailable** | `status == COVERAGE_UNAVAILABLE`, carrying whichever of `segment_unavailable` / `segment_unknown` / `segment_unprobed` says *why* nothing could answer; a **partly** unavailable source is `COVERAGE_PARTIAL` with the same reasons and a census that says how many |
+| Status | Means | Never means |
+|---|---|---|
+| `observed_complete` | the source can **account for the full requested window** — every part that could hold matching items was read, nothing was cut short, and the source can say there is no more | "fewer items came back than the limit" |
+| `observed_partial` | a **successful** read with known incompleteness *or* unresolved uncertainty: a limit was hit, a part refused, a traversal stopped unexplained, or the source cannot state whether more exists | a failure; partial answers carry real items and real evidence |
+| `unavailable` | the source was asked and **could not answer for the requested scope**, having enumerated something to try | "the source does not exist" |
+| `not_observed` | the source has **no observation for the requested scope** — nothing was looked at, and nothing refused either | "we looked and found nothing" |
 
-No boolean named `fresh` exists anywhere. No threshold, no clock comparison, no
-age constant, and no "recent enough" check appears in any of these rules — G4
-(§11) asserts the assembled module names no threshold.
+The `observed_complete` rule is the whole point of D-031: completeness is a
+claim about the *window*, made by the layer that can see the parts, the page
+signals and the stop condition. Item count is not evidence for it.
 
-### 8.2 Assembly rules
+### 6.2 `unavailable` versus `MessageSourceError` — the refusal split
 
-`wechatprovider/coverage.py`:
+Existing refusal semantics are preserved exactly, and the rule that decides
+between them is *whether an envelope carrying evidence can be built at all*.
 
-```python
-def assemble_coverage(
-    *,
-    inventory: ShardInventory,
-    plan: RoutingPlan,
-    outcome: TraversalOutcome,
-    window: ReaderWindow,
-    truncated: bool,
-    latest_read_at: float | None,
-    source_latest_at: float | None,
-) -> ReaderCoverage:
-```
+**Raise `MessageSourceError`** — unchanged from today — when the source cannot
+produce any envelope: the reader is not configured, the executable is missing,
+a reply is malformed, a timeout occurs, an argument is invalid, the requested
+conversation is unknown, paging is unsupported, or a contract invariant is
+violated. These already raise, `bridge/tests/test_reader_boundary.py` pins them,
+and no caller falls back to another source.
 
-Applied in order.
+**Return `ReadResult` with `COVERAGE_UNAVAILABLE`** when the source *did*
+enumerate what it would have had to read, and none of it could be read for the
+requested scope. A raise would destroy that evidence — "there are parts and not
+one answered" is a stronger, more useful statement than an exception.
 
-**Step 0 — cross-check.** Assert `plan.accounted_keys == inventory.keys`. The
-router already guarantees this; re-checking it at the one place coverage is
-decided means a future router change cannot quietly drop a part on the way to
-a verdict. A mismatch is a `ReaderContractError`, not a downgrade.
+Both paths converge downstream: `memory_ingest` already turns a caught
+`MessageSourceError` into `CoverageRecord(status=COVERAGE_UNAVAILABLE,
+reason=REASON_SOURCE_ERROR)`, and a returned `unavailable` coverage records the
+same status with the reasons the source supplied. Nothing about the
+no-silent-fallback guarantee changes, in either path.
 
-**Step 1 — census.** `census = inventory.census(role=SHARD_ROLE_MESSAGE)`.
+### 6.3 Invariants — enforced at construction
 
-**Step 2 — the degenerate statuses.** Both return immediately, with
-`messages == ()`, `observed_through is None` and `complete_through is None`.
+`ReadCoverage.__post_init__` raises `ReadContractError` unless all hold:
 
-- `census.total == 0` → `COVERAGE_NOT_OBSERVED`, reasons `()`. Nothing was
-  listed, so nothing was looked at, and there is nothing to explain.
-- `census.total > 0` and `census.readable == 0` → `COVERAGE_UNAVAILABLE`, with
-  every applicable member of `{segment_unavailable, segment_unknown,
-  segment_unprobed}` as a reason. Parts exist and not one of them could
-  answer; at least one of the three always applies, because a part that is
-  neither readable nor unavailable nor unknown nor unprobed does not exist.
+1. `status in READ_COVERAGE_STATES`.
+2. every reason is in `READ_REASONS`; reasons are deduplicated and sorted, so
+   two coverages describing the same situation compare equal.
+3. `status == COVERAGE_COMPLETE` ⟹ `reasons == ()` **and** `truncated is False`.
+4. `status == COVERAGE_PARTIAL` ⟹ `reasons != ()`.
+5. `status == COVERAGE_UNAVAILABLE` ⟹ `reasons != ()`, `item_count == 0`,
+   `observed_through is None`, `complete_through is None`. "Could not answer"
+   must always say which kind of could-not.
+6. `status == COVERAGE_NOT_OBSERVED` ⟹ `reasons == ()`, `item_count == 0`,
+   both boundaries `None`, and `freshness.status == FRESHNESS_UNKNOWN`.
+   Nothing was looked at, so there is nothing to explain and nothing to compare.
+7. `truncated is True` ⟹ `READ_REASON_LIMIT_REACHED in reasons`.
+8. `complete_through is not None` ⟹ `status == COVERAGE_COMPLETE`. A partial
+   read cannot name a sub-window it covered completely, because the gap could
+   be anywhere in it.
+9. `observed_through is not None` ⟹
+   `status in (COVERAGE_COMPLETE, COVERAGE_PARTIAL)`.
+10. `READ_REASON_SOURCE_AHEAD in reasons` ⟹
+    `freshness.status == FRESHNESS_POTENTIALLY_STALE`.
+11. `item_count` is non-negative.
 
-**Step 3 — staleness, computed before any downgrade.**
-
-- both of `source_latest_at` and `latest_read_at` present and
-  `source_latest_at > latest_read_at` → `STALENESS_SOURCE_AHEAD`
-- both present and `source_latest_at <= latest_read_at` →
-  `STALENESS_AT_SOURCE_BOUNDARY`
-- either absent → `STALENESS_NOT_COMPARABLE`
-
-The comparison is exact. There is no tolerance, no rounding beyond the
-second-normalisation every timestamp already receives, and no threshold.
-
-**Step 4 — collect downgrade reasons.** Start empty; add each that applies:
-
-| Condition | Reason |
-|---|---|
-| `census.unknown > 0` | `segment_unknown` |
-| `census.known > 0` | `segment_unprobed` |
-| `census.unavailable > 0` | `segment_unavailable` |
-| `truncated` | `result_limit_reached` |
-| `outcome.early_stop == STOP_UNSAFE` | `traversal_stopped_with_unexplained_remainder` |
-| `staleness == STALENESS_SOURCE_AHEAD` **and** (`window.is_open_ended` or `source_latest_at <= window.end`) | `source_reports_newer_than_read` |
-| `staleness == STALENESS_NOT_COMPARABLE` **and** `window.is_open_ended` | `source_boundary_unknown` |
-
-Two of these deserve their justification stated, because the tempting simpler
-rule is wrong in each case:
-
-- **Source-ahead does not always downgrade.** If the source's newest message
-  is *later than the requested window's end*, then it is outside what was
-  asked for, and the read can still be complete for that window. `staleness`
-  still reports `SOURCE_AHEAD` — it is a true fact about the source — but no
-  reason is added and `status` is untouched. Downgrading here would make every
-  bounded historical query permanently partial, which is both false and
-  useless.
-- **Boundary-unknown only matters for an open-ended window.** If the caller
-  asked for `[T0, T1]` and the traversal covered `[T0, T1]`, not knowing what
-  the source holds after `T1` is irrelevant to the claim being made.
-
-**Step 5 — status.** `COVERAGE_COMPLETE` if no reasons were collected,
-otherwise `COVERAGE_PARTIAL`.
-
-**Step 6 — boundaries.**
-
-- `observed_through` = `window.end` when the window is bounded and
-  `outcome.early_stop in (STOP_EXHAUSTED, STOP_SAFE)`; otherwise
-  `latest_read_at` when `outcome.early_stop in (STOP_EXHAUSTED, STOP_SAFE)`;
-  otherwise `None`. An unsafe stop knows nothing about how far it looked.
-- `complete_through` = `observed_through` when `status == COVERAGE_COMPLETE`,
-  else `None`. A partial read cannot honestly name a sub-window it covered
-  completely, because the gap could be anywhere in it.
-
-These match the memory layer's definitions: *the latest moment the source is
-known to have been looked at*, and *the latest moment through which coverage
-was complete*.
-
-### 8.3 Invariants — enforced at construction
-
-`ReaderCoverage.__post_init__` raises `ReaderContractError` unless all hold:
-
-1. `status in READER_COVERAGE_STATES`.
-2. `staleness in READER_STALENESS_STATES`.
-3. every reason is in `READER_COVERAGE_REASONS`; reasons are deduplicated and
-   lexicographically sorted, so two coverages describing the same situation
-   compare equal.
-4. `status == COVERAGE_COMPLETE` ⟹ `reasons == ()` **and** `truncated is False`
-   **and** (`segments is None` or `segments.fully_accounted`).
-5. `status == COVERAGE_PARTIAL` ⟹ `reasons != ()`.
-6. `status == COVERAGE_UNAVAILABLE` ⟹ at least one of
-   `REASON_SEGMENT_UNAVAILABLE`, `REASON_SEGMENT_UNKNOWN`,
-   `REASON_SEGMENT_UNPROBED` is in `reasons`. "Could not answer" must always
-   say which kind of could-not.
-7. `status == COVERAGE_NOT_OBSERVED` ⟹ `reasons == ()` and
-   `complete_through is None` and `observed_through is None`.
-8. `complete_through is not None` ⟹ `status == COVERAGE_COMPLETE`.
-9. `truncated is True` ⟹ `REASON_RESULT_LIMIT in reasons`.
-10. `staleness == STALENESS_NOT_COMPARABLE` ⟺ `source_latest_at is None or
-    latest_read_at is None`.
-11. `REASON_SOURCE_AHEAD in reasons` ⟹ `staleness == STALENESS_SOURCE_AHEAD`.
-
-Invariant 4 is the structural form of requirement 7: an inventory holding an
-unknown or unavailable part produces a census that is not `fully_accounted`,
-which makes `COVERAGE_COMPLETE` **unconstructable**. The downgrade is not a rule
-someone remembers to apply; it is a rule that must be applied for the object to
+Invariant 3 is the structural form of the whole design: a source that collected
+any downgrade reason **cannot construct** a complete coverage. The downgrade is
+not a rule someone remembers to apply; it is a rule the object must satisfy to
 exist.
 
+### 6.4 Freshness is orthogonal, and so is truncation
+
+- **Freshness never changes structure by itself.** A source whose own records
+  name something newer than the read gets `evidence_potentially_stale`. That
+  alone does not make the read partial.
+- **It downgrades structure only when it bites the window.** Add
+  `source_ahead_of_read` — and therefore `observed_partial` — only when the
+  window is open-ended, or when `source_reported_at <= window.end`. If the
+  newer material lies *outside* the requested window, the read is still
+  complete for that window and freshness reports the fact on its own field.
+  Downgrading unconditionally would make every bounded historical query
+  permanently partial, which is both false and useless.
+- **Unknown freshness does not downgrade by itself either.** Completeness comes
+  from structural accounting — every part read, nothing cut short — and a
+  source that can prove that is complete whether or not it can also declare its
+  own newest moment. What a source may **not** do is treat an absent boundary as
+  evidence of completeness: a source whose only completeness evidence *is* its
+  declared boundary reports `completeness_unstated` when that boundary is
+  missing, which is a structural reason and downgrades on its own terms.
+- **A timestamp mismatch never alters data.** It is recorded, never repaired,
+  never used to filter, and never used to re-order.
+- **Truncated and windowed are orthogonal to both.** `windowed` says the caller
+  narrowed the scope; `truncated` says the answer was cut short by the limit;
+  `freshness` says whether the read reached the source's own boundary. A read
+  can be windowed, untruncated, complete and potentially stale all at once.
+
+### 6.5 Boundaries
+
+- `observed_through` — the latest moment the source is known to have looked at:
+  `window.end` for a bounded window fully traversed, otherwise the newest item
+  read, and `None` after an unexplained stop, which knows nothing about how far
+  forward it looked.
+- `complete_through` — equal to `observed_through` when the status is complete,
+  `None` otherwise.
+
+These are the same definitions `memory/memory_freshness.py` already documents,
+so a future ingestor maps `ReadCoverage` onto a `CoverageRecord` by copying
+fields, with no translation table.
+
+### 6.6 No hidden thresholds
+
+No age constant, no clock comparison, no "recent enough" check, and no `fresh`
+boolean exists anywhere in §5 or §6. The only numeric comparison is
+`source_reported_at > read_through` on two values the source itself supplied.
+T-12 (§10) asserts this by AST scan.
+
+### 6.7 The truth table
+
+`TE` = `trustworthy_empty`.
+
+| # | items | status | freshness | truncated | TE | What a caller may say |
+|---|---|---|---|---|---|---|
+| 1 | n > 0 | `observed_complete` | `evidence_consistent` | no | — | "these are all the messages in the window" |
+| 2 | 0 | `observed_complete` | `evidence_consistent` | no | **yes** | "there are no messages in this window" |
+| 3 | n ≥ 0 | `observed_complete` | `evidence_potentially_stale` | no | as #1/#2 | complete *for this window*; must also state that the source names newer material **outside** it |
+| 4 | n ≥ 0 | `observed_complete` | `freshness_unknown` | no | as #1/#2 | complete on structural accounting alone; unknown freshness never downgrades by itself. A source whose only completeness evidence is its own declared boundary reports row 8 instead when that boundary is absent (§6.4) |
+| 5 | n > 0 | `observed_partial` + `limit_reached` | any | yes | no | "at least these; more exist above the limit" |
+| 6 | n > 0 | `observed_partial` + `segment_unavailable` / `segment_unknown` | any | no | no | "part of this source could not be read; what came back is real, the absence is not" |
+| 7 | n > 0 | `observed_partial` + `traversal_incomplete` | any | yes | no | "the read stopped without accounting for the rest" |
+| 8 | n > 0 | `observed_partial` + `completeness_unstated` | any | no | no | "the source cannot say whether more exists" |
+| 9 | n ≥ 0 | `observed_partial` + `source_ahead_of_read` | `evidence_potentially_stale` | any | no | "the source names newer material inside the window that this read did not return" |
+| 10 | 0 | `observed_partial` (any reason) | any | any | **no** | "nothing matched, and the window was not fully covered" — **never** "there are no messages" |
+| 11 | 0 | `unavailable` + at least one reason | `freshness_unknown` | no | **no** | "the source could not answer for this scope", naming which kind of could-not |
+| 12 | 0 | `not_observed` | `freshness_unknown` | no | **no** | "nothing has been looked at for this scope" |
+| 13 | n > 0 | `unavailable` or `not_observed` | — | — | — | **impossible** — `ReadContractError` at construction |
+
+Rows 2 and 10 are the pair that matters: identical `items`, identical `window`,
+opposite conclusions, distinguishable only through `coverage`. Any caller
+reading `items` alone gets row 10 wrong, every time.
+
+### 6.8 How memory consumes it
+
+`memory_ingest` stops inferring and starts recording what the source said:
+
+- `observed_complete` / `observed_partial` / `unavailable` → a `CoverageRecord`
+  carrying that status, the source's reasons, and `window_start` /
+  `window_end` from `ReadCoverage.window` — not from `min`/`max` of the items
+  returned, which is a statement about the data rather than about the request.
+- `not_observed` → **no row is written.** `memory_store.COVERAGE_STATES`
+  excludes it by design: "never stored as a row — it is what the absence of a
+  row means". Writing one would raise `coverage_status_unknown` from
+  `CoverageRecord.__post_init__`. This is the single most easily missed
+  consequence of the move, and T-10 pins it.
+- `len(messages) < message_limit` is **deleted**, not kept as a fallback. A
+  fallback that is wrong in exactly the cases this design exists to catch is
+  worse than no fallback; §11 sequences the deletion so it happens only once
+  both shipped sources author coverage.
+
+`compose_coverage`, `ComposedCoverage` and `CoverageVerdict` are unchanged. They
+already implement the composition rule this design needs — evidence is never
+erased, the aggregate is the most cautious reading, and no complete source means
+no trustworthy empty.
+
 ---
 
-## 9. What later reuses this envelope
+## 7. Provider-internal orchestration
 
-Stated so the shape is not re-litigated, and so nothing here is built now.
+Everything in this section is **provider vocabulary** and must never appear in a
+generic module. These are responsibilities and contracts, not implementations.
 
-- **History and timeline.** A timeline read is a windowed read with a different
-  ordering. It returns `ReaderResult` unchanged; `window` already carries the
-  span and `coverage` already says whether the span is fully accounted for.
-- **Search.** A future search returns the same envelope with a narrowed
-  `messages` tuple. Coverage still describes the *window scanned*, not the
-  number of hits: "I searched all of March and found nothing" and "I searched
-  part of March and found nothing" are different answers, and
-  `trustworthy_empty` is already the property that separates them.
-- **FTS.** Not designed, not specified, not implemented here. If an index is
-  ever added, it is a provider-internal accelerator and must produce a
-  `ReaderCoverage` no stronger than an unindexed read of the same window would.
-- **Cache.** Not designed, not specified, not implemented here. A cached answer
-  would need its own `observed_through`, and inventing one is exactly the class
-  of error this envelope exists to prevent.
+### 7.1 `ShardDiscovery` — what the source is made of
 
-No code, type, field or flag for search, FTS, timeline or caching appears in
-§6 or §7.
+**Owns:** the inventory of a composite source, and the evidence for each part's
+state.
+
+- Two passes, kept separate because they cost different amounts: `catalogue()`
+  classifies by name shape and **opens nothing**; `probe()` opens read-only and
+  re-classifies.
+- Four part states: **known** (catalogued, not opened), **readable** (opened,
+  schema recognised, bounds taken), **unknown** (listed, not characterisable),
+  **unavailable** (characterised, not readable).
+- **Nothing is ever dropped.** The invariant is that `probe()` returns an
+  inventory whose key set equals its input's: probing changes what is known
+  about a part, never how many parts there are. An entry nobody can characterise
+  counts toward the unknown tally for **every** role — if nobody can say what it
+  is, nobody can say it is not a message part, and filtering it out by role
+  would produce silent omission by way of a filter.
+- Parts are identified by a stable opaque digest of the entry name, never by the
+  name and never by a path. Safe to log, safe to count, meaningless outside the
+  process.
+- Time bounds are taken per part and normalised through
+  `wechatdb.normalise_timestamp`, so a part mixing second- and
+  millisecond-valued creation times cannot report a maximum in the year 5138 and
+  dominate every routing decision. Bounds are either **established** or
+  **absent**; absent bounds are never guessed.
+- The locator is **injected**. There is no implementation that searches a
+  filesystem, and the shipped one lists exactly the entries it was constructed
+  with.
+
+### 7.2 `ShardRouter` — which parts a windowed query must touch
+
+**Owns:** routing, ordering, and the explanation for stopping.
+
+- **Total accounting.** Every inventory key appears exactly once across the
+  plan's included steps and its exclusions, each with a fixed reason token.
+  `plan.accounted_keys == inventory.keys` is the structural form of "no silent
+  omission": a part cannot leave the inventory without a recorded reason.
+- **Inclusion** requires: the part is readable, its role is message, its bounds
+  overlap the window, and — for a conversation-scoped read — it holds that
+  conversation. A part whose bounds are **not established always overlaps**, and
+  is therefore always visited.
+- **Ordering** is newest-first by established maximum bound, with
+  unestablished-bounds parts sorted **first**, so they are visited rather than
+  skipped and any later stop is evaluated against a remainder that is entirely
+  bounded.
+- **Explainable stop.** `exhausted` when every planned part was visited; `safe`
+  when every unvisited planned part is provably older than the boundary already
+  reached; `unsafe` otherwise. Because "provably older" is false for
+  unestablished bounds, a part with unknown bounds can never be stepped past.
+- **Unknown and unavailable parts do not make a stop unsafe.** They were never
+  visitable, so the traversal did not skip them; they downgrade coverage
+  separately and always. Keeping the two mechanisms apart means neither can mask
+  the other.
+- The traversal collects `limit + 1` matching records so truncation is
+  **measured** rather than inferred from a full page — the same technique
+  `memory_retrieval` already uses, for the same reason.
+
+**One structural assumption, graded Hypothesis.** A multi-part container is
+roughly time-partitioned. **Evidence from this project: none.** E-022 opened one
+part and characterised its interior; it established nothing about how parts
+relate. The design is safe regardless: early stop is gated on measured bounds,
+so if the assumption is false the router simply never finds a safe stop, visits
+everything, and the answer is still correct. The assumption buys efficiency,
+never correctness.
+
+### 7.3 `wechatdb` — one connection, one table
+
+**Unchanged.** Its scope stays: one open connection, one table → provider
+records. It learns nothing about parts, routing, coverage, or windows. The
+provider calls what it already exports — `conversation_tables`, `load_name2id`,
+`parse_conversation`, `normalise_timestamp`, `MessageRecord`,
+`MessageSchemaError` — and injects the `session_names` and `display_names`
+mappings `parse_conversation` already accepts. No edit to the parser is required
+by anything in this document.
+
+### 7.4 `IdentityResolver` — names, never guesses
+
+**Owns:** contact, session and group-member display resolution, from the
+source's own tables.
+
+- Resolution is a **lookup, never an inference**: no fuzzy match, no edit
+  distance, no tokenisation, no model, no heuristic. This is D-022's rule for
+  conversation discovery, applied one layer down.
+- Precedence is a fixed order over distinct *kinds* of name (a per-room member
+  nickname beats a contact remark beats a contact nickname), so it is never a
+  choice between two equally good answers.
+- **Ambiguity is refused, never resolved.** One identifier yielding two
+  different names of the same kind resolves to no name; the identifier is simply
+  absent from the mapping handed to the parser, whose existing fallback to the
+  sender identifier is then the correct outcome with no parser change.
+- **Identity failure is not coverage failure.** A missing name does not make a
+  message unobserved; it makes it unnamed. Identity state travels on the
+  provider's own diagnostics, never on `ReadCoverage`. Merging them would let a
+  missing contact table report the messages as incomplete, which is false.
+- Its entire integration surface with the parser is the
+  `(session_names, display_names)` pair.
+
+### 7.5 `ProviderResult` → `ReadResult`
+
+**Owns:** the single translation point, and the only place in the provider that
+constructs a generic type.
+
+- Maps records to `NormalizedMessage` using the field meanings the contract
+  already documents: a database source puts the message's own creation time in
+  `first_observed_at`, leaves `visible_time` `None` because it never saw a
+  rendered time, and reports `confidence = 1.0` because a decoded row is exact
+  and there is no estimator on this path.
+- Derives conversation identifiers with the same construction
+  `rion_reader_adapter.conversation_identifier` uses, so two readers can never
+  disagree about what a conversation's id is.
+- Assembles `ReadCoverage` and `ReadFreshness` from the inventory census, the
+  plan, the stop outcome, the truncation measurement and the two boundary
+  timestamps.
+- **No shard, table, column, file, path, digest or schema name escapes.** The
+  provider's vocabulary ends here.
+- **Diagnostics may carry aggregate counts and category tallies** — how many
+  parts were readable, unknown, unavailable — and never a raw identifier, a
+  name, a path, or message content. They are a provider-side surface, not part
+  of `ReadResult`.
+
+### 7.6 Deferred: FTS, cache, search optimisation
+
+Not designed, not specified, not implemented. One constraint is recorded so the
+question is not re-litigated later: **an indexed or cached answer must never
+claim coverage stronger than an unindexed read of the same window would.** A
+cached answer needs its own `observed_through`, and inventing one is exactly the
+class of error this envelope exists to prevent.
 
 ---
 
-## 10. Errors, privacy and security
+## 8. Error handling
 
-### 10.1 Error model
+| Condition | Outcome | Raises or reports |
+|---|---|---|
+| reader not configured / executable absent / timeout / malformed reply | unchanged from today | raises `MessageSourceError` |
+| unknown conversation, unsupported paging, invalid argument | unchanged from today | raises `MessageSourceError` |
+| one part cannot be characterised | that part is `unknown`; coverage gains `segment_unknown` | caught, becomes coverage |
+| one part will not open, has an unrecognised schema, or a read refuses | that part is `unavailable`; coverage gains `segment_unavailable` | caught, becomes coverage |
+| every part refuses, after enumeration | `ReadResult` with `unavailable` | returned, not raised (§6.2) |
+| nothing enumerable for the scope | `ReadResult` with `not_observed` | returned, not raised |
+| the caller's limit is hit | `truncated` + `limit_reached` | returned |
+| the traversal stops with an unexplained remainder | `traversal_incomplete` | returned |
+| a source cannot state whether more exists | `completeness_unstated` | returned |
+| a coverage or result claims more than its evidence | `ReadContractError` | raises; never caught to soften an answer |
 
-Every token is fixed, lowercase, and content-free. Nothing in this design ever
-returns a path, a filename, a chat title, a sender, message text, SQL, or output
-captured from another program — the rule `MessageSourceError` already states.
+**The governing rule:** a per-part failure is never fatal and never silent — it
+becomes a coverage downgrade with a fixed reason, every time. A failure that
+would make the whole answer meaningless raises. **There is no fallback to
+another source, at any level.** Every token stays fixed, lowercase and
+content-free; no path, filename, chat title, sender, message text, SQL, or
+captured output ever reaches a caller, a log line, or an exception.
 
-| Token | Raised by | Effect | Raises or reports |
-|---|---|---|---|
-| `locator_unavailable` | `ShardDiscovery.catalogue` | `status()` reports `source_unconfigured` | raises `ShardError`; the provider catches it in `status()` |
-| `shard_absent` | `ShardDiscovery.probe` | that part → `UNAVAILABLE` | caught; becomes coverage |
-| `shard_open_refused` | `ReadOnlySqliteOpener.open` | that part → `UNAVAILABLE` | caught; becomes coverage |
-| `shard_schema_unrecognised` | `catalogue` / `probe` | `UNKNOWN` (catalogue) or `UNAVAILABLE` (probe) | caught; becomes coverage |
-| `shard_read_refused` | `probe` / traversal | that part → `UNAVAILABLE` | caught; becomes coverage |
-| `conversation_unknown` | `read_conversation` | refusal | raises `MessageSourceError` |
-| `source_unconfigured` | `status` | reported readiness | reported, never raised |
-| `source_unrecognised` | `status` | reported readiness | reported, never raised |
-| `ready_with_unrecognised_segments` | `status` | reported readiness, `ready=True` | reported, never raised |
-| — | `ReaderCoverage` / `ReaderResult` | `ReaderContractError` | raises; never caught to soften an answer |
+---
 
-**The governing rule:** a per-part failure is never fatal and is never silent.
-It becomes a coverage downgrade with a reason, every time. A failure that would
-make the whole answer meaningless — an unknown conversation, a contract
-violation — raises. There is **no fallback to another source**, at any level.
+## 9. Privacy and security
 
-### 10.2 Privacy and security
-
-1. **No acquisition surface.** The provider derives, requests, reconstructs and
-   stores no key, salt, passphrase or cipher parameter. It contains no
-   SQLCipher call, no `PRAGMA key`, no decryption, no process-memory read, no
-   debugger interaction, no code-signature operation. G3 asserts this by source
-   scan over the whole package.
-2. **No location knowledge.** The provider contains no WeChat container path,
-   bundle identifier, directory name or search root. Every input arrives
-   through an injected `ShardLocator`, and the shipped locator lists exactly
-   what it was constructed with. The provider cannot find a WeChat database; it
-   can only be handed one.
-3. **Read-only, and no silent optimisation.** `mode=ro` only. `immutable=1` is
-   forbidden by test because it would silently drop write-ahead-log-resident
-   messages — the interface gate already recorded a WAL-resident row as a real
-   shape, so this is a known live case, not a hypothetical.
-4. **Nothing is written.** No file created, no WAL checkpointed, no temporary
-   copy, no plaintext cache, no export. The source is left byte-identical.
-5. **Identifiers, not names, in diagnostics.** `ShardDescriptor.key` is a
-   blake2b digest of an entry name, never the name. No coverage token, error
-   token or census field can carry a name.
+1. **No acquisition surface.** No key, salt, passphrase, cipher parameter,
+   SQLCipher call, `PRAGMA key`, decryption, process-memory read, debugger
+   interaction or code-signature operation exists anywhere in this design.
+   Asserted by source scan (§10, T-13).
+2. **No location knowledge.** No WeChat container path, bundle identifier,
+   directory name or search root. Every input arrives through an injected
+   locator. The provider cannot find a database; it can only be handed one.
+3. **Read-only, with no silent optimisation.** Read-only open only. The
+   `immutable` optimisation is **forbidden and asserted against**: it makes
+   SQLite ignore the write-ahead log, silently dropping not-yet-checkpointed
+   messages. The interface gate already recorded a WAL-resident row as a real
+   shape, so this is a live case. When the log cannot be read, the honest
+   outcome is an unavailable part and a visible coverage downgrade.
+4. **Nothing is written.** No file created, no WAL checkpointed, no copy, no
+   plaintext cache, no export. The source is left byte-identical.
+5. **Digests, not names, in diagnostics.** No coverage token, reason, count or
+   status field can carry a name, and `ReadCoverage.payload()` emits tokens,
+   counts and timestamps only.
 6. **No real data anywhere.** Every fixture is synthetic and built in code, in
-   the style of `wechatdb/tests/fixtures.py`. No real chat content, no real
-   `wxid`, no real path, no real digest is committed.
-7. **D-002, D-005, D-011 and R-003 are untouched.** Nothing here drives,
-   activates, scrolls or writes to WeChat; nothing runs unattended; nothing
-   invokes or vendors a `wechat-cli`.
-8. **Nothing ships.** The package is not imported by product core, is not in
-   any build phase, and is not in any packaged runtime. It is not in the
-   shipped dependency graph at all.
+   the style of `wechatdb/tests/fixtures.py`. No real chat content, `wxid`, path
+   or digest is committed.
+7. **D-002, D-005, D-011 and R-003 are untouched.** Nothing drives, activates,
+   scrolls or writes to WeChat; nothing runs unattended; nothing invokes or
+   vendors a `wechat-cli`.
+8. **Nothing ships.** No product module imports the provider, it is in no build
+   phase and no packaged runtime, and it is not in the shipped dependency graph.
 
 ---
 
-## 11. Promotion gates
+## 10. Test matrix
 
-**Parser success is not sufficient, and neither is passing every test below.**
-The gates are a precondition for *considering* promotion, not a grant of it.
+All synthetic. Multi-part fixtures are built in code as `tmp_path` SQLite
+databases whose column layout matches what `wechatdb` reads, populated with
+invented text, `wxid_fixture_*` identifiers and chosen timestamps.
 
-### Implementation gates — required before any wiring
+Every test must be verified to **fail when the behaviour it pins is reverted**.
+A coverage test that passes against a source which always reports
+`observed_complete` is worthless.
 
-- **G1 — Behaviour.** All ten synthetic fixture classes of §12 pass. Each test
-  is verified to fail when the behaviour it pins is reverted; a coverage test
-  that passes against a provider that always reports `observed_complete` is
-  worthless.
-- **G2 — Isolation.**
-  `bridge/tests/test_reader_boundary.py::test_no_product_module_imports_the_candidate_schema_provider`
-  is generalised from one `CANDIDATE_PROVIDER` string to
-  `CANDIDATE_PROVIDERS = ("wechatdb", "wechatprovider")` and stays green across
-  `bridge`, `memory`, `shadow`, `ai`, `core`, `app.py`, `mcp_server.py`.
-- **G3 — Vocabulary.** Both scans parse with `ast` and inspect **identifiers
-  and non-docstring string constants**, never raw file text — the technique
-  `test_the_protocol_depends_on_no_reader_technology` already establishes, so
-  that prose describing what a module deliberately avoids is not mistaken for
-  a dependency on it. Scanning raw text would fail on these very docstrings.
-  - `bridge/message_source.py` contains none of `Msg_`, `message_0`,
-    `Name2Id`, `real_sender_id`, `local_type`, `shard`, and
-    `test_the_protocol_depends_on_no_reader_technology` still passes
-    **unmodified** — that existing test is what continues to exclude
-    transport, codec and vendor vocabulary.
-  - `wechatprovider/` contains none of `Containers`, `xwechat_files`,
-    `db_storage`, `com.tencent`, `/Users/`, `PRAGMA key`, `enc_key`, `salt`,
-    `sqlcipher`, `task_for_pid`, `lldb`, `codesign`, `sudo`, `shell=True`,
-    `immutable`.
-- **G4 — Invariants.** Every invariant in §8.3 has a test constructing the
-  violating object and asserting `ReaderContractError`. An `ast` scan over
-  identifiers in `wechatprovider/coverage.py` and `bridge/message_source.py`
-  asserts none matches `fresh`, `stale_after`, `max_age` or `threshold`, and
-  that `coverage.py` binds no numeric constant other than `0`.
-- **G5 — Vocabulary parity.** A test imports both `message_source` and
-  `memory_store` and asserts the four coverage tokens are equal
-  constant-by-constant, so the reader and the store can never drift apart.
-- **G6 — No silent omission.** A property-style test over generated
-  inventories asserts `plan.accounted_keys == inventory.keys` for every
-  inventory the router is given, and that `probe` preserves the key set.
-- **G7 — Identity honesty.** A test asserts that an ambiguous identifier
-  produces `NAME_SOURCE_UNRESOLVED` with `display_name is None`, that the name
-  never appears in the result, and that `identity_resolution` degrades while
-  `coverage.status` does not.
-
-### Decision gates — required before promotion is even proposed
-
-- **P1 — An explicit operator decision** recorded in `Decisions.md`, amending
-  or extending D-017, that names `wechatprovider` as a promotable provider and
-  states what it is promoted *to*. An import statement is not a promotion
-  decision.
-- **P2 — A real multi-part container**, read under a fresh explicit decision and
-  per-occasion consent. **This is not satisfiable today:** D-030 lapsed, no
-  access material is retained, and obtaining more is not an ordinary next
-  action. §5.5's assumption is unverified and stays unverified until P2.
-- **P3 — The licensing review** D-017 still records as owed, covering whatever
-  arrangement promotion would create.
-- **P4 — A contract decision:** whether the bridge consumes `MessageSource` or
-  `CoverageAwareReader`, and what the four MCP tools do with a partial answer.
-  A tool that drops `coverage` on the floor would undo this entire design.
-- **P5 — Default unchanged.** Promotion does not alter
-  `selected_source_name()`'s `visual` default. Visual capture / OCR remains the
-  production path, and any database source stays explicitly selected,
-  off by default, and fail-closed when unselected.
-
-**Until every gate above is met, `wechatprovider` is what `wechatdb` is today:
-an isolated candidate that nothing imports.**
+| # | Case | Asserted |
+|---|---|---|
+| **T-1** | **All parts readable** | 3 parts, disjoint ranges, all open and recognised; `observed_complete`; `reasons == ()`; `truncated is False`; `complete_through == observed_through`; every expected message present exactly once |
+| **T-2** | **One unknown part** | T-1 plus a listed entry matching no known shape; it appears in the plan's exclusions with a reason; `observed_partial`; `segment_unknown in reasons`; **messages identical to T-1** — an unknown part changes the claim, not the content; constructing a complete coverage with that reason raises `ReadContractError` |
+| **T-3** | **One unavailable part** | variants for "will not open" and "opens with unrecognised schema"; `observed_partial`; `segment_unavailable in reasons`; the other parts' messages **are still returned** — a per-part failure is not fatal. Third variant: every part refuses → `unavailable`, `items == ()`, `trustworthy_empty is False` |
+| **T-4** | **Query spanning parts** | one conversation present in all 3 parts; all 3 planned; messages correctly ordered across part boundaries; `observed_complete`. Variant: a fourth part lacks that conversation → excluded **for cause**, coverage still complete — excluded-for-cause is accounted for, not omitted |
+| **T-5** | **Safe early stop** | descending established ranges, `limit + 1` collected in the newest part, every unvisited part provably older; stop is `safe`; `truncated is True` with `limit_reached`; `traversal_incomplete` **not** present; `observed_through` is stated. Control variant with a larger limit → `exhausted`, `truncated is False`, `observed_complete`, proving the partial verdict came from truncation alone |
+| **T-6** | **Unsafe early stop** | variant (a) an unvisited part has no established bounds; variant (b) an unvisited part's maximum lies inside the window | both `unsafe`; reasons contain **both** `limit_reached` and `traversal_incomplete`; `observed_partial`; `observed_through is None` — an unexplained stop may not claim how far forward it looked. Variant (c): the router orders the unbounded part first, so with a larger limit it is visited and the stop becomes safe |
+| **T-7** | **Timestamp freshness mismatch** | source declares `T_src`; newest readable message is `T_read < T_src`. (a) open-ended window and (b) `window.end` between them → `evidence_potentially_stale`, `source_ahead_of_read in reasons`, `observed_partial`, **both timestamps carried**. (c) `T_src` outside the window → `evidence_potentially_stale` **and** `observed_complete`. (d) `T_src` absent from a source whose only completeness evidence is that boundary → `freshness_unknown` **and** `completeness_unstated`, so `observed_partial` — the downgrade comes from the structural reason, never from the freshness token. (e) `T_src` absent, but the traversal accounted for every part → `freshness_unknown` **and** `observed_complete`. No test anywhere compares against a clock or a constant |
+| **T-8** | **Identity resolution** | remark beats nickname; a room nickname applies inside that room and not outside it; an identifier with two conflicting same-kind names resolves to **no name**, is absent from the mapping, and **neither candidate name appears anywhere in the result**; identity state degrades while `coverage.status` is **unaffected**. Variant with no readable identity part: conversations identify by digest per the parser's documented fallback, and **coverage is still complete** |
+| **T-9** | **Zero messages: complete vs incomplete** | (a) all parts readable, window genuinely empty → `items == ()`, `observed_complete`, `trustworthy_empty is True`. (b) identical window, one part unavailable → `items == ()`, `observed_partial`, `segment_unavailable`, `trustworthy_empty is False`. The two results carry an **identical `items` tuple and an identical `window`** and differ only in coverage. **The single most important test in the suite** |
+| **T-10** | **Source-internal truncation below the caller's limit** | a source returns 3 items for a 200-item request while having truncated internally → `observed_partial`, never complete. Run against the visual store, the Rion adapter's bounded sweep, and the provider. Additionally: `memory_ingest` records the **source's** status, not `len(messages) < message_limit`; a `not_observed` read writes **no coverage row** and does not raise `coverage_status_unknown`; and the length-inference branch is gone from the ingestor |
+| **T-11** | **Architecture guard** | AST scan, never raw text, so prose describing what a module avoids is not mistaken for a dependency. No module under `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`, nor `app.py` / `mcp_server.py` imports `wechatdb` or the provider package at any depth (the existing guard generalised from one candidate name to a tuple); `bridge/message_source.py`'s import set is still `⊆ {__future__, dataclasses, typing}`; the provider imports nothing from `memory/`, `shadow/`, `ai/` or `core/` |
+| **T-12** | **No hidden thresholds, no leaked vocabulary** | AST scan over identifiers and non-docstring string constants: `bridge/message_source.py` contains none of `Msg_`, `Name2Id`, `real_sender_id`, `local_type`, `shard`, `message_0`; no identifier in the coverage or freshness assembly matches `fresh` as a standalone flag, `stale_after`, `max_age` or `threshold`; the assembly binds no numeric constant other than `0` |
+| **T-13** | **Provider source scan** | the provider package contains none of `Containers`, `xwechat_files`, `db_storage`, `com.tencent`, `/Users/`, `PRAGMA key`, `enc_key`, `salt`, `sqlcipher`, `task_for_pid`, `lldb`, `codesign`, `sudo`, `shell=True`, `immutable` |
+| **T-14** | **Existing sources author conservative coverage** | `StoreMessageSource`: fewer items than the limit **and** the scope's newest stored moment reached → complete; limit filled → `observed_partial` + `limit_reached` + `truncated`. `RionReaderAdapter`: the reader's `has_more` is **consumed** — true → partial with `limit_reached`; absent → partial with `completeness_unstated`, never complete; the conversation sweep hitting its internal scan bound → partial with `traversal_incomplete`. Neither source ever reports complete on evidence it does not have |
+| **T-15** | **Envelope shape is unchanged** | `NormalizedMessage.payload()` still has exactly its ten keys, with no coverage field; the four MCP tools' response shape is byte-identical to today's; `ReadCoverage.payload()` contains only tokens, counts and timestamps |
+| **T-16** | **Invariants** | every invariant in §6.3 and §5.3 has a test constructing the violating object and asserting `ReadContractError`, including the impossible row 13 of §6.7 |
 
 ---
 
-## 12. Testing
+## 11. Migration sequence
 
-All synthetic. Fixtures are built in code by `wechatprovider/tests/fixtures.py`:
-in-memory or `tmp_path` SQLite databases holding `Msg_<32hex>` tables whose
-column layout matches what `wechatdb` reads, populated with invented text,
-invented `wxid_fixture_*` identifiers, and chosen timestamps. No real data,
-ever.
+Staged so that no caller is ever broken, the wire shape never moves, and each
+step is independently revertible. **No production wiring occurs in this phase:**
+M1–M4 change internal types and honesty; M5 and M6 are gated.
 
-| # | Fixture | Construction | Asserted |
-|---|---|---|---|
-| **F-1** | **All parts readable** | 3 message parts, disjoint time ranges, all open, all recognised; 1 identity part | `census(known=0, readable=3, unknown=0, unavailable=0)`; `status == observed_complete`; `reasons == ()`; `truncated is False`; `complete_through == observed_through`; every expected message present exactly once |
-| **F-2** | **Unknown part** | F-1 plus a fourth listed entry whose name matches nothing | catalogue marks it `UNKNOWN`; it appears in `plan.excluded` with `not_readable`; `census.unknown == 1`; `status == observed_partial`; `segment_unknown in reasons`; **messages identical to F-1** — the unknown part changes the claim, not the content; constructing `observed_complete` with this census raises `ReaderContractError` |
-| **F-3** | **Unavailable part** | F-1 with one part's opener raising `shard_open_refused`; and a second variant where it opens but has an unrecognised schema | `UNAVAILABLE` with the right token in each variant; `census.unavailable == 1`; `status == observed_partial`; `segment_unavailable in reasons`; messages from the other two parts are still returned — a failure is not fatal; a third variant where **every** part refuses gives `status == unavailable` and `messages == ()` |
-| **F-4** | **Query spanning parts** | one conversation whose table exists in all 3 parts, 4 messages per part, window covering all 12 | all 3 parts planned with `conversation_present`; 12 messages, correctly ordered across the part boundary; `status == observed_complete`. Variant: a fourth part exists but lacks that table → `plan.excluded` names it `conversation_absent`, and coverage is **still complete** — an excluded-for-cause part is accounted for, not omitted |
-| **F-5** | **Safe early stop** | 3 parts with established, disjoint, descending ranges; `limit + 1` records collected inside the newest part; every unvisited part strictly older than the oldest collected message | `outcome.early_stop == STOP_SAFE`; `unvisited` non-empty; `truncated is True` and `result_limit_reached in reasons`; `traversal_stopped_with_unexplained_remainder` **not** in reasons; `observed_through` is stated. Status is partial for the *limit* and for nothing else — a control variant with `limit` raised above the total returns `STOP_EXHAUSTED`, `truncated is False` and `observed_complete`, proving the partial verdict came from truncation and not from stopping |
-| **F-6** | **Unsafe early stop** | same as F-5 but one unvisited part has `bounds_source == BOUNDS_ABSENT`; and a second variant where an unvisited part's `max_timestamp` is inside the window | `STOP_UNSAFE` in both; reasons contain **both** `result_limit_reached` and `traversal_stopped_with_unexplained_remainder`; `status == observed_partial`; `observed_through is None` — an unsafe stop may not claim how far forward it looked. A third variant proves the router **orders** an unestablished-bounds part first, so with a large enough `limit` it is visited rather than skipped and the stop becomes safe |
-| **F-7** | **Source timestamp mismatch** | identity part declares a session latest timestamp `T_src`; the newest readable message is at `T_read < T_src`. **(a)** open-ended window; **(b)** `window.end` between `T_read` and `T_src`; **(c)** `window.end < T_read`, i.e. `T_src` outside the window | (a) and (b): `staleness == STALENESS_SOURCE_AHEAD`, `source_reports_newer_than_read in reasons`, `status == observed_partial`, both timestamps carried. (c): `staleness == STALENESS_SOURCE_AHEAD` **and** `status == observed_complete` — the newer message is outside what was asked for. (d) `T_src` absent, open-ended window: `STALENESS_NOT_COMPARABLE` and `source_boundary_unknown in reasons`. (e) `T_src` absent, bounded window: `NOT_COMPARABLE`, no reason, `observed_complete` |
-| **F-8** | **Identity resolution** | identity part with: a contact with a remark and a nickname; a room member with a room-specific nickname; an identifier with two conflicting same-kind names; an identifier absent entirely | remark beats nickname; room nickname beats remark inside that room and not outside it; the conflicting identifier is **absent from `display_names`**, so the parser falls back to `sender_id` unchanged, `resolve()` returns `NAME_SOURCE_UNRESOLVED` / `display_name is None`, and neither candidate name appears anywhere in the result; `identity_resolution == resolved_partial` while `coverage.status` is unaffected. Variant with no readable identity part: `identity_source_unavailable`, `session_names() == {}`, conversations identify by digest per the parser's documented fallback, every `ownership == "other"`, and **coverage is still complete** |
-| **F-9** | **Zero messages, complete vs incomplete** | **(a)** all parts readable, window genuinely empty. **(b)** identical window, one part unavailable | (a) `messages == ()`, `status == observed_complete`, `trustworthy_empty is True`. (b) `messages == ()`, `status == observed_partial`, `segment_unavailable in reasons`, `trustworthy_empty is False`. The two results carry an **identical `messages` tuple and an identical `window`**, and differ only in `coverage` — which is exactly the case where a caller reading `messages` alone would write "no messages" and be wrong. The single most important test in the suite |
-| **F-10** | **Architecture guard** | AST scan, not text matching, so prose describing what a module avoids cannot be mistaken for a dependency on it | no module under `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`, nor `app.py` / `mcp_server.py`, imports `wechatdb` or `wechatprovider` at any depth; `bridge/message_source.py`'s import set is still `⊆ {__future__, dataclasses, typing}`; the forbidden-vocabulary scans of G3 pass; `wechatprovider` imports no module from `memory/`, `shadow/`, `ai/`, or `core/` |
+**M1 — Move the coverage tokens.** Define the four `COVERAGE_*` tokens in
+`bridge/message_source.py`. `memory/memory_store.py` imports them (with the
+`sys.path` fallback `memory_ingest` already uses) and re-exports them through
+its existing `__all__`. No caller changes. `memory/tests/test_layering.py` needs
+no edit — `message_source` is already an allowed import. The `message_source`
+guard needs no edit — constants require no import.
 
-Two supporting tests that are not fixture classes but are required by G1:
+**M2 — Add the read types.** `ReadWindow`, `ReadFreshness`, `ReadCoverage`,
+`ReadResult[T]`, `ReadContractError`, the reason tokens and the state sets, with
+their invariants and tests. `READ_REASON_LIMIT_REACHED` and
+`READ_REASON_SOURCE_ERROR` are spelled identically to the tokens
+`memory_ingest` defines today; `memory_ingest` imports them from
+`message_source` rather than keeping a second copy. Nothing consumes the new
+types yet.
 
-- **Timestamp normalisation in routing.** A part whose `create_time` column
-  mixes seconds and milliseconds yields bounds in seconds. Without this, one
-  millisecond row gives a `max_timestamp` in the year 5138 and that part is
-  routed first for every query, forever.
-- **Conversation-id agreement.** `wechatprovider.conversation_identifier` and
-  `rion_reader_adapter.conversation_identifier` return the same value for the
-  same input. This test lives under `wechatprovider/tests/` — never under
-  `bridge/`, which G2 scans.
+**M3 — Sources author their coverage.** `StoreMessageSource` and
+`RionReaderAdapter` gain coverage-returning read methods **beside** their
+existing four, so both shapes exist at once and every current caller keeps
+working. `RionReaderAdapter` stops discarding `has_more`, and its bounded
+conversation sweep reports its own limit.
 
----
+**M4 — Memory consumes rather than infers.** `MemoryIngestor.ingest_from_source`
+reads the source's `ReadCoverage`; `not_observed` writes no row; the
+`len(messages) < message_limit` branch is **deleted** once both shipped sources
+author coverage — not kept as a fallback, because it is wrong in precisely the
+cases this design exists to catch.
 
-## 13. Resolved questions
+**M5 — The Protocol migrates (gated).** `MessageSource`'s three collection
+methods become `ReadResult`-returning and the transitional list methods are
+removed, once every caller — the four MCP tools, `memory_sync`, the shadow
+runner path — reads through the envelope. `status()` is untouched throughout.
+This step requires an explicit decision on what the four tools do with a partial
+answer; a tool that drops coverage on the floor would undo the whole design.
 
-Every question this design raised, and its answer. None is left open.
-
-1. **Should `ReaderCoverage` reuse `memory_store.CoverageVerdict`?**
-   No — it reuses the *vocabulary* verbatim and defines a reader-side type.
-   Importing it would invert the dependency direction (`memory_sync` already
-   imports `message_source`) and would break the guard that keeps
-   `message_source.py` standard-library-only. §7.1; pinned by G5.
-
-2. **Should `MessageSource` gain coverage?**
-   No. Three live callers depend on its four-method shape and its published
-   wire payload. `CoverageAwareReader` is added beside it and consumed by
-   nothing today.
-
-3. **Does an unavailable identity part downgrade message coverage?**
-   No. Identity and coverage are different facts;
-   `ReaderResult.identity_resolution` carries the former. Merging them would
-   make a missing contact table report the messages as incomplete, which is
-   false. F-8 pins it.
-
-4. **Do unknown or unavailable parts make an early stop unsafe?**
-   No — they were never visitable, so the traversal did not skip them. They
-   downgrade coverage independently and always. Keeping the two mechanisms
-   separate means neither can mask the other. §6.3, F-2/F-3/F-6.
-
-5. **Does "source reports newer" always downgrade?**
-   No. Only when the newer message falls inside the requested window, or the
-   window is open-ended. Otherwise `staleness` reports the fact and `status`
-   stays complete. Downgrading unconditionally would make every bounded
-   historical query permanently partial. §8.2 step 4, F-7(c).
-
-6. **Where does the "known but unprobed" state show up?**
-   As `segment_unprobed`. `status()` catalogues without probing, so `known`
-   parts are normal there; a *read* probes every message part first, so a
-   remaining `known` part at read time means a probe was refused, and that is a
-   downgrade.
-
-7. **How does identity reach the parser without changing it?**
-   `IdentityResolver.mappings()` returns exactly the `(session_names,
-   display_names)` pair `wechatdb.parse_conversation` already accepts. That is
-   the entire integration surface, and `wechatdb` is not edited. §5.3.
-
-8. **What happens when identity is ambiguous?**
-   Nothing is picked. The identifier is omitted from `display_names`, the
-   parser's existing `sender_name → sender_id` fallback applies, `resolve()`
-   reports `NAME_SOURCE_UNRESOLVED`, and `identity_resolution` degrades. Same
-   rule D-022 fixed for conversation discovery.
-
-9. **What if the time-partitioning assumption is wrong?**
-   Nothing breaks. Unestablished bounds always overlap and never satisfy
-   `strictly_older_than`, so such a part is always visited and never stepped
-   past. The assumption buys efficiency, not correctness. §5.5, F-6.
-
-10. **Does the provider implement `MessageSource` so it could be dropped in?**
-    No, deliberately. Its list-returning methods cannot express a partial
-    answer; satisfying them would mean either discarding coverage or raising on
-    every imperfect read. Which contract the bridge consumes is gate P4.
-
-11. **Why `mode=ro` and not `immutable=1`?**
-    `immutable=1` makes SQLite ignore the write-ahead log, silently dropping
-    not-yet-checkpointed messages. The interface gate already recorded a
-    WAL-resident row as a real shape. When the log cannot be read, the honest
-    outcome is an `UNAVAILABLE` part and a visible coverage downgrade. Asserted
-    by G3.
-
-12. **Is `ReaderSegmentCensus` leakage of a provider concept into generic core?**
-    No. "Segment" names a generic property — a source composed of independently
-    readable parts — and carries no WeChat vocabulary. A non-composite source
-    reports `None`, which is a different claim from a census of zeroes. G3's
-    scan is what keeps the distinction honest.
-
-13. **Where do FTS and caching go?**
-    Nowhere, now. §9 records only that the envelope would be reused unchanged,
-    and that a cached or indexed answer must never claim coverage stronger than
-    an unindexed read of the same window.
-
-14. **Does anything here justify obtaining a WeChat database?**
-    No. D-030 lapsed, no access material is retained, and every test in §12 is
-    synthetic. P2 records that real multi-part verification is a decision
-    gate, not an implementation task, and that it is **not satisfiable today**.
+**M6 — The provider package (gated).** Created only after §12's gates are met.
+Until then this design is a document, and `wechatdb` remains exactly what it is
+today: an isolated candidate that nothing imports.
 
 ---
 
-## 14. What this document changes
+## 12. Promotion gates
 
-Nothing executable. It adds one design document. It does not create, edit or
-delete any module, test, dependency, build phase, environment variable, default
-or route. `wechatdb` is untouched. The MCP surface stays exactly four tools.
-`selected_source_name()` still defaults to `visual`, and visual capture / OCR
-remains the production read path.
+**No production wiring in this stage.** Passing every gate below is a
+precondition for *considering* promotion, never a grant of it.
+
+**Implementation gates.**
+
+- **G1 — Behaviour.** T-1 … T-16 green, each verified to fail when reverted.
+- **G2 — Isolation.** The existing product-import guard, generalised to cover
+  the provider package as well as `wechatdb`, green across `bridge`, `memory`,
+  `shadow`, `ai`, `core`, `app.py` and `mcp_server.py`.
+- **G3 — Vocabulary.** T-12 and T-13 green;
+  `test_the_protocol_depends_on_no_reader_technology` still passing
+  **unmodified**. That test is the leakage guard and is not to be relaxed.
+- **G4 — Honesty.** Every §6.3 and §5.3 invariant pinned by a construction test.
+
+**Decision gates.**
+
+- **P1 — An explicit product decision to promote,** recorded in `Decisions.md`,
+  naming what the provider is promoted *to*. An import statement is not a
+  promotion decision, and D-017's provider-isolation amendment stays intact:
+  product core still may not import a provider, and promotion may happen only
+  through the Reader contract.
+- **P2 — Real multi-part verification.** **Not satisfiable today.** D-030
+  lapsed, no access material is retained, and a repeat acquisition requires a
+  new explicit decision and fresh per-occasion consent. **This design does not
+  reopen D-030 and supplies no argument for reopening it.** §7.2's partitioning
+  assumption stays unverified until P2, and correctness does not depend on it.
+- **P3 — The licensing review** D-017 still records as owed.
+- **P4 — Contract decision (M5).** What the four MCP tools do with a partial
+  answer, decided before the Protocol migrates.
+- **P5 — Visual remains the default production source.** Promotion does not
+  change `selected_source_name()`'s `visual` default. A database source stays
+  explicitly selected, off by default, and fail-closed when unselected.
+
+**Standing limits, unchanged by this design.** Complete-container coverage and
+future-WeChat-version compatibility remain **unproven**; E-022's evidence is
+`Verified (scoped)` to one operator's current `message_0` and must not be
+generalised. Standing acquisition or input is a separate decision.
+
+---
+
+## 13. Alternatives
+
+### Alternative 1 — Leave the single-DB candidate unchanged
+
+Make no orchestration layer; leave the length-inference in `memory_ingest`.
+
+**For.** Zero new code and zero new surface; isolation is already proven;
+nothing can regress.
+**Against.** It answers none of §1.2. A single-database parser handed a
+multi-part container answers about one part and cannot say so, and the coverage
+claim the system publishes today stays a guess made by the layer furthest from
+the evidence. The promotion question stays permanently unanswerable because
+there is nothing to gate.
+**Verdict.** This is what is true *today* and it stays true until §12 is met.
+Rejecting it as the permanent end state is not the same as abandoning it now.
+
+### Alternative 2 — Adopt `wx-cli-again` wholesale
+
+**For.** It reportedly already handles multi-file containers, so routing would
+be someone else's problem.
+**Against.** (a) Licence and provenance are unreviewed — the H5A review process
+exists precisely because this cannot be assumed. (b) Such a tool's value is
+concentrated in **acquisition**, which non-goal 1 forbids in the shipped
+dependency graph; adopting it wholesale imports exactly the capability D-005
+excludes. (c) It would place WeChat schema knowledge where product core depends
+on it, which D-017 forbids. (d) R-003 already rejected invoking or vendoring a
+stock `wechat-cli`; adopting a successor wholesale is the same route under a new
+name. (e) It drags a foreign runtime into the graph for a thin slice of
+behaviour.
+**Verdict.** **Rejected.**
+
+### Alternative 3 — Clean-room provider orchestration around `wechatdb` — **RECOMMENDED**
+
+**For.** (a) D-017 is satisfied by construction: shard and schema vocabulary
+stays inside the provider, and the envelope is source-neutral. (b) `wechatdb`
+keeps its single provable responsibility and is not edited. (c) No acquisition
+capability is introduced — the provider is *handed* its inputs and never
+searches. (d) Coverage honesty becomes a **type invariant**: a complete coverage
+holding a downgrade reason cannot be constructed. (e) It is fully testable
+without real data, which is the only testing available. (f) It benefits the two
+shipped sources immediately, before any provider exists — M3 and M4 fix a real
+defect in the visual path's recorded coverage.
+**Against.** New code that is not wired, carrying maintenance cost with no
+immediate product benefit; and routing efficiency rests on an unverified
+structural assumption.
+**Mitigation.** The assumption being false degrades efficiency, never
+correctness (§7.2). The unwired cost is bounded by §12, which keeps the provider
+out of the graph until a decision admits it.
+
+**Recommendation: Alternative 3.**
+
+### Why no parser replacement
+
+`wechatdb` is the only component in this area with `Verified` synthetic evidence
+and `Verified (scoped)` real evidence behind it (F-036, F-037), and its two
+review defects were each reproduced as a failing test before being fixed
+(`7919e8f`, `cc89e31`). The gap this design addresses is **not parsing** — it is
+orchestration, coverage and honest incompleteness reporting. Replacing a proven
+parser to obtain an unproven one, in order to solve a problem the parser does
+not have, would discard the project's best evidence for no gain. The operator
+direction is explicit: keep `wechatdb`; do not replace it.
+
+---
+
+## 14. Clean-room note
+
+`wx-cli-again` is a **STUDY-only** reference. It may be read to understand *what
+behaviour a correct multi-part reader exhibits* — that a container is
+partitioned, that a conversation can span partitions, that a session record may
+carry its own latest-message moment. It supplies **questions, not answers**.
+
+**No source code, SQL text, query shape, test fixture, fixture datum, comment,
+or identifier-naming scheme may be copied from it into this repository.**
+Everything in §5–§10 is expressed in this project's own vocabulary and derived
+from this project's own `wechatdb`, `bridge/` and `memory/` conventions. This
+mirrors how F-036's schema knowledge was handled: public references were read as
+a source of *facts*, and no code was copied.
+
+This is **STUDY**, not **ADOPT** and not **REPLACE**.
+
+---
+
+## 15. Resolved questions
+
+1. **Who owns the coverage tokens?** `bridge/message_source.py`, exclusively.
+   `memory_store` imports and re-exports them. Two copies pinned by an equality
+   test is still two copies. §5.1.
+2. **Does `message_source` importing nothing survive the move?** Yes — a string
+   constant requires no import, and the existing guard passes unmodified. The
+   dependency that *does* appear runs `memory → message_source`, which is the
+   direction the repository already uses.
+3. **Why not reuse `memory_store.CoverageVerdict` directly?** It answers a
+   store's question (what has ever been ingested), not a read's question (what
+   this call covered): it carries no window, no truncation, no freshness, and no
+   item count. The vocabulary is reused verbatim; the type is not.
+4. **Does `MessageSource` change?** Yes — its three collection methods return
+   `ReadResult[...]`, because a list cannot express a partial answer. `status()`
+   stays `SourceStatus`, because readiness is not per-read coverage. The change
+   is staged through M1–M5 so no caller breaks and the wire shape never moves.
+5. **Does coverage go on a message?** Never. `NormalizedMessage.payload()` keeps
+   its ten keys. Coverage describes the whole answer, which is why it lives on
+   the envelope. T-15.
+6. **Returned `unavailable` or raised `MessageSourceError`?** Raise when no
+   envelope carrying evidence can be built; return `unavailable` when the source
+   enumerated what it would have read and none of it could be read. Both
+   converge on the same recorded status downstream, and the no-fallback
+   guarantee is untouched. §6.2.
+7. **What is `not_observed` for, and can it be stored?** It distinguishes
+   "nothing has been looked at" from "we looked and found nothing". It is
+   **returned** by a read and **never written** as a coverage row —
+   `memory_store.COVERAGE_STATES` excludes it by design, and absence of a row is
+   how it is recorded. T-10.
+8. **Does potentially-stale make a read partial?** Only when the newer material
+   lies inside the requested window, or the window is open-ended. Otherwise
+   freshness reports the fact on its own field and the read stays complete for
+   the window it was asked about. §6.4, T-7(c).
+9. **Is there a staleness threshold anywhere?** No. One exact comparison of two
+   timestamps the source itself supplied, no clock, no constant, no `fresh`
+   boolean. T-12.
+10. **Do unknown or unavailable parts make an early stop unsafe?** No — they
+    were never visitable, so the traversal did not skip them. They downgrade
+    coverage independently and always, and keeping the mechanisms separate means
+    neither masks the other. §7.2.
+11. **Does an unresolvable name make a message unobserved?** No. It makes it
+    unnamed. Identity state never touches `ReadCoverage`. §7.4, T-8.
+12. **Does the parser change?** No. `IdentityResolver` produces exactly the
+    `(session_names, display_names)` pair `parse_conversation` already accepts;
+    that is the entire integration surface. §7.3.
+13. **What if the time-partitioning assumption is wrong?** Nothing breaks.
+    Unestablished bounds always overlap and never satisfy the early-stop test,
+    so such a part is always visited. The assumption buys efficiency, not
+    correctness. §7.2.
+14. **Where do FTS and caching go?** Nowhere, now. Only one constraint is
+    recorded: an indexed or cached answer may never claim coverage stronger than
+    an unindexed read of the same window. §7.6.
+15. **Does any of this justify obtaining a WeChat database?** No. D-030 lapsed,
+    no access material is retained, every test is synthetic, and P2 records real
+    multi-part verification as a decision gate that is **not satisfiable today**.
+16. **Does this change what ships?** No. Visual capture remains the production
+    path and the default, the MCP surface stays at four tools, and nothing in
+    product core imports a provider.
+
+---
+
+## 16. What this document changes
+
+Nothing executable. It adds one design document and records one decision
+(D-031). It creates, edits or deletes no module, test, dependency, build phase,
+environment variable, default or route. `wechatdb` is untouched. The MCP surface
+stays exactly four tools, `selected_source_name()` still defaults to `visual`,
+and visual capture / OCR remains the production read path.
