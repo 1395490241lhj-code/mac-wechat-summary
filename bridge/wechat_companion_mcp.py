@@ -208,7 +208,7 @@ def list_conversations(limit: int | None = None) -> dict[str, Any]:
     capped = clamp(limit, DEFAULT_CONVERSATIONS, MAX_CONVERSATIONS)
     try:
         source = active_source()
-        conversations = source.list_conversations(capped)
+        conversations = tuple(source.list_conversations(capped))
     except MessageSourceError as error:
         return unavailable(error)
     log(f"list_conversations: returned {len(conversations)} rows (limit {capped})")
@@ -241,7 +241,9 @@ def get_messages(
                 "detail": "conversation_id must be an integer."}
     try:
         source = active_source()
-        ordered = source.get_messages(conversation_id, capped, before_sequence)
+        ordered = tuple(
+            source.get_messages(conversation_id, capped, before_sequence)
+        )
     except MessageSourceError as error:
         return unavailable(error)
     log(f"get_messages: returned {len(ordered)} rows (limit {capped})")
@@ -274,7 +276,7 @@ def get_recent_messages(
                 "detail": "since_observed_at must be a Unix timestamp."}
     try:
         source = active_source()
-        rows = source.get_recent_messages(since, capped)
+        rows = tuple(source.get_recent_messages(since, capped))
     except MessageSourceError as error:
         return unavailable(error)
     log(f"get_recent_messages: returned {len(rows)} rows (limit {capped})")

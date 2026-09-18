@@ -989,6 +989,143 @@ def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeyp
     assert "ARCHIVE-TEXT" not in rendered
 
 
+# --- The tools tolerate either shape -----------------------------------------
+#
+# During the migration a source may hand back a bare list or a ReadResult, and
+# the three collection tools have to serve the same answer from either. The
+# stub below is the only place in this suite that returns a ReadResult, and it
+# contacts nothing: no store, no reader, no database, no agent-read opt-in.
+
+ENVELOPE_CONVERSATIONS = [
+    ms.NormalizedConversation(
+        id=11, title="Fixture Contact A", first_seen_at=None,
+        last_seen_at=300.0, source=ms.SOURCE_DATABASE),
+    ms.NormalizedConversation(
+        id=22, title="Fixture Room", first_seen_at=None,
+        last_seen_at=100.0, source=ms.SOURCE_DATABASE),
+]
+
+ENVELOPE_MESSAGES = [
+    ms.NormalizedMessage(
+        id=1, conversation_id=11, sequence=7, sender="Fixture Contact A",
+        ownership="other", visible_time=None, text="fixture one", kind="text",
+        confidence=1.0, first_observed_at=100.0, source=ms.SOURCE_DATABASE),
+    ms.NormalizedMessage(
+        id=2, conversation_id=11, sequence=8, sender="Fixture Me",
+        ownership="mine", visible_time=None, text="fixture two", kind="text",
+        confidence=1.0, first_observed_at=200.0, source=ms.SOURCE_DATABASE),
+]
+
+
+def lawful_coverage(count):
+    """A complete, unremarkable claim. P8 consumes none of it; it exists so the
+    stub can build a ReadResult at all."""
+    return ms.ReadCoverage(
+        status=ms.COVERAGE_COMPLETE, reason=ms.REASON_FULL_WINDOW_OBSERVED,
+        requested_start=None, requested_end=None,
+        observed_through=None, complete_through=None,
+        freshness=ms.ReadFreshness.EVIDENCE_CONSISTENT,
+        truncated=False, item_count=count,
+    )
+
+
+class ShapedSource:
+    """Serves the same fixtures as a list or as a ReadResult, on request."""
+
+    name = ms.SOURCE_DATABASE
+
+    def __init__(self, *, envelope: bool):
+        self.envelope = envelope
+
+    def _serve(self, items):
+        if not self.envelope:
+            return list(items)
+        return ms.ReadResult(items=tuple(items),
+                             coverage=lawful_coverage(len(items)))
+
+    def status(self):
+        return ms.SourceStatus(
+            ready=True, source=self.name, conversation_count=None,
+            message_count=None, detail=None)
+
+    def list_conversations(self, limit):
+        return self._serve(ENVELOPE_CONVERSATIONS[:limit])
+
+    def get_messages(self, conversation_id, limit, before_sequence=None):
+        return self._serve(ENVELOPE_MESSAGES[:limit])
+
+    def get_recent_messages(self, since_observed_at, limit):
+        return self._serve(ENVELOPE_MESSAGES[:limit])
+
+
+def serve_with(monkeypatch, *, envelope: bool):
+    source = ShapedSource(envelope=envelope)
+    monkeypatch.setattr(bridge, "active_source", lambda: source)
+    return source
+
+
+def test_the_tools_serve_a_result_envelope_unchanged(monkeypatch):
+    """The wire answer must not depend on how a source packaged its rows.
+
+    Compared payload against payload rather than field by field, so a key that
+    appeared or vanished with the shape would fail here rather than survive to
+    a client.
+    """
+    calls = [
+        (bridge.list_conversations, {"limit": 5}),
+        (bridge.get_messages, {"conversation_id": 11, "limit": 5}),
+        (bridge.get_recent_messages, {"since_observed_at": 0.0, "limit": 5}),
+    ]
+
+    for tool, kwargs in calls:
+        serve_with(monkeypatch, envelope=False)
+        from_list = call(tool, **kwargs)
+        serve_with(monkeypatch, envelope=True)
+        from_envelope = call(tool, **kwargs)
+
+        assert from_envelope == from_list, tool
+        assert from_envelope["ok"] is True
+        assert "coverage" not in from_envelope
+
+    # And the keys themselves are the ones already published, per tool.
+    serve_with(monkeypatch, envelope=True)
+    assert set(call(bridge.list_conversations, limit=5)) == {
+        "ok", "source", "limit", "conversations"}
+    assert set(call(bridge.get_messages, conversation_id=11, limit=5)) == {
+        "ok", "source", "conversation_id", "limit", "next_before_sequence",
+        "messages"}
+    assert set(call(bridge.get_recent_messages,
+                    since_observed_at=0.0, limit=5)) == {
+        "ok", "source", "since_observed_at", "limit", "messages"}
+
+
+def test_paging_state_survives_a_result_envelope(monkeypatch):
+    """The one production site that indexes a source's return.
+
+    ``next_before_sequence`` is the first row's sequence, and a ReadResult has
+    no ``__getitem__`` on purpose -- a consumer that reaches past iteration is
+    the consumer this design exists to correct. Reading it from a materialised
+    tuple is what keeps both shapes working.
+    """
+    serve_with(monkeypatch, envelope=False)
+    from_list = call(bridge.get_messages, conversation_id=11, limit=5)
+
+    serve_with(monkeypatch, envelope=True)
+    from_envelope = call(bridge.get_messages, conversation_id=11, limit=5)
+
+    assert from_list["next_before_sequence"] == 7
+    assert from_envelope["next_before_sequence"] == 7
+    assert from_envelope["messages"] == from_list["messages"]
+
+    # An empty answer still reports no paging cursor rather than raising.
+    monkeypatch.setattr(ShapedSource, "get_messages",
+                        lambda self, c, limit, before_sequence=None:
+                        self._serve([]))
+    serve_with(monkeypatch, envelope=True)
+    assert call(bridge.get_messages, conversation_id=11,
+                limit=5)["next_before_sequence"] is None
+
+
 # --- D-017: an isolated schema provider stays isolated ------------------------
 
 #: Every Python tree that is product core or a generic abstraction. A
