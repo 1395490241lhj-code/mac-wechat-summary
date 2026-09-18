@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 #: The visual capture path: frames extracted, reconciled, and stored by the
 #: macOS app under the user's local-persistence consent.
@@ -320,6 +320,52 @@ class ReadCoverage:
         if self.requested_start is not None and self.requested_end is not None:
             if self.requested_start > self.requested_end:
                 raise ValueError("the requested window is inverted")
+
+
+
+#: The item type a result carries. The boundary never inspects an item, which
+#: is exactly why it can be generic over one.
+T = TypeVar("T")
+
+
+@dataclass(frozen=True, slots=True)
+class ReadResult(Generic[T]):
+    """Items plus what the source is entitled to claim about them.
+
+    An empty ``items`` is not an answer on its own. It means "there is nothing"
+    only when ``coverage`` says the window was actually accounted for, and
+    means "nobody looked" otherwise. Keeping the two together is what stops a
+    caller reading the first as the second.
+
+    Carries items and coverage and nothing else. Provenance stays where it
+    already is, on the response envelope that names the source for the whole
+    answer.
+    """
+
+    items: tuple[T, ...]
+    coverage: ReadCoverage
+
+    def __post_init__(self) -> None:
+        # Checked before the count, so that anything without a length is
+        # refused as the wrong shape rather than raising from ``len``.
+        if not isinstance(self.items, tuple):
+            raise ValueError("result items must be a tuple")
+        if self.coverage.item_count != len(self.items):
+            raise ValueError("coverage item count disagrees with the items")
+
+    def __iter__(self):
+        """Migration compatibility only; durable consumers read ``.coverage``.
+
+        Deliberately the whole of what a list-shaped call site gets: there is
+        no indexing, no slicing, no concatenation and no equality with a list,
+        because a consumer that only iterates is the one this design exists to
+        correct. It has to be migrated rather than accommodated.
+        """
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        """Migration compatibility only; durable consumers use ``.coverage``."""
+        return len(self.items)
 
 
 # --- Activation ---------------------------------------------------------------

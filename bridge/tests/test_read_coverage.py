@@ -22,7 +22,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from message_source import ReadCoverage, ReadFreshness  # noqa: E402
+from message_source import (  # noqa: E402
+    ReadCoverage,
+    ReadFreshness,
+    ReadResult,
+)
 
 # --- The spec's vocabulary, transcribed -------------------------------------
 
@@ -448,3 +452,141 @@ def test_a_refusal_never_quotes_what_it_refused():
         assert message == message.lower(), message
         assert message.strip() == message, message
         assert message.isascii(), message
+
+
+# --- ReadResult: invariant 11 ------------------------------------------------
+
+def test_a_result_whose_count_disagrees_with_its_items_is_refused():
+    """The claim and the items it describes have to be the same answer.
+
+    A count that outruns the tuple is a source promising material it did not
+    hand over; a count that falls short is one quietly not accounting for what
+    it did. Both coverages below are lawful on their own, so the refusal can
+    only be invariant 11.
+    """
+    claims_more = complete(item_count=3)
+    with pytest.raises(ValueError):
+        ReadResult(items=("a", "b"), coverage=claims_more)
+
+    claims_fewer = complete(item_count=0, reason=FULL_WINDOW_OBSERVED)
+    with pytest.raises(ValueError):
+        ReadResult(items=("a", "b"), coverage=claims_fewer)
+
+    # Agreement is all that was missing.
+    assert ReadResult(items=("a", "b"), coverage=complete(item_count=2)).items \
+        == ("a", "b")
+    assert ReadResult(items=(), coverage=claims_fewer).items == ()
+
+
+# --- ReadResult: invariant 12 ------------------------------------------------
+
+def test_items_must_be_a_tuple_so_a_result_cannot_be_mutated():
+    """A coverage asserted over a mutable sequence can be made false later.
+
+    The list is refused rather than converted: silently coercing it would let a
+    source keep a reference to the original and go on appending to it, which is
+    the mutation the invariant exists to prevent. Making the immutable shape is
+    the source's job.
+    """
+    lawful = complete(item_count=2)
+
+    with pytest.raises(ValueError):
+        ReadResult(items=["a", "b"], coverage=lawful)
+
+    # Other sequences of the right length are refused for the same reason,
+    # including ones that would have survived a len() check.
+    with pytest.raises(ValueError):
+        ReadResult(items=["a", "b"], coverage=complete(item_count=2))
+    with pytest.raises(ValueError):
+        ReadResult(items="ab", coverage=complete(item_count=2))
+
+    assert ReadResult(items=("a", "b"), coverage=lawful).items == ("a", "b")
+
+
+# --- ReadResult: migration affordances ---------------------------------------
+
+def test_iteration_and_length_are_migration_affordances():
+    """Enough for an existing list-shaped call site to keep working, no more.
+
+    The durable shape is ``.items`` and ``.coverage``. Everything a list can do
+    that is *not* here -- indexing, slicing, concatenation, equality with a
+    list -- is absent on purpose: a consumer that only iterates is exactly the
+    consumer this design exists to correct, so it has to be migrated rather
+    than accommodated.
+    """
+    coverage = complete(item_count=3)
+    result = ReadResult(items=("a", "b", "c"), coverage=coverage)
+
+    assert list(result) == list(result.items)
+    assert len(result) == len(result.items)
+    assert result.coverage is coverage
+
+    for forbidden in ("__getitem__", "get", "__bool__", "__contains__",
+                      "__add__", "__reversed__"):
+        assert forbidden not in vars(ReadResult), forbidden
+
+    with pytest.raises(TypeError):
+        result[0]
+
+    assert result != ["a", "b", "c"]
+
+    # Truthiness follows from __len__ rather than from a __bool__ of its own.
+    # Worth pinning because it is the one list-like behaviour that survives,
+    # and an empty result is emphatically not the same as an absent one: the
+    # coverage beside it is what says whether the emptiness is knowledge.
+    empty = ReadResult(items=(), coverage=complete(reason=EMPTY_WINDOW,
+                                                   item_count=0))
+    assert not empty
+    assert empty.coverage.reason == EMPTY_WINDOW
+
+
+# --- ReadResult: the shape actually works on this runtime --------------------
+
+def test_a_generic_slotted_frozen_result_works_on_this_runtime():
+    """`Generic` + `dataclass(frozen, slots)` is proved, not assumed.
+
+    The combination has a version floor (spec section 6.4 names 3.11), and the
+    failure mode if it were unsupported would be a confusing one at every
+    future call site rather than here. So it is pinned once, on the interpreter
+    the suite actually runs on.
+    """
+    import dataclasses
+    import typing
+
+    assert ReadResult[int] is not None
+    assert typing.get_origin(ReadResult[int]) is ReadResult
+
+    coverage = complete(item_count=2)
+    result = ReadResult[int](items=(1, 2), coverage=coverage)
+
+    assert isinstance(result, ReadResult)
+    assert result.items == (1, 2)
+    assert result.coverage is coverage
+    assert len(result) == 2
+
+    assert [field.name for field in dataclasses.fields(ReadResult)] == [
+        "items", "coverage",
+    ]
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.items = ()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.coverage = complete(item_count=0)
+    assert not hasattr(result, "__dict__")
+
+
+def test_a_result_refusal_never_quotes_what_it_refused():
+    """Same rule as the coverage refusals: fixed tokens, never the value."""
+    for case in (
+        lambda: ReadResult(items=("wxid_a_real_looking_secret",),
+                           coverage=complete(item_count=2)),
+        lambda: ReadResult(items=["/Users/someone/Library/db.sqlite"],
+                           coverage=complete(item_count=1)),
+    ):
+        with pytest.raises(ValueError) as refusal:
+            case()
+        message = str(refusal.value)
+        assert message == message.lower(), message
+        assert message.isascii(), message
+        assert "wxid" not in message
+        assert "/" not in message
