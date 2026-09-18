@@ -1420,8 +1420,10 @@ three are simplifications:
    `wechatdb.provider` on the day that package appears, with no generalisation
    and no second package name to keep in step.
 2. `wechatdb/pytest.ini` already carries `testpaths = tests`, so the provider
-   suite is collected by the existing `wechatdb` suite. There is no fourth
-   package directory and no fourth command in the validation chain.
+   suite is collected by the existing `wechatdb` suite. No fifth test package
+   and no provider-specific validation command is introduced; the full
+   validation chain stays exactly the four suites of §0.3 — `bridge`, `memory`,
+   `wechatdb`, `shadow`.
 3. The dependency direction is *product core → generic boundary ← isolated
    wechatdb provider → wechatdb parser*, not *product core → wechatprovider →
    wechatdb*. Nothing sits on top of `wechatdb`.
