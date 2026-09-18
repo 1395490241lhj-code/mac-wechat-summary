@@ -10,20 +10,21 @@ isolation), D-002, D-005, D-011, D-019, D-020, D-022, D-023, R-003.
 D-030 is **lapsed** and is not reopened by anything in this plan.
 **Status:** Plan only. Nothing here is implemented. This document authorises no
 production change, no route, no promotion and no acquisition.
+**Revision:** amended 2026-09-18 after architecture review — see §0.4.
 
 ---
 
 ## 0. What this plan is
 
 A TDD execution plan for the design approved in the spec above. It decomposes
-the spec's seven-stage rollout (§14 M1…M7) into **18 independently reviewable
-tasks**, each with its own RED test, minimum GREEN implementation, validation
-command and commit boundary.
+the spec's seven-stage rollout (§14 M1…M7) into **19 independently reviewable
+tasks** — one pre-provider task plus the seven stages — each with its own RED
+test, minimum GREEN implementation, validation command and commit boundary.
 
 The spec is the authority. Where this plan and the spec differ, the spec wins
 and the executor stops and reports (§4 below).
 
-**Read the spec in full before executing task P1.** This plan names files and
+**Read the spec in full before executing task P0.** This plan names files and
 commands; it does not restate the design's reasoning, its truth table, or its
 privacy analysis.
 
@@ -34,13 +35,16 @@ last*, because every provider-side test depends on boundary types that must
 already be proven. Inside that order, each task is sized so that rejecting it
 invalidates no other task's work:
 
+- P0 gives conversation identity one generic owner, so no later task is tempted
+  to depend on a sibling source or to copy an algorithm.
 - P1–P2 move a vocabulary and change no behaviour.
 - P3–P6 add types nothing consumes yet.
-- P7–P8 widen a contract and de-risk the one consumer that would otherwise
-  break, **before** any source changes shape.
+- P7–P8 widen a contract and close every row of the consumer audit in §6,
+  **before** any source changes shape.
 - P9–P10 change one source each.
 - P11 fixes the live defect.
-- P12–P17 build the isolated provider, which nothing imports.
+- P12–P17 build orchestration inside the already-isolated `wechatdb`, which
+  nothing imports.
 - P18 seals the synthetic gate.
 
 **The repository is green at every commit boundary.** No task ends red.
@@ -75,7 +79,28 @@ Full-repository validation, used as the closing check of most tasks:
 cd bridge && PYTEST -q && cd ../memory && PYTEST -q && cd ../wechatdb && PYTEST -q
 ```
 
-From P12 onward that chain gains `&& cd ../wechatprovider && PYTEST -q`.
+That chain is **complete and stays complete**: there are three test packages,
+and no task in this plan adds a fourth. The provider suite added in Stage 6
+lands under `wechatdb/tests/provider/` and is collected by the existing
+`wechatdb` run.
+
+### 0.4 What the 2026-09-18 architecture review changed
+
+Seven findings were raised against the first revision of this plan and are all
+resolved in place. Nothing was carried forward as an open question.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | `head_commit` was wrongly described as stale | §5 rewritten: `a928976` is the canonical **merged** anchor and correctly unchanged while the branch is unmerged. No task advances it. |
+| 2 | D-031 still named a fourth type, `ReadWindow` | D-031 **amended in place** in the vault to three types matching `006a80b`, with the reason recorded; `Current Status.md`'s echo corrected. No D-032. |
+| 3 | A second top-level `wechatprovider` package was proposed | Removed. Orchestration is `wechatdb/provider/`, tests are `wechatdb/tests/provider/`, and the leaf parser is unchanged. Stage 6 rewritten. |
+| 4 | P16 left provider → Rion as an open review question | Closed as **NO**. New task **P0** gives `conversation_identifier` one generic owner; the provider imports that, never the adapter, and never a copy. |
+| 5 | Bare-collection consumers were not audited before P7/P8 | New §6 enumerates every consumer, its assumptions and the task that closes it. P8 retitled and rescoped to the whole audit. |
+| 6 | P11 must remain the correctness milestone | Unchanged and strengthened: acceptance restated verbatim, all four stub sources named, AST guard retained. |
+| 7 | The DB-provider gate must stay synthetic-only | Unchanged; §1's scope guard extended with the three new prohibitions this revision introduces. |
+
+The task count moved from 18 to 19; P1–P11 keep their numbers and P12–P18 keep
+theirs, so review comments on the first revision still address the same tasks.
 
 ---
 
@@ -85,8 +110,13 @@ None of the following is in scope for **any** task here, and an executor that
 finds itself writing one must stop and report instead:
 
 - production database routing; `selected_source_name()` keeps returning `visual`
-- provider promotion, or any import of `wechatdb` / `wechatprovider` from
-  `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`, `app.py`, `mcp_server.py`
+- provider promotion, or any import of `wechatdb` — at any depth, including
+  `wechatdb.provider` — from `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`,
+  `app.py` or `mcp_server.py`
+- a new top-level provider package: orchestration lives inside `wechatdb/`, and
+  nothing is layered on top of it
+- any dependency from the database provider on `bridge/rion_reader_adapter.py`,
+  or any copy of its `conversation_identifier` construction
 - real WeChat data, a real container, a real path, or a real identifier in any
   fixture
 - acquisition, key handling, salts, passphrases, `PRAGMA key`, SQLCipher,
@@ -115,8 +145,9 @@ Every type name below comes from the spec except where marked.
 | `ReadCoverage` | `bridge/message_source.py` | §6.3 |
 | `ReadResult[T]` | `bridge/message_source.py` | §6.4 |
 | the twelve `REASON_*` tokens, `COVERAGE_REASONS` | `bridge/message_source.py` | §6.5 |
-| `ShardDiscovery`, `ShardRouter`, `IdentityResolver`, `ProviderResult` | `wechatprovider/` | §8 |
-| `ShardedMessageProvider` | `wechatprovider/provider.py` | **plan-introduced**, see below |
+| `conversation_identifier` | `bridge/message_source.py` (**moved** by P0) | §8.5 |
+| `ShardDiscovery`, `ShardRouter`, `IdentityResolver`, `ProviderResult` | `wechatdb/provider/` | §8 |
+| `ShardedMessageProvider` | `wechatdb/provider/provider.py` | **plan-introduced**, see below |
 
 **`ShardedMessageProvider` is the one name this plan introduces.** The spec's
 §5.1 data flow begins at a caller invoking `get_messages(conversation_id, limit,
@@ -126,10 +157,35 @@ provider-internal, unwired, constructed only by its own tests, never registered
 in `build_database_source()`, and never imported by product core. If review
 rejects the name, only P17 is affected.
 
-There is **no `ReadWindow` type.** The vault's D-031 entry lists one; the final
-spec at `006a80b` removed it in favour of `requested_start` / `requested_end`
-fields on `ReadCoverage` (§6.3: *"There is no separate window object and no
-`windowed` flag"*). The spec is the baseline; see §5 of this plan.
+**There is no top-level `wechatprovider` package.** `wechatdb` *is* the isolated
+candidate provider; orchestration belongs inside it, with `wechatdb/parser.py`
+remaining its leaf parser. The architectural model is three sibling
+implementations behind one generic boundary —
+
+```
+                 product core
+                      │  uses
+                      ▼
+        MessageSource / ReadResult  (bridge/message_source.py)
+                      ▲
+        ┌─────────────┼──────────────────────────┐
+        │             │                          │
+ RionReaderAdapter  StoreMessageSource   wechatdb/provider/  (isolated)
+                                                 │ uses
+                                                 ▼
+                                         wechatdb/parser.py (leaf, unchanged)
+```
+
+— and **not** a second provider package layered on top of `wechatdb`. The three
+siblings never import one another (P0 and P16).
+
+There is **no `ReadWindow` type.** The final spec at `006a80b` represents the
+requested window through `ReadCoverage`'s `requested_start` and `requested_end`
+fields together with `truncated` and the coverage `status` / `reason` tokens
+(§6.3: *"There is no separate window object and no `windowed` flag"* — a stored
+flag can contradict the bounds sitting beside it). An earlier draft of the
+vault's D-031 entry named a fourth type; **D-031 has been amended in place** to
+match the final spec, and no D-032 was created. See §5.
 
 ---
 
@@ -137,6 +193,7 @@ fields on `ReadCoverage` (§6.3: *"There is no separate window object and no
 
 | # | Task | Stage | Touches |
 |---|---|---|---|
+| **P0** | Canonical conversation identity moves to the generic boundary | 0 (pre-provider) | `bridge/message_source.py`, `bridge/rion_reader_adapter.py`, `bridge/tests/` |
 | **P1** | Coverage tokens land in the Reader boundary | 1 / M1 | `bridge/message_source.py`, `bridge/tests/` |
 | **P2** | `memory_store` imports the tokens instead of defining them | 1 / M1 | `memory/memory_store.py`, `memory/tests/` |
 | **P3** | `ReadFreshness`, and the neutrality guard widened by `enum` | 2 / M2 | `bridge/message_source.py`, `bridge/tests/` |
@@ -144,22 +201,23 @@ fields on `ReadCoverage` (§6.3: *"There is no separate window object and no
 | **P5** | `ReadCoverage` and its ten construction invariants | 2 / M2 | `bridge/message_source.py`, `bridge/tests/` |
 | **P6** | `ReadResult[T]` and its two invariants | 2 / M2 | `bridge/message_source.py`, `bridge/tests/` |
 | **P7** | `MessageSource` declares `ReadResult` return types | 3 / M3 | `bridge/message_source.py`, `bridge/tests/` |
-| **P8** | The MCP bridge stops indexing the read result | 3 / M3 | `bridge/wechat_companion_mcp.py`, `bridge/tests/` |
+| **P8** | Every collection consumer survives the envelope | 3 / M3 | `bridge/wechat_companion_mcp.py`, `bridge/tests/` |
 | **P9** | `RionReaderAdapter` authors coverage; `has_more` is preserved | 4 / M4 | `bridge/rion_reader_adapter.py`, `bridge/tests/` |
 | **P10** | `StoreMessageSource` authors conservative coverage | 4 / M4 | `bridge/store_access.py`, `bridge/tests/` |
-| **P11** | **`memory_ingest` consumes source coverage; the length inference is deleted** | 5 / M5 | `memory/memory_ingest.py`, `memory/tests/` |
-| **P12** | `wechatprovider` skeleton, synthetic fixtures, generalised isolation guard | 6 / M6 | `wechatprovider/`, `bridge/tests/` |
-| **P13** | `ShardDiscovery` — an inventory that never drops an entry | 6 / M6 | `wechatprovider/discovery.py` |
-| **P14** | `ShardRouter` — total accounting, ordering, stop classification | 6 / M6 | `wechatprovider/routing.py` |
-| **P15** | `IdentityResolver` — lookup, precedence, refused ambiguity | 6 / M6 | `wechatprovider/identity.py` |
-| **P16** | `ProviderResult` — the pessimistic collapse into one `ReadCoverage` | 6 / M6 | `wechatprovider/result.py` |
-| **P17** | `ShardedMessageProvider` — the orchestrated read, scenarios T-1…T-10 | 6 / M6 | `wechatprovider/provider.py` |
+| **P11** | **`memory_ingest` consumes source coverage; the length inference is deleted** | 5 / M5 | `memory/memory_ingest.py`, four `memory/tests/` files |
+| **P12** | `wechatdb/provider/` skeleton, synthetic fixtures, isolation guards | 6 / M6 | `wechatdb/provider/`, `wechatdb/tests/provider/`, `bridge/tests/` |
+| **P13** | `ShardDiscovery` — an inventory that never drops an entry | 6 / M6 | `wechatdb/provider/discovery.py` |
+| **P14** | `ShardRouter` — total accounting, ordering, stop classification | 6 / M6 | `wechatdb/provider/routing.py` |
+| **P15** | `IdentityResolver` — lookup, precedence, refused ambiguity | 6 / M6 | `wechatdb/provider/identity.py` |
+| **P16** | `ProviderResult` — the pessimistic collapse into one `ReadCoverage` | 6 / M6 | `wechatdb/provider/result.py` |
+| **P17** | `ShardedMessageProvider` — the orchestrated read, scenarios T-1…T-10 | 6 / M6 | `wechatdb/provider/provider.py` |
 | **P18** | The synthetic gate: T-1…T-18 mapped, revert-verified, recorded | 7 / M7 | `docs/v2/DB_READER_COVERAGE_GATE.md`, test trees |
 
+**Nineteen tasks.**
 **P11 fixes the live Memory false-complete defect.**
-**P12 is the first task whose code imports `wechatdb`.**
-
----
+**P12 is the first task whose code imports `wechatdb`'s parser**; it is also the
+first to add anything under `wechatdb/provider/`. No task edits
+`wechatdb/parser.py` or `wechatdb/msg_types.py`.
 
 ## 4. Stop-and-report protocol
 
@@ -185,20 +243,87 @@ Two contradictions are already anticipated and are **not** grounds to stop:
 
 ---
 
-## 5. Documentation drift observed at planning time (report only, no action)
+## 5. Canonical memory — reconciled, not stale
 
-Recorded because a reviewer will otherwise trip over it. **No task in this plan
-changes the vault**, and reconciliation is deliberate (AGENTS.md §9).
+Recorded so a reviewer does not re-derive it. An earlier revision of this plan
+described the vault as stale; **that was this plan's error, and it is
+corrected here.**
 
-1. **`head_commit` lags.** `Current Status.md` records `head_commit: a928976`;
-   `HEAD` on this branch is `006a80b`, twenty commits ahead. Canonical memory is
-   therefore stale for the committed work in between, including the three design
-   commits for this spec.
-2. **D-031's type list lags the final spec.** The vault entry names four types
-   including `ReadWindow`; the spec at `006a80b` names three and explicitly
-   rejects a separate window object. This plan follows the spec.
-3. The working tree was clean at planning time (`git status --porcelain=v1
-   --untracked-files=all` empty) apart from this plan document.
+1. **`head_commit` is `a928976`, and that is correct.** It is the canonical
+   **merged** anchor: *the committed repository state through which canonical
+   project memory has been reconciled*. It stays `a928976` while
+   `feature/hermes-validation-isolation` is unmerged, however many commits that
+   branch accumulates. An unmerged branch never advances the anchor. `Current
+   Status.md` already says so explicitly, and this plan does not change it.
+   **No task in this plan advances `head_commit`.**
+2. **The branch reconciliation, not the anchor, carries the branch state.**
+   `Current Status.md` records twenty-plus unmerged commits on the branch
+   through the current local HEAD, with the design spec final at `006a80b` and
+   the newest commits being this plan document and its correction. The working
+   tree is clean, the branch has no upstream and was not pushed.
+3. **D-031 has been amended in place** (2026-09-18) so its type list matches
+   the final spec at `006a80b`: three generic types — `ReadFreshness`,
+   `ReadCoverage`, `ReadResult[T]` — and no `ReadWindow`. The amendment records
+   why the window is carried as fields rather than as an object. **No D-032 was
+   created.** `Current Status.md`'s echo of the same list was corrected with it.
+   D-017 stays Active/amended, D-030 stays lapsed, database-provider promotion
+   stays undecided, visual/OCR stays the production default, and no acquisition
+   permission is created or implied.
+
+---
+
+## 6. Collection-consumer audit (prerequisite for P7 and P8)
+
+`ReadResult` provides `__iter__` and `__len__` and **nothing else**. It does
+**not** provide `__getitem__`, slicing, list equality, list concatenation or a
+custom `__bool__`. Truthiness works only because Python falls back to `__len__`
+when `__bool__` is absent. Every caller of `list_conversations`,
+`get_messages` and `get_recent_messages` was therefore enumerated before P7 was
+finalised, and every row below is covered by a named test in the task listed.
+
+### 6.1 Production consumers — the complete set
+
+| # | Site | Assumptions used | Survives `ReadResult`? | Handled by |
+|---|---|---|---|---|
+| 1 | `bridge/wechat_companion_mcp.py:211` `list_conversations` | `len(...)` (l.214), iteration in a payload comprehension (l.219) | yes | P8 (materialised anyway, for one uniform shape) |
+| 2 | `bridge/wechat_companion_mcp.py:244` `get_messages` | `len(...)` (l.247), **truthiness** and **indexing** `ordered[0].sequence if ordered else None` (l.254), iteration (l.255) | **NO — indexing raises `TypeError`** | **P8** |
+| 3 | `bridge/wechat_companion_mcp.py:277` `get_recent_messages` | `len(...)` (l.280), iteration (l.286) | yes | P8 |
+| 4 | `bridge/rion_reader_adapter.py:262` `_chat_for` self-call | result discarded; the call is made for its side effect on `_chat_by_id` | yes | P9 |
+| 5 | `bridge/rion_reader_adapter.py:359` sweep self-call | iteration | yes, but the sweep must now also **read `.coverage`** of each inner read to author its own | **P9** |
+| 6 | `bridge/rion_reader_adapter.py:360` inner `get_messages` | iteration | as above | **P9** |
+| 7 | `memory/memory_ingest.py:417` `list_conversations` | iteration in a comprehension | yes, but must now read `.coverage` | **P11** |
+| 8 | `memory/memory_ingest.py:419` `list(source.get_messages(...))` | iteration via `list()`; the result is then a real `list` and every later operation is on that list | yes, but must now read `.coverage` | **P11** |
+
+**No production consumer slices, concatenates, compares against a list, or
+serialises a protocol result directly.** Payloads are always built per item
+(`[item.payload() for item in ...]`), so no serializer sees the envelope.
+Site 2 is the only production breakage, and P8 removes it **before** any source
+changes shape.
+
+### 6.2 Test consumers and test stubs
+
+Not production, listed so no task is surprised. All are updated inside the task
+that changes the shape they observe — planned migration, not contradiction (§4).
+
+| Site | Assumption | Updated by |
+|---|---|---|
+| `bridge/tests/test_reader_boundary.py:200-210` | indexing `conversations[0]` | P9 |
+| `bridge/tests/test_reader_boundary.py:219-245` | indexing `messages[0]`, `messages[-1]` | P9 |
+| `bridge/tests/test_reader_boundary.py:251` | **list equality** `== []` | P9 |
+| `bridge/tests/test_reader_boundary.py:255-259` | iteration | P9 (no edit needed; listed for completeness) |
+| `bridge/tests/test_reader_boundary.py:762-778` | indexing `conversations[0].id`, iteration into `json.dumps` | P10 |
+| `bridge/tests/test_wechat_companion_mcp.py` (all) | consumes **tool dict payloads**, never a protocol result | no edit — and that is the proof the wire shape did not move |
+| `memory/tests/test_memory_ingest.py` `FakeSource` | **produces** bare lists | P11 |
+| `memory/tests/test_memory_freshness.py` `Refusing` | produces bare lists | P11 |
+| `memory/tests/test_memory_sync.py` stub source | produces bare lists | P11 |
+| `memory/tests/test_memory_worker.py` stub source | produces bare lists | P11 |
+
+`shadow/` references (`exact8_assertion_proxy.py`, `h5_real_data_canary.py`,
+`runners/claude.py`, `runners/hermes.py`) are **tool-name strings on the MCP
+wire**, not protocol calls. The tool surface does not change, so none of them is
+touched by any task. `core/wechat_db.py`, `mcp_server.py` and `app.py` have
+their own unrelated `get_messages` on the **v1** historical generation and are
+out of scope entirely.
 
 ---
 
@@ -206,6 +331,138 @@ changes the vault**, and reconciliation is deliberate (AGENTS.md §9).
 
 Each task states: **files**, **interface**, **depends on**, **RED test**,
 **prove RED**, **minimum GREEN**, **validate**, **commit**.
+
+---
+
+## Stage 0 — One canonical conversation identity (pre-provider)
+
+### P0 — Canonical conversation identity moves to the generic boundary
+
+**Why this exists, and why it is first.** Spec §8.5 requires the database
+provider to derive conversation identifiers *"with the same construction
+`rion_reader_adapter.conversation_identifier` uses, so two readers can never
+disagree about what a conversation's identifier is."* The provider must **not**
+obtain that by importing the Rion adapter: the two are sibling implementations
+behind the same generic boundary, and a sibling dependency would make the
+database provider inherit an external-reader transport it has nothing to do
+with. Copying the function is equally rejected, for the reason spec §6.1 gives
+about the coverage tokens — two copies pinned by an equality test are still two
+copies. The remaining correct move is to give the construction **one generic
+owner**, before anything needs two consumers of it.
+
+**Classification of the existing function — Case A, genuinely source-neutral.**
+`bridge/rion_reader_adapter.py:79-88` reads, in full:
+
+```python
+def conversation_identifier(chat: str) -> int:
+    digest = hashlib.blake2b(chat.encode("utf-8"), digest_size=6).digest()
+    return int.from_bytes(digest, "big")
+```
+
+It is a total function from an arbitrary string to a stable, positive, 48-bit,
+JSON-safe integer. It contains **no** Rion vocabulary, no transport or process
+semantics, no schema, no column, no table, no path, and no branch on any reader
+behaviour. Its only tie to the adapter is that the adapter happened to be the
+first source whose native conversation key was a string. The property it
+defines — *how a string conversation key becomes the `int` that
+`NormalizedConversation.id` and `NormalizedMessage.conversation_id` carry* — is
+a property of the **Reader contract**, which is precisely why two sources
+disagreeing about it would be a defect. Case A holds, and ownership moves to the
+generic boundary.
+
+**Files**
+- modify `bridge/message_source.py`
+- modify `bridge/rion_reader_adapter.py`
+- modify `bridge/tests/test_reader_boundary.py`
+
+**Interface produced** — in `bridge/message_source.py`, beside the normalised
+types whose identifiers it constructs:
+
+```python
+def conversation_identifier(chat: str) -> int:
+    # The one construction every source uses to turn a string conversation key
+    # into the integer NormalizedConversation.id carries. Technology-neutral:
+    # it knows nothing about any reader, transport, schema or path. It exists
+    # here, once, because two sources disagreeing about a conversation's
+    # identity would be a defect no caller could detect.
+```
+
+`bridge/rion_reader_adapter.py` **deletes its definition** and imports the name
+from `message_source`, re-exporting it at module level so
+`adapter.conversation_identifier` keeps working for existing callers and tests.
+Its `import hashlib` goes with the function if nothing else in the module needs
+it.
+
+**The one deviation from `006a80b`, stated plainly.** Spec §12.7 and §17.2 say
+the boundary's allowed-import set is extended *"by `enum` and nothing else"*.
+Moving this function adds `hashlib`, so the allowed set becomes
+`{__future__, dataclasses, enum, hashlib, typing}`.
+
+- This is sanctioned by the amended D-031 and is the **only** import any task in
+  this plan adds to the boundary.
+- The guard's **safety rule is untouched**: `hashlib` is standard library, names
+  no vendor, transport, schema, table, column or path, and the guard's
+  forbidden-identifier list (`rion`, `subprocess`, `sqlcipher`, `wechat`,
+  `json`, `argv`, `zstd`, `sqlite`) is **not relaxed** by this or any later
+  task. The "nothing else" clause was a consequence statement written when no
+  further import was foreseen; it is not itself the neutrality rule.
+- **If review prefers the allow-list frozen at `enum`**, the alternative is a
+  new stdlib-only generic module `bridge/conversation_identity.py` in the same
+  boundary layer, owned by the boundary and imported by both sources, carrying
+  its own copy of the neutrality guard. Only P0 and one import line in P16
+  change. The plan recommends the boundary module because identity construction
+  belongs beside the types it constructs identifiers for, and because D-017
+  prefers one boundary over two.
+
+**Depends on** nothing. It precedes P1 so every later task sees a single owner,
+and so the provider in P16 has something correct to import the day it is
+written.
+
+**RED tests** — in `bridge/tests/test_reader_boundary.py`:
+
+- `test_conversation_identity_is_owned_by_the_generic_boundary` — asserts
+  `message_source.conversation_identifier` exists, is stable across calls,
+  differs for different inputs, and returns `0 < value < 2 ** 53`. It also
+  asserts `message_source.conversation_identifier("wxid_fixture_a") ==
+  rion_reader_adapter.conversation_identifier("wxid_fixture_a")`, so the move is
+  proven value-preserving and no already-derived identifier shifts.
+- `test_no_source_defines_its_own_conversation_identity` — `ast` scan of every
+  module under `bridge/` other than `message_source.py`, asserting none contains
+  a `FunctionDef` named `conversation_identifier`. This is what stops a second
+  copy reappearing, in the Rion adapter or in any future source.
+- modify the existing `test_the_protocol_depends_on_no_reader_technology` (T-15)
+  so its allowed set reads `{"__future__", "dataclasses", "hashlib", "typing"}`
+  at this point; `enum` joins it at P3. Its forbidden-identifier list is **not**
+  changed.
+
+**Prove RED**
+
+```bash
+cd bridge && PYTEST -q tests/test_reader_boundary.py -k "conversation_identity_is_owned or no_source_defines_its_own"
+```
+
+Expected failure: `AttributeError: module 'message_source' has no attribute
+'conversation_identifier'`; then — once the function is added but before the
+adapter's copy is deleted — the AST test failing on
+`bridge/rion_reader_adapter.py`. Seeing the second failure separately proves the
+guard catches a duplicate rather than merely tolerating the new location.
+
+**Minimum GREEN** — add the function and `import hashlib` to
+`message_source.py`; delete the adapter's definition and import the name; widen
+the guard's allowed set by `hashlib`.
+
+**Validate**
+
+```bash
+cd bridge && PYTEST -q && cd ../memory && PYTEST -q
+```
+
+Expect bridge 81 passed, memory 337 passed. The existing
+`test_conversation_identifiers_are_stable_and_json_safe` must still pass
+unchanged — it calls through the adapter's re-export, which is exactly the
+compatibility this task promises.
+
+**Commit** — `refactor(bridge): one canonical conversation identity, owned by the boundary`
 
 ---
 
@@ -261,7 +518,7 @@ is untouched by this task.
 cd bridge && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
-Expect bridge 80 passed, memory 337 passed. `memory` is run because it still
+Expect bridge 82 passed, memory 337 passed. `memory` is run because it still
 owns its own copies; this task must not disturb it.
 
 **Commit** — `feat(bridge): the reader boundary owns the coverage vocabulary`
@@ -312,7 +569,7 @@ vocabulary now lives, keep `COVERAGE_STATES` local, keep `__all__` unchanged.
 cd memory && PYTEST -q && cd ../bridge && PYTEST -q
 ```
 
-Expect memory 338 passed, bridge 80 passed.
+Expect memory 338 passed, bridge 82 passed.
 
 **Commit** — `refactor(memory): import the coverage vocabulary, never redefine it`
 
@@ -381,7 +638,7 @@ allowed-import set by `enum` and nothing else.
 cd bridge && PYTEST -q
 ```
 
-Expect 81 passed.
+Expect 83 passed.
 
 **Commit** — `feat(bridge): freshness is three tokens, orthogonal to coverage`
 
@@ -442,7 +699,7 @@ Expected failure: `AttributeError: ... 'COVERAGE_REASONS'`.
 cd bridge && PYTEST -q
 ```
 
-Expect 83 passed.
+Expect 85 passed.
 
 **Commit** — `feat(bridge): a closed reason vocabulary for coverage claims`
 
@@ -517,7 +774,7 @@ answer** (spec §6.7).
 cd bridge && PYTEST -q
 ```
 
-Expect 96 passed.
+Expect 98 passed.
 
 **Commit** — `feat(bridge): ReadCoverage, with claims it cannot overstate`
 
@@ -567,7 +824,7 @@ an accident.
 cd bridge && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
-Expect bridge 99 passed, memory 338 passed.
+Expect bridge 101 passed, memory 338 passed.
 
 **Commit** — `feat(bridge): ReadResult carries items and what they may claim`
 
@@ -595,6 +852,12 @@ trivially revertible commit.
 
 **Depends on** P6.
 
+**Prerequisite, already discharged:** §6 of this plan enumerates every caller of
+the three methods and classifies what each assumes. That audit is what makes
+this task safe to perform as a typing-only change and what determines the
+content of P8. It is not a flag-day: exactly one production site breaks, and P8
+fixes it before any source changes shape.
+
 **RED test** — in `bridge/tests/test_reader_boundary.py`:
 
 - `test_the_protocol_promises_a_result_envelope_not_a_bare_collection` — parses
@@ -621,7 +884,7 @@ and `list[NormalizedMessage]`.
 cd bridge && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
-Expect bridge 100 passed, memory 338 passed. Both shipped sources still return
+Expect bridge 102 passed, memory 338 passed. Both shipped sources still return
 lists at this point and both still satisfy the runtime protocol check; this is
 intended and temporary.
 
@@ -629,18 +892,26 @@ intended and temporary.
 
 ---
 
-### P8 — The MCP bridge stops indexing the read result
+### P8 — Every collection consumer survives the envelope
 
 **Files**
 - modify `bridge/wechat_companion_mcp.py`
 - modify `bridge/tests/test_reader_boundary.py`
 
-**Why this comes before the sources change.** `wechat_companion_mcp.get_messages`
-reads `ordered[0].sequence` (line 254) to compute `next_before_sequence`, and
-`ReadResult` deliberately has no `__getitem__`. If a source changed shape first,
-this line would raise and the suite would go red mid-stage. Making the three
-tool bodies shape-tolerant **first** keeps every commit green: the same code
-works against a `list` today and a `ReadResult` after P9/P10.
+**Why this comes before the sources change.** §6.1 row 2:
+`wechat_companion_mcp.get_messages` reads `ordered[0].sequence` (line 254) to
+compute `next_before_sequence`, and `ReadResult` deliberately has no
+`__getitem__`. That is **the only production site in the repository that would
+break**, and if a source changed shape first this line would raise and the suite
+would go red mid-stage. Making the three tool bodies shape-tolerant **first**
+keeps every commit green: the same code works against a `list` today and a
+`ReadResult` after P9/P10.
+
+**Audit rows closed by this task.** §6.1 rows 1, 2 and 3 — the three MCP tool
+bodies — every one of which is exercised by the RED tests below against a
+`ReadResult`-returning stub. Rows 4–6 close at P9, rows 7–8 at P11. **No row is
+left to a flag day**; every row names the task that closes it and the test that
+proves it.
 
 **Interface produced** — no interface change. Inside each of the three tool
 bodies, the value returned by the source is materialised once,
@@ -674,6 +945,8 @@ cd bridge && PYTEST -q tests/test_reader_boundary.py -k "result_envelope_unchang
 Expected failure: `TypeError: 'ReadResult' object is not subscriptable`.
 
 **Minimum GREEN** — the three one-line materialisations and the `rows[0]` fix.
+Nothing else in the module is touched: `clamp`, `unavailable`, `log` and the
+four tool registrations are unchanged.
 
 **Validate**
 
@@ -681,11 +954,15 @@ Expected failure: `TypeError: 'ReadResult' object is not subscriptable`.
 cd bridge && PYTEST -q
 ```
 
-Expect 102 passed, including
+Expect 104 passed, including
 `test_the_tool_surface_is_exactly_the_four_tools` and
 `test_no_reader_output_reaches_stdout`, both unchanged.
 
 **Commit** — `refactor(bridge): the tools read a result envelope or a list`
+
+*(Title changed from "the MCP bridge stops indexing the read result": the task's
+scope is the whole consumer audit of §6, of which the indexing site is the one
+production breakage.)*
 
 ---
 
@@ -762,7 +1039,7 @@ bound, build one `ReadCoverage` per method, wrap in `ReadResult`.
 cd bridge && PYTEST -q
 ```
 
-Expect 108 passed.
+Expect 110 passed.
 
 **Commit** — `feat(bridge): the reader adapter states its own coverage`
 
@@ -820,7 +1097,7 @@ Expected failure: `AttributeError: 'list' object has no attribute 'coverage'`.
 cd bridge && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
-Expect bridge 112 passed. **`memory` is expected to still pass here**: its
+Expect bridge 114 passed. **`memory` is expected to still pass here**: its
 ingestor consumes the result by iteration (`list(source.get_messages(...))`) and
 still infers coverage from length. That inference is now demonstrably wrong and
 is deleted in P11.
@@ -839,7 +1116,16 @@ is deleted in P11.
 - modify `memory/memory_ingest.py`
 - modify `memory/tests/test_memory_ingest.py`
 - modify `memory/tests/test_memory_freshness.py`
+- modify `memory/tests/test_memory_sync.py`
+- modify `memory/tests/test_memory_worker.py`
 - modify `memory/tests/test_layering.py`
+
+The four stub sources enumerated in §6.2 — `test_memory_ingest.FakeSource`,
+`test_memory_freshness.Refusing`, and the stubs in `test_memory_sync.py` and
+`test_memory_worker.py` — all **produce** bare lists today and must all author
+`ReadResult` in this commit, because from here the ingestor requires
+`.coverage`. Missing one is the most likely way this task goes red; §6.2 is the
+checklist.
 
 **Interface produced** — `MemoryIngestor.ingest_from_source` keeps its exact
 signature. Inside it:
@@ -898,8 +1184,19 @@ changed to return `ReadResult` values, then:
 The existing `test_a_filled_limit_is_recorded_as_partial_not_complete` and
 `test_reading_a_whole_source_records_complete_coverage` are updated to have
 `FakeSource` author the coverage they are asserting on. The `Refusing` stub in
-`memory/tests/test_memory_freshness.py` is updated for the new return shape; its
-assertions are unchanged, because the refusal path is unchanged.
+`memory/tests/test_memory_freshness.py` and the stub sources in
+`test_memory_sync.py` and `test_memory_worker.py` are updated for the new return
+shape; their assertions are unchanged, because neither the refusal path nor the
+sync/worker behaviour changes.
+
+**The acceptance this task must prove, restated so it cannot drift:** a source
+returns **fewer items than the caller's limit** while declaring
+`observed_partial` / `source_limit` / `truncated = True`, and Memory records
+**that partial coverage**, unchanged, with the source's own reason token. No
+fallback equivalent to `len(messages) < message_limit` may determine source
+completeness anywhere — not in the ingestor, not behind a flag, not as a
+last-resort default. The AST guard stays as long as it is the smallest robust
+enforcement of that.
 
 **Prove RED**
 
@@ -921,109 +1218,178 @@ message_limit` comparison.
 cd memory && PYTEST -q && cd ../bridge && PYTEST -q && cd ../wechatdb && PYTEST -q
 ```
 
-Expect memory 343 passed, bridge 112 passed, wechatdb 42 passed.
+Expect memory 343 passed, bridge 114 passed, wechatdb 42 passed.
 
 **Commit** — `fix(memory): record the coverage a source stated, never a length`
 
 ---
 
-## Stage 6 — Isolated database-provider orchestration (spec §8, M6)
+## Stage 6 — Orchestration inside the isolated provider (spec §8, M6)
 
 Everything from here is **clean-room, provider-internal, unwired and untouched
-by product core**. No task in this stage edits `wechatdb/`, and none is imported
-by anything under `bridge/`, `memory/`, `shadow/`, `ai/` or `core/`.
+by product core**. No task in this stage edits `wechatdb/parser.py` or
+`wechatdb/msg_types.py`, and none is imported by anything under `bridge/`,
+`memory/`, `shadow/`, `ai/` or `core/`.
 
-### P12 — `wechatprovider` skeleton, synthetic fixtures, generalised isolation guard
+**Where the code lives.** `wechatdb` *is* the isolated candidate provider.
+Orchestration is a subpackage of it, with the existing parser as its leaf:
 
-**This is the first task whose code imports `wechatdb`.**
+```
+wechatdb/
+├── __init__.py          # leaf-parser exports only; does NOT import provider/
+├── parser.py            # UNCHANGED
+├── msg_types.py         # UNCHANGED
+├── pytest.ini
+├── provider/
+│   ├── __init__.py
+│   ├── discovery.py     # ShardDiscovery          (P13)
+│   ├── routing.py       # ShardRouter             (P14)
+│   ├── identity.py      # IdentityResolver        (P15)
+│   ├── result.py        # ProviderResult          (P16)
+│   └── provider.py      # ShardedMessageProvider  (P17)
+└── tests/
+    ├── conftest.py      # UNCHANGED
+    ├── fixtures.py      # UNCHANGED
+    ├── test_parser.py   # UNCHANGED
+    └── provider/
+        ├── __init__.py
+        ├── conftest.py
+        ├── fixtures.py          # multi-part synthetic fixtures (P12)
+        ├── test_fixtures.py     # (P12)
+        ├── test_discovery.py    # (P13)
+        ├── test_routing.py      # (P14)
+        ├── test_identity.py     # (P15)
+        ├── test_result.py       # (P16)
+        └── test_provider_reads.py  # (P17)
+```
+
+**No new top-level package is created.** Three consequences follow, and all
+three are simplifications:
+
+1. The existing isolation guard
+   `test_no_product_module_imports_the_candidate_schema_provider` already fails
+   on any product import of `wechatdb` **at any depth**, so it covers
+   `wechatdb.provider` on the day that package appears, with no generalisation
+   and no second package name to keep in step.
+2. `wechatdb/pytest.ini` already carries `testpaths = tests`, so the provider
+   suite is collected by the existing `wechatdb` suite. There is no fourth
+   package directory and no fourth command in the validation chain.
+3. The dependency direction is *product core → generic boundary ← isolated
+   wechatdb provider → wechatdb parser*, not *product core → wechatprovider →
+   wechatdb*. Nothing sits on top of `wechatdb`.
+
+**The one rule this layout must not lose.** `wechatdb/parser.py` is
+dependency-free today and must stay importable without dragging in orchestration
+— the provider imports `message_source` from `bridge/`, and the leaf parser must
+not inherit that. `wechatdb/__init__.py` therefore **does not import
+`wechatdb.provider`**, and P12 adds the guard that keeps it that way.
+
+---
+
+### P12 — `wechatdb/provider/` skeleton, synthetic fixtures, isolation guards
+
+**This is the first task whose code imports the `wechatdb` parser, and the first
+to add anything under `wechatdb/provider/`.**
 
 **Files**
-- new `wechatprovider/__init__.py`
-- new `wechatprovider/pytest.ini`
-- new `wechatprovider/tests/__init__.py`
-- new `wechatprovider/tests/conftest.py`
-- new `wechatprovider/tests/fixtures.py`
-- new `wechatprovider/tests/test_fixtures.py`
+- new `wechatdb/provider/__init__.py`
+- new `wechatdb/tests/provider/__init__.py`
+- new `wechatdb/tests/provider/conftest.py`
+- new `wechatdb/tests/provider/fixtures.py`
+- new `wechatdb/tests/provider/test_fixtures.py`
+- new `wechatdb/tests/provider/test_isolation.py`
 - modify `bridge/tests/test_reader_boundary.py`
 
 **Interface produced**
 
-- `wechatprovider/pytest.ini` — `[pytest]` / `testpaths = tests`, matching the
-  other three packages.
-- `wechatprovider/tests/conftest.py` — inserts the repository root and `bridge/`
-  onto `sys.path`, the same flat cross-tree style `memory/memory_ingest.py`
-  already uses. No new import mechanism.
-- `wechatprovider/tests/fixtures.py` — a synthetic fixture builder that creates
-  temporary SQLite databases whose column layout matches what `wechatdb` reads
-  (`Msg_<32 hex>` tables with at least `local_id` and `create_time`, optional
-  `Name2Id`), populated with **invented** text, fixture identifiers and chosen
-  timestamps. It supports the shapes T-1…T-10 need: a readable shard, a shard
-  whose name matches nothing known, a shard that will not open, a shard that
-  opens with an unrecognised schema, a shard with no establishable time bounds,
-  and a conversation spanning several shards. It is written from `wechatdb`'s
-  documented column contract — **nothing is copied from `wx-cli-again`, and it
-  does not import `wechatdb/tests/fixtures.py`**, so neither suite's private
-  helpers constrain the other.
-- `wechatprovider/__init__.py` — a docstring stating what the package is and is
-  not: provider-internal orchestration around the existing parser, wired to
+- `wechatdb/provider/__init__.py` — a docstring stating what the subpackage is
+  and is not: orchestration around this package's own leaf parser, wired to
   nothing, promoted by nothing, containing no acquisition capability. It
-  re-exports the four component names as they are added by P13–P16.
+  re-exports the four component names as P13–P16 add them. **`wechatdb/__init__.py`
+  is not modified by this task or any later one.**
+- `wechatdb/tests/provider/conftest.py` — puts the repository root and `bridge/`
+  on `sys.path`, the same flat cross-tree style `memory/memory_ingest.py`
+  already uses and `wechatdb/tests/conftest.py` already uses for the root. No
+  new import mechanism.
+- `wechatdb/tests/provider/fixtures.py` — a **multi-part** synthetic fixture
+  builder: several temporary SQLite databases, each with `Msg_<32 hex>` tables
+  in the layout `wechatdb.parser` reads (`local_id` and `create_time` mandatory,
+  the optional columns where a case needs them) plus an optional `Name2Id`,
+  populated with invented text, fixture identifiers and chosen timestamps. It
+  supports every shape T-1…T-10 needs: a readable part, a part matching no known
+  name shape, a part that will not open, a part that opens with an unrecognised
+  schema, a part with no establishable time bounds, and one conversation
+  spanning several parts. It is written from the parser's documented column
+  contract. **Nothing is copied from `wx-cli-again.`** It is a separate module
+  from `wechatdb/tests/fixtures.py` — the single-database parser fixtures stay
+  exactly as they are, and neither suite's helpers constrain the other.
 
 **Depends on** P6 (the boundary types the provider will construct).
 
 **RED tests**
 
-- `wechatprovider/tests/test_fixtures.py::test_a_synthetic_shard_is_parseable_by_the_leaf_parser`
+- `wechatdb/tests/provider/test_fixtures.py::test_a_synthetic_part_is_parseable_by_the_leaf_parser`
   — builds a fixture database and asserts `wechatdb.parse_conversation` returns
-  the expected `MessageRecord`s from it. This is the smoke test that the fixture
-  builder speaks the parser's actual dialect, and the first code in the
-  repository outside `wechatdb/` to import it.
-- `wechatprovider/tests/test_fixtures.py::test_no_fixture_carries_a_real_path_or_identifier`
-  — scans the fixture module's source for `Library`, `Containers`, `wxid_` other
-  than an obviously synthetic prefix, and any absolute path outside `tmp_path`.
-- In `bridge/tests/test_reader_boundary.py`, **generalise T-16**: rename the
-  constant to `ISOLATED_PROVIDERS = ("wechatdb", "wechatprovider")` and extend
-  `test_no_product_module_imports_the_candidate_schema_provider` to fail on
-  either; add
-  `test_the_isolated_provider_imports_no_product_layer` asserting, by `ast`,
-  that no module under `wechatprovider/` imports `memory_*`, `shadow`, `ai` or
-  `core`, and that `message_source` imports neither provider.
+  the expected `MessageRecord`s. The smoke test that the builder speaks the
+  parser's actual dialect.
+- `wechatdb/tests/provider/test_fixtures.py::test_a_multi_part_fixture_really_has_several_parts`
+  — a conversation's messages are split across parts, and no part alone holds
+  them all. Without this, every later multi-part test could pass vacuously.
+- `wechatdb/tests/provider/test_fixtures.py::test_no_fixture_carries_a_real_path_or_identifier`
+  — scans the fixture module's source for `Library`, `Containers`, any absolute
+  path outside `tmp_path`, and any `wxid_` not carrying an obviously synthetic
+  fixture prefix.
+- `wechatdb/tests/provider/test_isolation.py::test_importing_the_leaf_parser_does_not_import_the_provider`
+  — imports `wechatdb` in a subprocess with a clean `sys.modules` and asserts
+  `wechatdb.provider` is **not** in `sys.modules` afterwards. This is what keeps
+  the leaf parser dependency-free.
+- In `bridge/tests/test_reader_boundary.py`, extend T-16 with
+  `test_the_isolated_provider_imports_no_product_layer` — `ast` scan asserting
+  no module under `wechatdb/` imports `memory_*`, `shadow`, `ai` or `core`, and
+  that `message_source` imports neither. The existing
+  `test_no_product_module_imports_the_candidate_schema_provider` is **not**
+  changed: `wechatdb` is already its constant and already matches at any depth,
+  which is one of the reasons the provider lives here.
 
 **Prove RED**
 
 ```bash
-cd bridge && PYTEST -q tests/test_reader_boundary.py -k "isolated_provider or candidate_schema_provider"
-```
-
-Expected failure: `NameError: ISOLATED_PROVIDERS` / the new test does not exist.
-
-```bash
-cd wechatprovider && PYTEST -q
+cd wechatdb && PYTEST -q tests/provider
 ```
 
 Expected failure: the directory does not exist.
 
-**Minimum GREEN** — create the package, the ini, the conftest, the fixture
-builder and the two fixture tests; generalise the two guards.
+```bash
+cd bridge && PYTEST -q tests/test_reader_boundary.py -k isolated_provider_imports_no_product_layer
+```
+
+Expected failure: the test does not exist. Then, with the test added and a
+deliberate temporary `from memory_store import COVERAGE_COMPLETE` placed in
+`wechatdb/provider/__init__.py`, it must fail — proving the guard bites — before
+that line is removed.
+
+**Minimum GREEN** — create the subpackage, the test package, the conftest, the
+fixture builder and the four tests; add the one new bridge guard.
 
 **Validate**
 
 ```bash
-cd bridge && PYTEST -q && cd ../wechatprovider && PYTEST -q && cd ../memory && PYTEST -q && cd ../wechatdb && PYTEST -q
+cd bridge && PYTEST -q && cd ../wechatdb && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
-Expect bridge 113 passed, wechatprovider 2 passed, memory 343, wechatdb 42.
+Expect bridge 115 passed, wechatdb 46 passed (42 existing + 4 new), memory 343
+passed. Three suites, not four: there is no fourth package.
 
-**Commit** — `feat(wechatprovider): an isolated package, synthetic fixtures, and the guard that keeps it isolated`
+**Commit** — `feat(wechatdb): a provider subpackage, synthetic multi-part fixtures, and the guards that keep both isolated`
 
 ---
 
 ### P13 — `ShardDiscovery` — an inventory that never drops an entry
 
 **Files**
-- new `wechatprovider/discovery.py`
-- new `wechatprovider/tests/test_discovery.py`
-- modify `wechatprovider/__init__.py`
+- new `wechatdb/provider/discovery.py`
+- new `wechatdb/tests/provider/test_discovery.py`
+- modify `wechatdb/provider/__init__.py`
 
 **Interface produced** (provider-internal vocabulary; none of it crosses into a
 generic type)
@@ -1037,7 +1403,7 @@ SHARD_STATES = frozenset({SHARD_READABLE, SHARD_UNKNOWN, SHARD_UNAVAILABLE})
 
 @dataclass(frozen=True, slots=True)
 class ShardEntry:
-    """One part of a composite source, as handed to the provider."""
+    # One part of a composite source, as handed to the provider.
     name: str
     open_connection: Callable[[], sqlite3.Connection]
 
@@ -1048,13 +1414,13 @@ class ShardLocator(Protocol):
 
 
 class ExplicitShardLocator:
-    """Lists exactly the entries it was constructed with. Searches nothing."""
+    # Lists exactly the entries it was constructed with. Searches nothing.
     def __init__(self, entries: Sequence[ShardEntry]) -> None: ...
     def entries(self) -> tuple[ShardEntry, ...]: ...
 
 
 def shard_key(name: str) -> str:
-    """A stable opaque digest of an entry name. Never the name, never a path."""
+    # A stable opaque digest of an entry name. Never the name, never a path.
 
 
 @dataclass(frozen=True, slots=True)
@@ -1070,10 +1436,10 @@ class ShardFacts:
 class ShardDiscovery:
     def __init__(self, locator: ShardLocator) -> None: ...
     def catalogue(self) -> dict[str, ShardFacts]:
-        """Pass one: classifies by name shape. Opens nothing."""
+        # Pass one: classifies by name shape. Opens nothing.
     def probe(self, inventory: dict[str, ShardFacts]) -> dict[str, ShardFacts]:
-        """Pass two: opens read-only, recognises schema, takes time bounds.
-        The returned key set equals the input's."""
+        # Pass two: opens read-only, recognises schema, takes time bounds.
+        # The returned key set equals the input's.
 ```
 
 Behaviour, per spec §8.1: the locator is injected and there is **no**
@@ -1085,7 +1451,7 @@ unknown tally for **every** role.
 
 **Depends on** P12.
 
-**RED tests** — `wechatprovider/tests/test_discovery.py`:
+**RED tests** — `wechatdb/tests/provider/test_discovery.py`:
 
 - `test_the_catalogue_pass_opens_nothing` — the entry's `open_connection` is a
   callable that fails the test if invoked.
@@ -1094,7 +1460,7 @@ unknown tally for **every** role.
 - `test_an_uncharacterisable_entry_stays_in_the_inventory_as_unknown`
 - `test_a_part_that_will_not_open_is_unavailable_not_absent`
 - `test_a_part_with_an_unrecognised_schema_is_unavailable`
-- `test_mixed_second_and_millisecond_times_normalise_before_bounding` — a shard
+- `test_mixed_second_and_millisecond_times_normalise_before_bounding` — a part
   whose rows mix the two does not report a maximum in the far future.
 - `test_bounds_are_established_or_absent_never_guessed`
 - `test_a_part_is_identified_by_an_opaque_digest_never_by_its_name` —
@@ -1102,37 +1468,38 @@ unknown tally for **every** role.
   `ShardFacts` field.
 - `test_the_locator_is_injected_and_searches_nothing` — `ast` scan of
   `discovery.py` for `glob`, `rglob`, `listdir`, `walk`, `Path.home`,
-  `expanduser` and any string literal containing `/`.
+  `expanduser` and any string literal containing a path separator.
+- `test_discovery_opens_read_only_and_never_immutable` — scan asserting the
+  connection URI carries `mode=ro` and never `immutable=1`.
 
 **Prove RED**
 
 ```bash
-cd wechatprovider && PYTEST -q tests/test_discovery.py
+cd wechatdb && PYTEST -q tests/provider/test_discovery.py
 ```
 
-Expected failure: collection error, `ModuleNotFoundError: discovery`.
+Expected failure: collection error, `ModuleNotFoundError: wechatdb.provider.discovery`.
 
-**Minimum GREEN** — the constants, the four dataclasses/protocols and the two
-passes. `probe` opens each entry inside `try/except sqlite3.Error` and
-downgrades to `SHARD_UNAVAILABLE`; it never lets an exception escape as a
-dropped key.
+**Minimum GREEN** — the constants, the dataclasses and protocols, the two
+passes. `probe` opens each entry inside `try/except sqlite3.Error` and downgrades
+to `SHARD_UNAVAILABLE`; it never lets an exception escape as a dropped key.
 
 **Validate**
 
 ```bash
-cd wechatprovider && PYTEST -q && cd ../bridge && PYTEST -q
+cd wechatdb && PYTEST -q && cd ../bridge && PYTEST -q
 ```
 
-**Commit** — `feat(wechatprovider): shard discovery that never drops a part`
+**Commit** — `feat(wechatdb): shard discovery that never drops a part`
 
 ---
 
 ### P14 — `ShardRouter` — total accounting, ordering, stop classification
 
 **Files**
-- new `wechatprovider/routing.py`
-- new `wechatprovider/tests/test_routing.py`
-- modify `wechatprovider/__init__.py`
+- new `wechatdb/provider/routing.py`
+- new `wechatdb/tests/provider/test_routing.py`
+- modify `wechatdb/provider/__init__.py`
 
 **Interface produced**
 
@@ -1156,7 +1523,7 @@ class RoutePlan:
     exclusions: tuple[tuple[str, str], ...]    # (shard key, cause)
 
     def accounts_for(self, inventory: Mapping[str, ShardFacts]) -> bool:
-        """Every inventory key appears exactly once across visit + exclusions."""
+        # Every inventory key appears exactly once across visit + exclusions.
 
 
 class ShardRouter:
@@ -1195,7 +1562,7 @@ everything, and the answer is still correct.
 
 **Depends on** P13.
 
-**RED tests** — `wechatprovider/tests/test_routing.py`:
+**RED tests** — `wechatdb/tests/provider/test_routing.py`:
 
 - `test_every_part_is_either_visited_or_excluded_with_a_cause`
 - `test_no_part_appears_twice_across_the_plan`
@@ -1211,29 +1578,29 @@ everything, and the answer is still correct.
 **Prove RED**
 
 ```bash
-cd wechatprovider && PYTEST -q tests/test_routing.py
+cd wechatdb && PYTEST -q tests/provider/test_routing.py
 ```
 
-Expected failure: `ModuleNotFoundError: routing`.
+Expected failure: `ModuleNotFoundError: wechatdb.provider.routing`.
 
 **Minimum GREEN** — the constants, `RoutePlan`, `plan`, `classify_stop`.
 
 **Validate**
 
 ```bash
-cd wechatprovider && PYTEST -q
+cd wechatdb && PYTEST -q
 ```
 
-**Commit** — `feat(wechatprovider): routing that accounts for every part`
+**Commit** — `feat(wechatdb): routing that accounts for every part`
 
 ---
 
 ### P15 — `IdentityResolver` — lookup, precedence, refused ambiguity
 
 **Files**
-- new `wechatprovider/identity.py`
-- new `wechatprovider/tests/test_identity.py`
-- modify `wechatprovider/__init__.py`
+- new `wechatdb/provider/identity.py`
+- new `wechatdb/tests/provider/test_identity.py`
+- modify `wechatdb/provider/__init__.py`
 
 **Interface produced**
 
@@ -1242,7 +1609,7 @@ NAME_ROOM_MEMBER      = "room_member"
 NAME_CONTACT_REMARK   = "contact_remark"
 NAME_CONTACT_NICKNAME = "contact_nickname"
 
-#: Fixed precedence over distinct KINDS of name, strongest first (spec §8.4).
+# Fixed precedence over distinct KINDS of name, strongest first (spec §8.4).
 NAME_PRECEDENCE = (NAME_ROOM_MEMBER, NAME_CONTACT_REMARK, NAME_CONTACT_NICKNAME)
 
 
@@ -1256,12 +1623,9 @@ class NameCandidate:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedIdentities:
-    #: table digest -> conversation username, as parse_conversation accepts.
-    session_names: Mapping[str, str]
-    #: sender identifier -> display name, as parse_conversation accepts.
-    display_names: Mapping[str, str]
-    #: aggregate count only. Never an identifier, a name or a path.
-    unresolved: int
+    session_names: Mapping[str, str]   # table digest -> conversation username
+    display_names: Mapping[str, str]   # sender identifier -> display name
+    unresolved: int                    # aggregate count only
 
 
 class IdentityResolver:
@@ -1290,7 +1654,7 @@ surface; **the parser is not edited** (spec §8.3, §17.14).
 
 **Depends on** P12.
 
-**RED tests** — T-8, in `wechatprovider/tests/test_identity.py`:
+**RED tests** — T-8, in `wechatdb/tests/provider/test_identity.py`:
 
 - `test_a_remark_beats_a_nickname`
 - `test_a_room_nickname_applies_inside_that_room_and_not_outside_it`
@@ -1298,40 +1662,40 @@ surface; **the parser is not edited** (spec §8.3, §17.14).
   candidate string appears anywhere in the returned mapping.
 - `test_an_unresolved_identity_raises_nothing_and_is_counted`
 - `test_resolution_is_never_a_guess` — `ast`/string scan of `identity.py` for
-  `difflib`, `SequenceMatcher`, `startswith`-based matching, `in` over name
-  substrings, `lower()`-normalised matching, and any import beyond the standard
-  library.
+  `difflib`, `SequenceMatcher`, prefix matching, substring containment over
+  names, case-normalised matching, and any import beyond the standard library.
 - `test_the_resolver_produces_exactly_what_the_parser_accepts` — the two
   mappings are passed to `wechatdb.parse_conversation` and it accepts them.
 
 **Prove RED**
 
 ```bash
-cd wechatprovider && PYTEST -q tests/test_identity.py
+cd wechatdb && PYTEST -q tests/provider/test_identity.py
 ```
 
-Expected failure: `ModuleNotFoundError: identity`.
+Expected failure: `ModuleNotFoundError: wechatdb.provider.identity`.
 
 **Minimum GREEN** — the constants, the three dataclasses, `resolve`.
 
 **Validate**
 
 ```bash
-cd wechatprovider && PYTEST -q && cd ../wechatdb && PYTEST -q
+cd wechatdb && PYTEST -q
 ```
 
-`wechatdb` is re-run to prove the parser was not edited.
+The whole `wechatdb` suite is run, which re-proves `test_parser.py` unchanged
+and therefore that the parser was not edited.
 
-**Commit** — `feat(wechatprovider): identity resolution that refuses to guess`
+**Commit** — `feat(wechatdb): identity resolution that refuses to guess`
 
 ---
 
 ### P16 — `ProviderResult` — the pessimistic collapse into one `ReadCoverage`
 
 **Files**
-- new `wechatprovider/result.py`
-- new `wechatprovider/tests/test_result.py`
-- modify `wechatprovider/__init__.py`
+- new `wechatdb/provider/result.py`
+- new `wechatdb/tests/provider/test_result.py`
+- modify `wechatdb/provider/__init__.py`
 
 **Interface produced** — the **only** place in the provider that constructs a
 generic type (spec §8.5).
@@ -1339,7 +1703,7 @@ generic type (spec §8.5).
 ```python
 @dataclass(frozen=True, slots=True)
 class Contribution:
-    """What one planned part contributed to one read."""
+    # What one planned part contributed to one read.
     records: tuple[MessageRecord, ...]
     observed_through: int | None
     complete_through: int | None
@@ -1348,8 +1712,8 @@ class Contribution:
 
 @dataclass(frozen=True, slots=True)
 class ProviderDiagnostics:
-    """Aggregate counts and category tallies only. Never an identifier,
-    a name, a path or message content. Not part of ReadResult."""
+    # Aggregate counts and category tallies only. Never an identifier, a name,
+    # a path or message content. Not part of ReadResult.
     readable: int
     unknown: int
     unavailable: int
@@ -1359,10 +1723,10 @@ class ProviderDiagnostics:
 class ProviderResult:
     @staticmethod
     def message(record: MessageRecord, *, conversation_id: int) -> NormalizedMessage:
-        """One record in the shape the contract already documents:
-        the message's own creation time in first_observed_at, visible_time
-        None because no rendered time was ever seen, confidence 1.0 because a
-        decoded row is exact and there is no estimator on this path."""
+        # One record in the shape the contract already documents: the message's
+        # own creation time in first_observed_at, visible_time None because no
+        # rendered time was ever seen, confidence 1.0 because a decoded row is
+        # exact and there is no estimator on this path.
 
     @staticmethod
     def collapse(
@@ -1396,22 +1760,23 @@ Collapse rules, per spec §8.5 and §7.2–§7.3:
   moment is absent, freshness `UNKNOWN` and **no** structural downgrade from
   freshness alone. A mismatch never alters, filters or re-orders data.
 
-`ProviderResult.message` derives the conversation identifier by importing
-`conversation_identifier` from `bridge/rion_reader_adapter.py`, so two readers
-can never disagree about what a conversation's identifier is (spec §8.5).
-**Review decision point:** this is an import from `bridge/` into the provider.
-T-16 forbids the provider importing `memory`, `shadow`, `ai` or `core`; `bridge`
-is where the generic boundary lives and is not on that list. The alternative — a
-second copy of the digest construction pinned by an equality test — is rejected
-for the reason spec §6.1 gives about the coverage tokens: two copies pinned by a
-test are still two copies. If review rejects the import, only P16 changes.
+**Conversation identity — resolved, not deferred.** `ProviderResult.message`
+imports `conversation_identifier` from `message_source`, the canonical generic
+owner established by **P0**. It does **not** import
+`bridge/rion_reader_adapter.py`: the Rion adapter and this provider are sibling
+implementations behind the same boundary, and neither may depend on the other.
+It also does **not** carry a second copy of the construction, because a
+duplicate pinned by an equality test is still a duplicate. The earlier revision
+of this plan left this as an open review question; it is now closed, and the
+guard `test_no_source_defines_its_own_conversation_identity` (P0) plus
+`test_the_isolated_provider_imports_no_product_layer` (P12) keep it closed.
 
 **No shard name, path, table name, column name, digest or schema identifier
 escapes this module.** The provider's vocabulary ends here.
 
-**Depends on** P5, P6, P13, P14, P15.
+**Depends on** P0, P5, P6, P13, P14, P15.
 
-**RED tests** — `wechatprovider/tests/test_result.py`:
+**RED tests** — `wechatdb/tests/provider/test_result.py`:
 
 - `test_one_capped_contribution_caps_the_whole_read` (T-4b) — the minimum
   complete point caps the aggregate while `observed_through` reports the
@@ -1424,51 +1789,52 @@ escapes this module.** The provider's vocabulary ends here.
 - `test_a_mismatch_inside_the_window_is_partial_and_stale` (T-7a)
 - `test_a_mismatch_outside_the_window_is_complete_and_stale` (T-7b)
 - `test_an_absent_moment_is_unknown_with_no_structural_downgrade` (T-7c)
-- `test_freshness_is_never_compared_against_a_clock` — `ast` scan of
-  `result.py` for `time.`, `datetime`, `now`, and any numeric literal used as a
-  threshold.
+- `test_freshness_is_never_compared_against_a_clock` — `ast` scan of `result.py`
+  for `time.`, `datetime`, `now`, and any numeric literal used as a threshold.
 - `test_no_provider_vocabulary_reaches_the_envelope` — every `ReadCoverage`
   field value is a token from `COVERAGE_STATUSES` / `COVERAGE_REASONS`, a
   `ReadFreshness` member, a bool, an int or `None`; and no field value contains
   a table name, a shard key, a path separator or any fixture name.
+- `test_the_provider_derives_identity_from_the_generic_owner` — asserts, by
+  `ast`, that `result.py` imports `conversation_identifier` from
+  `message_source`, that it defines no function of that name, and that no module
+  under `wechatdb/` imports `rion_reader_adapter`.
 - `test_diagnostics_carry_counts_only`
 
 **Prove RED**
 
 ```bash
-cd wechatprovider && PYTEST -q tests/test_result.py
+cd wechatdb && PYTEST -q tests/provider/test_result.py
 ```
 
-Expected failure: `ModuleNotFoundError: result`.
+Expected failure: `ModuleNotFoundError: wechatdb.provider.result`.
 
 **Minimum GREEN** — `Contribution`, `ProviderDiagnostics`, `message`, `collapse`.
 
 **Validate**
 
 ```bash
-cd wechatprovider && PYTEST -q && cd ../bridge && PYTEST -q
+cd wechatdb && PYTEST -q && cd ../bridge && PYTEST -q
 ```
 
-**Commit** — `feat(wechatprovider): one pessimistic coverage for a multi-part read`
+**Commit** — `feat(wechatdb): one pessimistic coverage for a multi-part read`
 
 ---
 
 ### P17 — `ShardedMessageProvider` — the orchestrated read, scenarios T-1…T-10
 
 **Files**
-- new `wechatprovider/provider.py`
-- new `wechatprovider/tests/test_provider_reads.py`
-- modify `wechatprovider/__init__.py`
+- new `wechatdb/provider/provider.py`
+- new `wechatdb/tests/provider/test_provider_reads.py`
+- modify `wechatdb/provider/__init__.py`
 
 **Interface produced**
 
 ```python
 class ShardedMessageProvider:
-    """Provider-internal orchestration around the existing wechatdb parser.
-
-    Not a registered source. Not constructed by build_database_source().
-    Not imported by product core. Handed its inputs; it searches for nothing.
-    """
+    # Orchestration around this package's own leaf parser.
+    # Not a registered source. Not constructed by build_database_source().
+    # Not imported by product core. Handed its inputs; it searches for nothing.
 
     name: str = SOURCE_DATABASE
 
@@ -1503,28 +1869,28 @@ fatal and never silent: readable parts' messages are still returned, with
 coverage downgraded (spec §11).
 
 **Explicitly not done here:** no registration in `bridge/store_access.py`, no
-`MESSAGE_SOURCE_ENV` value, no entry in `SOURCE_NAMES` beyond the existing
+`MESSAGE_SOURCE_ENV` value, no addition to `SOURCE_NAMES` beyond the existing
 `SOURCE_DATABASE`, no environment variable, no change to
-`selected_source_name()`. Constructing this class is a test's act, never the
-product's.
+`selected_source_name()`, and no change to `wechatdb/__init__.py`. Constructing
+this class is a test's act, never the product's.
 
 **Depends on** P13, P14, P15, P16.
 
-**RED tests** — `wechatprovider/tests/test_provider_reads.py`, the end-to-end
-scenarios:
+**RED tests** — `wechatdb/tests/provider/test_provider_reads.py`:
 
 | Test | Spec |
 |---|---|
-| `test_all_shards_readable_over_the_full_window` | T-1 |
-| `test_an_unknown_intersecting_shard_changes_the_claim_not_the_content` | T-2 |
-| `test_an_unavailable_shard_still_returns_the_readable_parts` (two variants: will not open, unrecognised schema) | T-3 |
-| `test_a_conversation_spanning_shards_merges_in_order` (variants a and b) | T-4 |
+| `test_all_parts_readable_over_the_full_window` | T-1 |
+| `test_an_unknown_intersecting_part_changes_the_claim_not_the_content` | T-2 |
+| `test_an_unavailable_part_still_returns_the_readable_parts` (two variants: will not open, unrecognised schema) | T-3 |
+| `test_a_conversation_spanning_parts_merges_in_order` (variants a and b) | T-4 |
 | `test_a_safe_early_stop_is_complete` | T-5 |
 | `test_an_unsafe_early_stop_is_partial` (variants a and b) | T-6 |
 | `test_a_source_newer_than_the_read_downgrades_freshness` (variants a, b, c) | T-7 |
 | `test_zero_messages_with_every_part_readable_is_a_trustworthy_empty` | T-9 |
 | `test_zero_messages_with_an_unavailable_part_is_not_trustworthy` | T-10 |
 | `test_the_provider_truncating_internally_is_never_complete` | T-11 |
+| `test_every_reason_token_this_provider_emits_is_in_the_closed_set` | T-18 |
 
 T-9 and T-10 must be written as an explicit **pair**, asserting identical
 `items` and identical requested bounds with opposite conclusions. The spec calls
@@ -1534,10 +1900,10 @@ able to read the two tests side by side.
 **Prove RED**
 
 ```bash
-cd wechatprovider && PYTEST -q tests/test_provider_reads.py
+cd wechatdb && PYTEST -q tests/provider/test_provider_reads.py
 ```
 
-Expected failure: `ModuleNotFoundError: provider`.
+Expected failure: `ModuleNotFoundError: wechatdb.provider.provider`.
 
 **Minimum GREEN** — the class, wiring discovery → routing → traversal → stop
 classification → identity → `ProviderResult.collapse`.
@@ -1545,13 +1911,13 @@ classification → identity → `ProviderResult.collapse`.
 **Validate**
 
 ```bash
-cd wechatprovider && PYTEST -q && cd ../bridge && PYTEST -q && cd ../memory && PYTEST -q && cd ../wechatdb && PYTEST -q
+cd wechatdb && PYTEST -q && cd ../bridge && PYTEST -q && cd ../memory && PYTEST -q
 ```
 
 The `bridge` run is what proves the provider is still isolated: T-16 fails if
 anything in product core learned about it.
 
-**Commit** — `feat(wechatprovider): an honest multi-part read, wired to nothing`
+**Commit** — `feat(wechatdb): an honest multi-part read, wired to nothing`
 
 ---
 
@@ -1576,8 +1942,8 @@ anything in product core learned about it.
    | T-12 | P10 |
    | T-13 | P9 |
    | T-14 | P11 |
-   | T-15 | P3 (widened), P1 (unchanged elsewhere) |
-   | T-16 | P12 |
+   | T-15 | P0 (allowed set + `hashlib`), P3 (+ `enum`); forbidden-identifier list never relaxed |
+   | T-16 | P12 (the existing `wechatdb` guard already covers `wechatdb.provider`; P12 adds the outward-direction half) |
    | T-17 | P5, P6 |
    | T-18 | P4 (static closure), P17 (every token emitted by at least one test) |
 
@@ -1600,6 +1966,8 @@ anything in product core learned about it.
    | restore `complete = len(messages) < message_limit` in `memory_ingest` | T-14 |
    | add `import json` to `bridge/message_source.py` | T-15 |
    | add `import wechatdb` to `bridge/store_access.py` | T-16 |
+   | add `from wechatdb import provider` to `wechatdb/__init__.py` | P12's leaf-parser isolation test |
+   | add a second `conversation_identifier` to `wechatdb/provider/result.py` | P0's duplicate guard |
    | delete invariant 3 from `ReadCoverage.__post_init__` | T-17 |
    | add a thirteenth reason token used by a source but absent from `COVERAGE_REASONS` | T-18 |
 
@@ -1633,40 +2001,56 @@ run once with the inference restored by hand (expect failure), then once after
 **Validate**
 
 ```bash
-cd bridge && PYTEST -q && cd ../memory && PYTEST -q && cd ../wechatdb && PYTEST -q && cd ../wechatprovider && PYTEST -q && cd .. && git status --porcelain=v1 --untracked-files=all
+cd bridge && PYTEST -q && cd ../memory && PYTEST -q && cd ../wechatdb && PYTEST -q && cd .. && git status --porcelain=v1 --untracked-files=all
 ```
 
-All four suites green, and the working tree clean apart from the gate document
-— proving every mutation was reverted.
+All **three** suites green — there is no fourth package — and the working tree
+clean apart from the gate document, proving every mutation was reverted.
 
 **Commit** — `docs(v2): seal the synthetic coverage gate (G1)`
 
 ---
 
-## 6. What is still true when every task is done
+## 7. What is still true when every task is done
 
 - `selected_source_name()` returns `visual`. The MCP surface is exactly four
   tools. `NormalizedMessage.payload()` has the same ten keys.
-- No product module imports `wechatdb` or `wechatprovider`, enforced by T-16.
-- `wechatdb/parser.py` and `wechatdb/msg_types.py` are byte-identical to
-  `006a80b`.
+- No product module imports `wechatdb` at any depth, enforced by T-16. No
+  top-level provider package exists. The database provider depends on no sibling
+  source, and one canonical `conversation_identifier` is owned by the generic
+  boundary.
+- `wechatdb/parser.py`, `wechatdb/msg_types.py` and `wechatdb/__init__.py` are
+  byte-identical to `006a80b`. Importing `wechatdb` still does not import
+  `wechatdb.provider`.
+- The generic boundary imports `{__future__, dataclasses, enum, hashlib,
+  typing}` and nothing else; the neutrality guard's forbidden-identifier list is
+  unchanged.
 - No acquisition capability exists anywhere in the dependency graph. D-005 and
-  R-003 are untouched. D-030 is still lapsed.
+  R-003 are untouched. D-030 is still lapsed, so real multi-part verification
+  remains not satisfiable, and the existing real `message_0` evidence stays
+  historical, scoped evidence that is not generalised.
+- `head_commit` is still `a928976`. No task advances it.
 - G1 is met. P1–P5 are not, and this plan supplies no argument for meeting them.
 - The one user-visible correctness change is P11: coverage the system records is
   now what the source said, not what a length implied.
 
-## 7. Plan self-review
+## 8. Plan self-review, after the architecture-review amendments
 
-Checked before this document was committed.
+Re-run against the twelve review items, before this revision was committed.
 
-| Check | Result |
-|---|---|
-| Complete spec coverage | All of §6.1–§6.7, §7, §8.1–§8.5, §9, §10, §11, §12, §13 (T-1…T-18), §14 (M1…M7) and §15 (G1) map to a task. §8.6 (FTS/cache) is deferred by the spec and is in this plan's scope guard, not in a task. |
-| Missing RED tests | Every task states its RED test, the command that proves RED, and the expected failure. P18's RED is the revert-verification matrix. |
-| Placeholders / TODOs | None. No task says "and so on", and no interface is left to the executor's judgement except the one flagged review decision point in P16. |
-| Inconsistent type names | `ReadFreshness`, `ReadCoverage`, `ReadResult[T]` — three types, matching the spec. `ReadWindow` appears only in §2 and §5, both times as the drift note that explains why it is absent. Provider names match spec §8 exactly; `ShardedMessageProvider` is declared plan-introduced in §2. |
-| Accidental production wiring | No task modifies `selected_source_name()`, `build_database_source()`, `active_source()`, `SOURCE_NAMES`, `ACTIVATION_ENV_NAMES`, or any launcher. P17 states the exclusion explicitly. P8 touches `wechat_companion_mcp.py` for a shape-tolerance refactor with a byte-identical payload, pinned by its own test. |
-| Provider vocabulary leaking into generic core | `shard`, `readable`, `unknown`, `unavailable`-as-a-shard-state, `Msg_`, `Name2Id`, `real_sender_id`, `local_type`, table and column names appear only in P12–P17, all under `wechatprovider/`. T-15 (P3) and the scan in P16 assert it rather than trusting it. |
-| Oversized task boundaries | Largest are P17 (ten scenario tests against one new class) and P18 (ten revert mutations). Both are single-concern and independently revertible; splitting P17 further would leave a half-orchestrated provider that no test can exercise. Every other task touches at most two production files. |
-| Green between commits | P7 is typing-only; P8 precedes the source migrations precisely so no commit is red; P11 follows both sources. Each task's validation command names the suites and the expected counts. |
+| # | Check | Result |
+|---|---|---|
+| 1 | Exact compliance with `006a80b` | Every §6.1–§6.7, §7, §8.1–§8.5, §9, §10, §11, §12, §13 (T-1…T-18), §14 (M1…M7) and §15 (G1) requirement maps to a task. **One deviation exists and is declared in P0**: the boundary's allowed-import set gains `hashlib` so one canonical `conversation_identifier` can be owned generically, where §12.7/§17.2 said "`enum` and nothing else". It is recorded in the amended D-031, is the only added import, relaxes no forbidden identifier, and carries a one-line fallback if review prefers a separate `bridge/conversation_identity.py`. §8.6 (FTS/cache) stays deferred by the spec and sits in this plan's scope guard, not in a task. |
+| 2 | No `ReadWindow` | The type appears in no task, no interface, no test name. §2 and §5 mention it only to record that it does not exist and that D-031 was amended in place to say so. |
+| 3 | No top-level `wechatprovider` | The package name survives only in §1, §2 and the Stage 6 preamble, each time as an explicit prohibition. All provider code is `wechatdb/provider/*.py`; all provider tests are `wechatdb/tests/provider/*.py`; the validation chain has three suites, not four. |
+| 4 | No provider → Rion dependency | P16 imports `conversation_identifier` from `message_source`, never from `rion_reader_adapter`. Two guards hold it: `test_the_provider_derives_identity_from_the_generic_owner` (P16) asserts no module under `wechatdb/` imports the adapter, and `test_the_isolated_provider_imports_no_product_layer` (P12) covers the outward direction. The former open review question in P16 is closed. |
+| 5 | No copied conversation-ID algorithm | P0 **moves** the function and deletes the original, leaving a re-export for compatibility. `test_no_source_defines_its_own_conversation_identity` fails on any second `FunctionDef` of that name anywhere under `bridge/`, and P18 adds a revert mutation that plants a duplicate in the provider to prove the guard bites. |
+| 6 | All collection consumers accounted for | §6 enumerates eight production sites and ten test sites, with the assumption each makes and the task that closes it. Exactly one production site breaks (indexing, `wechat_companion_mcp.py:254`); P8 closes it before any source changes shape. No consumer slices, concatenates, compares against a list, or serialises an envelope. No flag day. |
+| 7 | P11 still fixes false-complete | Unchanged as the correctness milestone, and strengthened: the acceptance is restated verbatim (fewer items than the caller's limit, `observed_partial` / `source_limit` / `truncated = True`, preserved by Memory), the length inference is deleted rather than demoted, and the AST guard remains as the smallest robust enforcement. The task now also names all four stub sources that must author coverage. |
+| 8 | No production routing | No task modifies `selected_source_name()`, `build_database_source()`, `active_source()`, `SOURCE_NAMES`, `ACTIVATION_ENV_NAMES`, `wechatdb/__init__.py`, or any launcher. P17 states the exclusion explicitly. P8 touches `wechat_companion_mcp.py` for shape tolerance only, with a byte-identical payload pinned by its own test. |
+| 9 | No acquisition | §1 excludes keys, salts, passphrases, `PRAGMA key`, SQLCipher, decryption, process memory, LLDB, container discovery and any real database. Every fixture is synthetic and built in code; P12 adds a test that scans the fixture module for real paths and identifiers. Discovery opens read-only and never `immutable`. |
+| 10 | No provider vocabulary in the generic core | `shard`, the three shard states, `Msg_`, `Name2Id`, `real_sender_id`, `local_type`, table and column names appear only under `wechatdb/provider/`. T-15 (P0, P3) pins the boundary's imports and forbidden identifiers; P16's `test_no_provider_vocabulary_reaches_the_envelope` pins that every `ReadCoverage` field value is a token, count, bool, int or `None`. |
+| 11 | T-1…T-18 have producing tasks | Mapped in P18. T-1…T-7, T-9, T-10 → P17 and P16; T-8 → P15; T-11 → P9 **and** P17; T-12 → P10; T-13 → P9; T-14 → P11; T-15 → P0 and P3; T-16 → P12; T-17 → P5 and P6; T-18 → P4 and P17. Nothing is unmapped; an unmapped T-number at execution time is a plan defect and triggers §4. |
+| 12 | Dependency order is valid | P0 → (P1 → P2), (P1, P3, P4 → P5 → P6) → P7 → P8 → P9 → P10 → P11; P6 → P12 → {P13, P15}; P13 → P14; {P0, P5, P6, P13, P14, P15} → P16 → P17; P1…P17 → P18. No cycle, no forward reference, and every task's stated dependencies precede it in the numbering. Each task's validation command names the suites and expected counts, and no commit is red. |
+| — | Placeholders / TODOs | None. No interface is left to the executor's judgement; the single remaining review choice (P0's boundary module versus a separate `bridge/conversation_identity.py`) is stated with its consequence confined to P0 and one import line in P16. |
+| — | Oversized task boundaries | Largest are P17 (eleven scenario tests against one new class) and P18 (twelve revert mutations). Both are single-concern and independently revertible; splitting P17 further would leave a half-orchestrated provider no test can exercise. Every other task touches at most three production files. |
