@@ -458,6 +458,38 @@ def test_a_reliable_sender_does_not_cost_the_payload_its_first_line(tmp_path):
     assert record.content == "Note:\nbuy milk"
 
 
+def test_a_matching_legacy_prefix_is_removed_after_reliable_sender_resolution(tmp_path):
+    connection = fixtures.new_database(tmp_path / "matching-prefix.db")
+    ids = fixtures.add_names(connection, ["wxid_fixture_b"])
+    table = fixtures.add_conversation(connection, DIRECT)
+    fixtures.insert(
+        connection, table, local_type=1, create_time=SECONDS,
+        real_sender_id=ids["wxid_fixture_b"],
+        message_content=b"wxid_fixture_b:\nhello",
+    )
+
+    [record] = list(parse_database(connection))
+
+    assert record.sender_id == "wxid_fixture_b"
+    assert record.content == "hello"
+
+
+def test_a_nonmatching_legacy_prefix_is_preserved_after_reliable_sender_resolution(tmp_path):
+    connection = fixtures.new_database(tmp_path / "nonmatching-prefix.db")
+    ids = fixtures.add_names(connection, ["wxid_fixture_b"])
+    table = fixtures.add_conversation(connection, DIRECT)
+    fixtures.insert(
+        connection, table, local_type=1, create_time=SECONDS,
+        real_sender_id=ids["wxid_fixture_b"],
+        message_content=b"wxid_fixture_c:\nhello",
+    )
+
+    [record] = list(parse_database(connection))
+
+    assert record.sender_id == "wxid_fixture_b"
+    assert record.content == "wxid_fixture_c:\nhello"
+
+
 def test_a_malformed_conversation_table_fails_instead_of_reading_as_empty(tmp_path):
     """A table that cannot be read is a different answer from an empty one.
 

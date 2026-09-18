@@ -307,16 +307,19 @@ def _sender(
     another conversation; it is last because it answers a slightly different
     question.
 
-    The payload is returned alongside because **the legacy prefix is removed
-    only when it is the answer.** A colon followed by a newline is ordinary
-    text: a message reading ``Note:\nbuy milk`` begins with a label, not with a
-    sender, and stripping it because a more reliable source had not been
-    consulted yet silently deleted the user's first line.
+    The payload is returned alongside because a legacy prefix is removed only
+    when it supplies the fallback sender, or when it exactly duplicates a
+    sender already resolved through ``Name2Id``. A colon followed by a newline
+    is ordinary text: ``Note:\nbuy milk`` must stay intact when ``Note`` is not
+    the resolved sender.
     """
     raw = values.get("real_sender_id")
     if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
         resolved = name2id.get(raw)
         if resolved:
+            prefix_sender, remainder = _split_sender_prefix(payload)
+            if prefix_sender == resolved:
+                return resolved, remainder
             return resolved, payload
     prefix_sender, remainder = _split_sender_prefix(payload)
     if prefix_sender:
