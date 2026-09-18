@@ -68,21 +68,40 @@ MEMORY_SCHEMA_VERSION: int = 2
 # the same thing: "observed and empty" is knowledge, "not observed" is the
 # absence of knowledge, and turning the second into the first is the specific
 # failure this vocabulary exists to prevent.
+#
+# Only a source can say what it covered, so the words belong to the reader
+# boundary in ``bridge/`` and are imported from there, never restated here. A
+# second copy would be equal on the day it was written and would be the one
+# nobody updated on the day a fifth state was added. They stay in this module's
+# ``__all__``, so every current caller reads them from here as before.
 
-#: The source was read and the whole window was covered.
-COVERAGE_COMPLETE: str = "observed_complete"
+try:
+    from message_source import (
+        COVERAGE_COMPLETE,
+        COVERAGE_NOT_OBSERVED,
+        COVERAGE_PARTIAL,
+        COVERAGE_UNAVAILABLE,
+    )
+except ImportError:  # pragma: no cover - imported from another cwd
+    import sys
 
-#: The source was read but the window was not covered in full -- a limit was
-#: reached, paging was refused, the read was cut short.
-COVERAGE_PARTIAL: str = "observed_partial"
+    sys.path.insert(
+        0,
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge"
+        ),
+    )
+    from message_source import (
+        COVERAGE_COMPLETE,
+        COVERAGE_NOT_OBSERVED,
+        COVERAGE_PARTIAL,
+        COVERAGE_UNAVAILABLE,
+    )
 
-#: The source was asked and could not answer at all.
-COVERAGE_UNAVAILABLE: str = "unavailable"
-
-#: Nothing has ever been recorded for this window. Never stored as a row: it is
-#: what the absence of a row means.
-COVERAGE_NOT_OBSERVED: str = "not_observed"
-
+#: The subset a *stored* row may carry. This one is the store's own statement
+#: about its schema rather than part of the vocabulary, which is why it is
+#: defined here: ``COVERAGE_NOT_OBSERVED`` is what the absence of a row means
+#: and is never written as one.
 COVERAGE_STATES: frozenset[str] = frozenset(
     {COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNAVAILABLE}
 )
