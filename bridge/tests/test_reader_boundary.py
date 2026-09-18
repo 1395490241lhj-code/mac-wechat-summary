@@ -234,6 +234,101 @@ def test_freshness_is_three_tokens_and_never_a_boolean():
     assert "is_fresh" not in identifiers
 
 
+# --- Reason vocabulary -------------------------------------------------------
+
+#: The twelve tokens spec section 6.5 closes the vocabulary at, written out
+#: here rather than derived from the module, so that this test disagrees with
+#: the module if either one changes.
+APPROVED_REASONS = {
+    "full_window_observed", "empty_window", "caller_limit", "source_limit",
+    "window_bound", "upstream_more", "partial_inventory", "unsafe_early_stop",
+    "timestamp_mismatch", "scope_unsupported", "scope_not_read",
+    "no_observation",
+}
+
+#: Which statuses each reason is a valid explanation for. The spec's table,
+#: transcribed independently of the module's own mapping.
+APPROVED_REASON_STATUSES = {
+    "full_window_observed": {"observed_complete"},
+    "empty_window": {"observed_complete"},
+    "window_bound": {"observed_complete"},
+    "caller_limit": {"observed_partial"},
+    "source_limit": {"observed_partial"},
+    "upstream_more": {"observed_partial"},
+    "unsafe_early_stop": {"observed_partial"},
+    "timestamp_mismatch": {"observed_partial"},
+    "partial_inventory": {"observed_partial", "unavailable"},
+    "scope_unsupported": {"unavailable"},
+    "scope_not_read": {"not_observed"},
+    "no_observation": {"not_observed"},
+}
+
+
+def test_the_reason_vocabulary_is_closed():
+    """A reason is chosen from a fixed set, never composed.
+
+    The point of the closure is that a reason can never carry message text, a
+    sender, a path, a table or a line of provider output: there is nothing to
+    put them in. A token built at runtime -- an f-string, a concatenation, a
+    call -- would reopen exactly that, so the constants are checked in the
+    syntax tree as well as by value.
+    """
+    import ast
+
+    assert isinstance(ms.COVERAGE_REASONS, frozenset)
+    assert len(ms.COVERAGE_REASONS) == 12
+    assert set(ms.COVERAGE_REASONS) == APPROVED_REASONS
+
+    for token in ms.COVERAGE_REASONS:
+        assert token.isascii(), token
+        assert token == token.lower(), token
+        assert token.split() == [token], token
+        assert token.strip() == token, token
+
+    tree = ast.parse(Path(ms.__file__).read_text(encoding="utf-8"))
+    literals: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if not target.id.startswith("REASON_") or target.id == "REASON_STATUSES":
+                continue
+            assert isinstance(node.value, ast.Constant), target.id
+            assert isinstance(node.value.value, str), target.id
+            literals[target.id] = node.value.value
+
+    assert len(literals) == 12
+    assert set(literals.values()) == APPROVED_REASONS
+
+    assert set(ms.REASON_STATUSES) == set(ms.COVERAGE_REASONS)
+
+
+def test_the_reason_status_mapping_is_total_in_both_directions():
+    """Every reason explains a status, and every status has an explanation.
+
+    A status nothing can explain would be a claim with no account of itself,
+    and a reason valid for no status would be a word the vocabulary cannot use.
+    """
+    explained: set[str] = set()
+    for reason, statuses in ms.REASON_STATUSES.items():
+        assert isinstance(statuses, frozenset), reason
+        assert statuses, reason
+        assert statuses <= ms.COVERAGE_STATUSES, reason
+        explained |= statuses
+
+    assert explained == set(ms.COVERAGE_STATUSES)
+
+    assert {reason: set(statuses)
+            for reason, statuses in ms.REASON_STATUSES.items()} == \
+        APPROVED_REASON_STATUSES
+
+
 # --- Adapter success ---------------------------------------------------------
 
 def test_status_reports_ready(tmp_path):

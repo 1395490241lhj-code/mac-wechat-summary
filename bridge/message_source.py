@@ -75,6 +75,94 @@ COVERAGE_STATUSES: frozenset[str] = frozenset({
     COVERAGE_NOT_OBSERVED,
 })
 
+# --- Reason vocabulary --------------------------------------------------------
+#
+# Why a source made the coverage claim it made, drawn from this closed set and
+# from nothing else. A reason is never free text, never message content, never
+# a sender, never a path, never a table or a shard, and never a string produced
+# by a provider, a database or another process: it is a fixed token chosen from
+# twelve, which is what makes it safe to return to a client and safe to log.
+# Each one names something about the read, not about the data read.
+
+#: Every part that could hold a matching item was read, and nothing was cut
+#: short.
+REASON_FULL_WINDOW_OBSERVED: str = "full_window_observed"
+
+#: The window was fully accounted for and held no matching item -- the
+#: trustworthy empty, as opposed to an empty nobody looked for.
+REASON_EMPTY_WINDOW: str = "empty_window"
+
+#: The caller's own ``limit`` cut the answer short.
+REASON_CALLER_LIMIT: str = "caller_limit"
+
+#: An internal bound of the source cut the answer short, independently of the
+#: caller's limit. The case a caller cannot detect from the outside.
+REASON_SOURCE_LIMIT: str = "source_limit"
+
+#: The traversal stopped early, and everything not visited is provably outside
+#: the requested window -- the safe early stop, which costs no completeness.
+REASON_WINDOW_BOUND: str = "window_bound"
+
+#: An upstream reader stated that more results exist for this request.
+REASON_UPSTREAM_MORE: str = "upstream_more"
+
+#: At least one part the request required was unknown or unreadable. Naming it
+#: is the alternative to dropping it and still claiming completeness.
+REASON_PARTIAL_INVENTORY: str = "partial_inventory"
+
+#: The traversal stopped without being able to prove the remainder irrelevant.
+REASON_UNSAFE_EARLY_STOP: str = "unsafe_early_stop"
+
+#: The source names material newer than this read *inside* the requested
+#: window. Outside it, that is a freshness statement and not a coverage one.
+REASON_TIMESTAMP_MISMATCH: str = "timestamp_mismatch"
+
+#: The scope is representable, and this source cannot serve it.
+REASON_SCOPE_UNSUPPORTED: str = "scope_unsupported"
+
+#: This read did not look at the requested scope.
+REASON_SCOPE_NOT_READ: str = "scope_not_read"
+
+#: The source holds no observation of the requested scope at all.
+REASON_NO_OBSERVATION: str = "no_observation"
+
+#: The whole vocabulary, closed. A reason outside this set is a defect, not a
+#: new case.
+COVERAGE_REASONS: frozenset[str] = frozenset({
+    REASON_FULL_WINDOW_OBSERVED,
+    REASON_EMPTY_WINDOW,
+    REASON_CALLER_LIMIT,
+    REASON_SOURCE_LIMIT,
+    REASON_WINDOW_BOUND,
+    REASON_UPSTREAM_MORE,
+    REASON_PARTIAL_INVENTORY,
+    REASON_UNSAFE_EARLY_STOP,
+    REASON_TIMESTAMP_MISMATCH,
+    REASON_SCOPE_UNSUPPORTED,
+    REASON_SCOPE_NOT_READ,
+    REASON_NO_OBSERVATION,
+})
+
+#: Which statuses each reason is a valid explanation for. Kept as data rather
+#: than as prose so the pairing can be checked rather than remembered: every
+#: reason explains at least one status and every status has at least one
+#: reason, so the mapping is total in both directions.
+REASON_STATUSES: dict[str, frozenset[str]] = {
+    REASON_FULL_WINDOW_OBSERVED: frozenset({COVERAGE_COMPLETE}),
+    REASON_EMPTY_WINDOW:         frozenset({COVERAGE_COMPLETE}),
+    REASON_WINDOW_BOUND:         frozenset({COVERAGE_COMPLETE}),
+    REASON_CALLER_LIMIT:         frozenset({COVERAGE_PARTIAL}),
+    REASON_SOURCE_LIMIT:         frozenset({COVERAGE_PARTIAL}),
+    REASON_UPSTREAM_MORE:        frozenset({COVERAGE_PARTIAL}),
+    REASON_UNSAFE_EARLY_STOP:    frozenset({COVERAGE_PARTIAL}),
+    REASON_TIMESTAMP_MISMATCH:   frozenset({COVERAGE_PARTIAL}),
+    REASON_PARTIAL_INVENTORY:    frozenset({COVERAGE_PARTIAL,
+                                            COVERAGE_UNAVAILABLE}),
+    REASON_SCOPE_UNSUPPORTED:    frozenset({COVERAGE_UNAVAILABLE}),
+    REASON_SCOPE_NOT_READ:       frozenset({COVERAGE_NOT_OBSERVED}),
+    REASON_NO_OBSERVATION:       frozenset({COVERAGE_NOT_OBSERVED}),
+}
+
 # --- Freshness ----------------------------------------------------------------
 #
 # Freshness is orthogonal to coverage, and deliberately so: a source can cover
