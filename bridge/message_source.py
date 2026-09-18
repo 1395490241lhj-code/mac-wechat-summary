@@ -41,6 +41,39 @@ SOURCE_DATABASE: str = "database"
 
 SOURCE_NAMES: frozenset[str] = frozenset({SOURCE_VISUAL, SOURCE_DATABASE})
 
+# --- Coverage vocabulary ------------------------------------------------------
+#
+# What a source covered of what was asked of it is a statement only that source
+# can make, so the words for it belong to the boundary every source speaks
+# through rather than to any one layer above it. These four tokens have one
+# owner here; a consumer imports them and never restates them, because two
+# copies pinned by an equality test are still two copies on the day a fifth
+# state is added to one of them. A string constant needs no import, so owning
+# them costs this module nothing of its neutrality.
+
+#: The source accounted for the whole requested window.
+COVERAGE_COMPLETE: str = "observed_complete"
+
+#: The source was read, and either the window was not covered in full or the
+#: source cannot state that it was.
+COVERAGE_PARTIAL: str = "observed_partial"
+
+#: The source was asked and could not serve the requested scope.
+COVERAGE_UNAVAILABLE: str = "unavailable"
+
+#: The source has no observation for the requested scope. Distinct from a
+#: complete read that found nothing.
+COVERAGE_NOT_OBSERVED: str = "not_observed"
+
+#: The whole vocabulary. A narrower subset may be all that a given consumer
+#: will store or accept; that subset is that consumer's own statement to make.
+COVERAGE_STATUSES: frozenset[str] = frozenset({
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
+    COVERAGE_UNAVAILABLE,
+    COVERAGE_NOT_OBSERVED,
+})
+
 # --- Activation ---------------------------------------------------------------
 #
 # The names of the variables that select and configure a source live here, in

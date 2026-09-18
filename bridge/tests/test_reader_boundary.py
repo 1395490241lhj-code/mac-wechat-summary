@@ -184,6 +184,26 @@ def test_message_payload_omits_provenance():
     }
 
 
+# --- Coverage vocabulary -----------------------------------------------------
+
+def test_the_boundary_owns_the_four_coverage_tokens():
+    """Coverage is a Reader-layer vocabulary, so the boundary owns the words.
+
+    The values are load-bearing: they are already persisted in the memory
+    store's coverage rows, so a move that changed one would silently re-key
+    every stored row.
+    """
+    assert ms.COVERAGE_COMPLETE == "observed_complete"
+    assert ms.COVERAGE_PARTIAL == "observed_partial"
+    assert ms.COVERAGE_UNAVAILABLE == "unavailable"
+    assert ms.COVERAGE_NOT_OBSERVED == "not_observed"
+
+    assert isinstance(ms.COVERAGE_STATUSES, frozenset)
+    assert ms.COVERAGE_STATUSES == {
+        "observed_complete", "observed_partial", "unavailable", "not_observed",
+    }
+
+
 # --- Adapter success ---------------------------------------------------------
 
 def test_status_reports_ready(tmp_path):
