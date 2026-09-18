@@ -30,6 +30,7 @@ which is the one failure this boundary exists to prevent.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 #: The visual capture path: frames extracted, reconciled, and stored by the
@@ -73,6 +74,41 @@ COVERAGE_STATUSES: frozenset[str] = frozenset({
     COVERAGE_UNAVAILABLE,
     COVERAGE_NOT_OBSERVED,
 })
+
+# --- Freshness ----------------------------------------------------------------
+#
+# Freshness is orthogonal to coverage, and deliberately so: a source can cover
+# the whole window it was asked about and still know that its own records name
+# something newer than anything it returned. Coverage answers "how much of what
+# I asked for did you account for"; freshness answers "did what you hold move
+# under you". Collapsing the two loses the case that matters.
+
+
+class ReadFreshness(str, Enum):
+    """Whether the source's own records outran what this read returned.
+
+    A ``str`` enum so a payload carries the same token a human reads, with no
+    translation table and no second spelling.
+
+    There is no ``fresh`` boolean, no age threshold, no "recent enough" test
+    and no clock anywhere in this. A boolean would have to be computed against
+    something, and the only something available is the current time -- which
+    would make this module assert an age policy it has no standing to hold.
+    The only comparison is between two moments the source itself supplied.
+    """
+
+    #: The read reached everything the source itself claims to hold for the
+    #: requested scope.
+    EVIDENCE_CONSISTENT = "evidence_consistent"
+
+    #: The source's own records name something newer than the newest item read.
+    #: A statement about two moments, not a verdict about age.
+    POTENTIALLY_STALE = "potentially_stale"
+
+    #: No comparison was made, because one of the two moments is absent.
+    #: Not a synonym for consistent.
+    UNKNOWN = "unknown"
+
 
 # --- Activation ---------------------------------------------------------------
 #

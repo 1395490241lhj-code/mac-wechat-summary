@@ -163,7 +163,9 @@ def test_the_protocol_depends_on_no_reader_technology():
             identifiers.add(node.name)
 
     # Only the standard library's typing vocabulary. No transport, no codec.
-    assert imported <= {"__future__", "dataclasses", "typing"}
+    # ``enum`` is here for the boundary's own closed token sets and is the last
+    # name this set gains; the forbidden list below is never relaxed.
+    assert imported <= {"__future__", "dataclasses", "enum", "typing"}
     joined = " ".join(identifiers).lower()
     for forbidden in ("rion", "subprocess", "sqlcipher", "wechat", "json",
                       "argv", "zstd", "sqlite"):
@@ -202,6 +204,34 @@ def test_the_boundary_owns_the_four_coverage_tokens():
     assert ms.COVERAGE_STATUSES == {
         "observed_complete", "observed_partial", "unavailable", "not_observed",
     }
+
+
+# --- Freshness vocabulary ----------------------------------------------------
+
+def test_freshness_is_three_tokens_and_never_a_boolean():
+    """Freshness is a comparison of two moments the source supplied.
+
+    A boolean would have to be computed against something, and the only
+    something available is a clock -- which would make the boundary assert an
+    age policy it has no standing to hold. Three tokens say what was compared,
+    including the case where one of the two moments was simply absent.
+    """
+    assert issubclass(ms.ReadFreshness, str)
+
+    assert [member.name for member in ms.ReadFreshness] == [
+        "EVIDENCE_CONSISTENT", "POTENTIALLY_STALE", "UNKNOWN",
+    ]
+    assert ms.ReadFreshness.EVIDENCE_CONSISTENT.value == "evidence_consistent"
+    assert ms.ReadFreshness.POTENTIALLY_STALE.value == "potentially_stale"
+    assert ms.ReadFreshness.UNKNOWN.value == "unknown"
+
+    # A str enum so a payload carries the token a human reads, with no
+    # translation table and no second spelling.
+    assert ms.ReadFreshness.POTENTIALLY_STALE == "potentially_stale"
+
+    _, identifiers, _ = module_identifiers(Path(ms.__file__))
+    assert "fresh" not in identifiers
+    assert "is_fresh" not in identifiers
 
 
 # --- Adapter success ---------------------------------------------------------
