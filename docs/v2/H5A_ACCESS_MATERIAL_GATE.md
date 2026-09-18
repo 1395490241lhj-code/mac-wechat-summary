@@ -1,12 +1,17 @@
-# H5A — access-material gate (blocked, no database opened)
+# H5A — access-material gate (historical block; one-shot pilot later completed)
 
-**Status: blocked before any database access.** No WeChat database was opened,
-decrypted, copied, or read. No inference provider, no Hermes, no MCP, no
-network service was used. Nothing under the WeChat container was modified.
+**Historical status (2026-09-08): blocked before any database access.** At
+that point no readable WeChat database or authorized access file existed, so
+the phase stopped at its first gate.
 
-H5A's first question is whether valid access material already exists locally.
-It does not, so the phase stops here by its own rule and the real-database
-smoke was never attempted.
+**Reconciliation (2026-09-16).** A separately consented, one-shot local pilot
+later produced and validated one readable `message_0` copy long enough to run a
+bounded real-database compatibility test. The technical smoke therefore did
+happen after this original report. Because the D-030 A3 pre-execution baseline
+could not later be evidenced, that one-shot decision lapsed and all temporary
+pilot artifacts plus the retained access file were destroyed. The current
+standing state again has **no retained access material**, but the historical
+claim that no real-database smoke was ever attempted is no longer current.
 
 ## Where `database_access_material_required` actually comes from
 
@@ -98,9 +103,15 @@ Closed without touching runtime behaviour or SKILL.md:
 
 Suites after the change: **54** skill, **158** harness.
 
-## Verdict
+## Current standing verdict
 
-**H5A BLOCKED — ACCESS MATERIAL REQUIRED.**
+**NO RETAINED ACCESS MATERIAL; D-030 LAPSED.**
 
-Checks 1–5 (database root, key mapping, SQLCipher open, schema families,
-adapter readiness) were not attempted and remain unestablished.
+The one-shot pilot established the real database root, one working
+`message_0` access mapping, a successful plaintext SQLite open, and the real
+message schema family. It did **not** establish complete multi-database
+coverage or production ReaderAdapter readiness. Because the pilot's access
+file was destroyed under the D-030 cleanup/revocation rule, there is no
+standing database input to route today. Any repeat acquisition requires a new
+explicit decision and per-occasion consent; this document does not authorize
+one.

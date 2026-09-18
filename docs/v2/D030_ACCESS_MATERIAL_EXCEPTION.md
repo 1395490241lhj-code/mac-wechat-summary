@@ -1,4 +1,4 @@
-# D-030 — ACTIVE (recorded 2026-09-08)
+# D-030 — LAPSED AFTER ONE-SHOT PILOT (executed 2026-09-16)
 
 **This file is the working record. The Decision itself is recorded in the
 vault's `Decisions.md`.**
@@ -13,11 +13,21 @@ category of action *may* be permitted, under stated gates, once separately
 consented to. It is not an instruction, a schedule, or a trigger. Nothing may be
 installed, built, executed, or prepared on the strength of this Decision alone.
 
-**Status of execution: nothing has been done.** wxkey is not installed, not
-built, not run. No WeChat process, memory, database, key, Keychain item, or
-application bundle has been accessed. Nothing has been re-signed. Approval of
-D-030 is not consent to execute acquisition; that consent is a separate,
-per-occasion act and has not been given.
+**Execution reconciliation (2026-09-16).** The operator gave separate,
+per-occasion consent and the one-shot local pilot produced a readable copy of
+one message database for the bounded compatibility test. The original
+`/Applications/WeChat.app` was not modified.
+
+The run cannot be recorded as fully D-030 compliant because no durable
+**pre-execution A3 baseline record** could be located afterward, and D-030 says
+an unevaluable gate counts as failed. The decision therefore lapsed after this
+one shot. All temporary acquisition state and the retained access file were
+destroyed after the compatibility proof. Post-cleanup, the shadow app,
+plaintext database, temporary log and helper state are absent; the prohibited
+Keychain credential is absent; no file under the original WeChat app was
+modified during the acquisition window; and `codesign --verify --deep --strict`
+passes. Those post-hoc checks do not retroactively satisfy A3. No repeat
+acquisition is authorized by this record.
 
 ### Traceability — the seven agreed amendments
 
