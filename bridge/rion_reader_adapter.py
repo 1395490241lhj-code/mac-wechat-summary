@@ -33,13 +33,13 @@ and only after it matches a strict token pattern.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from conversation_identity import conversation_identifier
 from message_source import (
     SOURCE_DATABASE,
     MessageSourceError,
@@ -74,18 +74,6 @@ _KIND_MAP: dict[str, str] = {
 #: single cross-conversation query this adapter can express faithfully, so the
 #: sweep is bounded and the bound is reported rather than presented as a total.
 RECENT_CONVERSATION_SCAN_LIMIT: int = 50
-
-
-def conversation_identifier(chat: str) -> int:
-    """A stable positive integer for a reader's string chat identifier.
-
-    The bridge's conversation ids are integers and the reader's are strings, so
-    one has to be derived from the other. The digest is truncated to 48 bits:
-    stable across runs and processes, positive, and comfortably inside the
-    range that survives JSON without losing precision.
-    """
-    digest = hashlib.blake2b(chat.encode("utf-8"), digest_size=6).digest()
-    return int.from_bytes(digest, "big")
 
 
 @dataclass(frozen=True)

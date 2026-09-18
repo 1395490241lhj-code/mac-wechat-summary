@@ -823,3 +823,119 @@ def test_no_product_module_imports_the_candidate_schema_provider():
                 offenders.append(str(path.relative_to(root)))
 
     assert offenders == [], offenders
+
+
+# --- P0: one canonical conversation identity ---------------------------------
+
+#: The trees that must never hold a second copy of the construction. `memory/`
+#: is deliberately absent: it hashes for its own unrelated purposes, and this
+#: guard is about the Reader layer's conversation identity only.
+IDENTITY_TREES = ("bridge", "wechatdb")
+
+#: The identifiers these fixtures already derive, recorded as literals before
+#: the function moved. A move that changes any of them by one bit would
+#: silently re-key everything already stored against them.
+IDENTIFIERS_BEFORE_THE_MOVE = {
+    "wxid_fixture_a": 64790855742931,
+    "fixture@chatroom": 132956166894205,
+}
+
+
+def module_identifiers(path: Path) -> tuple[set[str], set[str], list[str]]:
+    """Imports, identifiers and string constants of one module, via `ast`.
+
+    The same shape T-15 uses: checked against what the module *names*, so that
+    prose describing what it avoids cannot be mistaken for a dependency on it.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    identifiers: set[str] = set()
+    constants: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+        elif isinstance(node, (ast.Name, ast.arg)):
+            identifiers.add(getattr(node, "id", None) or node.arg)
+        elif isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            identifiers.add(node.name)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            constants.append(node.value)
+    return imported, identifiers, constants
+
+
+def test_conversation_identity_has_its_own_generic_module():
+    """The construction has one owner, and it is not a source adapter."""
+    import conversation_identity
+
+    first = conversation_identity.conversation_identifier("wxid_fixture_a")
+    assert first == conversation_identity.conversation_identifier("wxid_fixture_a")
+    assert first != conversation_identity.conversation_identifier("fixture@chatroom")
+    assert 0 < first < 2 ** 53
+
+
+def test_the_identifier_is_unchanged_for_every_existing_fixture():
+    """Nothing already derived, stored or asserted shifts by one bit."""
+    import conversation_identity
+
+    for chat, expected in IDENTIFIERS_BEFORE_THE_MOVE.items():
+        assert conversation_identity.conversation_identifier(chat) == expected, chat
+        assert adapter.conversation_identifier(chat) == expected, chat
+
+    assert CONVERSATION_A == IDENTIFIERS_BEFORE_THE_MOVE["wxid_fixture_a"]
+
+
+def test_only_one_implementation_of_conversation_identity_exists():
+    """A second copy pinned by an equality test would still be a second copy.
+
+    This is what stops one reappearing — here, or in a future provider.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    for tree_name in IDENTITY_TREES:
+        for path in sorted((root / tree_name).rglob("*.py")):
+            if "__pycache__" in path.parts or path.name == "conversation_identity.py":
+                continue
+            parsed = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(parsed):
+                defines = (isinstance(node, ast.FunctionDef)
+                           and node.name == "conversation_identifier")
+                digests = ((isinstance(node, ast.Attribute) and node.attr == "blake2b")
+                           or (isinstance(node, ast.Name) and node.id == "blake2b"))
+                if defines or digests:
+                    offenders.append(path.relative_to(root).as_posix())
+                    break
+
+    assert offenders == [], offenders
+
+
+def test_the_boundary_module_never_gains_a_digest_dependency():
+    """The sealed Reader boundary stays free of the identity construction."""
+    imported, identifiers, _ = module_identifiers(Path(ms.__file__))
+
+    assert "hashlib" not in imported
+    assert "conversation_identifier" not in identifiers
+    assert "blake2b" not in identifiers
+
+
+def test_the_identity_module_is_technology_neutral():
+    """The owner of the construction names no reader, schema, codec or path."""
+    import conversation_identity
+
+    imported, identifiers, constants = module_identifiers(
+        Path(conversation_identity.__file__))
+
+    assert imported <= {"__future__", "hashlib"}
+    joined = " ".join(identifiers).lower()
+    for forbidden in ("rion", "subprocess", "sqlcipher", "wechat", "json",
+                      "argv", "zstd", "sqlite", "msg_", "name2id"):
+        assert forbidden not in joined, forbidden
+    for text in constants:
+        assert "/" not in text and "\\" not in text, text
