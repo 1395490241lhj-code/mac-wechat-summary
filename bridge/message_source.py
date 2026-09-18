@@ -198,6 +198,130 @@ class ReadFreshness(str, Enum):
     UNKNOWN = "unknown"
 
 
+# --- The coverage claim -------------------------------------------------------
+
+#: The only reasons that mean the read was cut short. Truncation paired with
+#: anything else is incoherent rather than merely unusual.
+_TRUNCATING_REASONS: frozenset[str] = frozenset({
+    REASON_CALLER_LIMIT,
+    REASON_SOURCE_LIMIT,
+    REASON_UPSTREAM_MORE,
+    REASON_UNSAFE_EARLY_STOP,
+})
+
+#: The statuses under which nothing was served, and which therefore carry no
+#: evidence about what a read reached.
+_SERVED_NOTHING: frozenset[str] = frozenset({
+    COVERAGE_UNAVAILABLE,
+    COVERAGE_NOT_OBSERVED,
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ReadCoverage:
+    """What one read is entitled to claim about the window it was asked for.
+
+    Structure (``status``), cause (``reason``), truncation and currency are
+    four different facts on four different fields. Collapsing them into one
+    verdict is what produces "it said complete and it wasn't".
+
+    Every rule below is enforced at construction, so a source that hit a
+    cut-short condition **cannot build** a complete coverage. The downgrade is
+    not a rule someone remembers to apply; it is a rule the object must satisfy
+    in order to exist. A violation is a defect in a source, never a runtime
+    condition a caller handles, so it raises :class:`ValueError` and is never
+    caught to produce a softer answer.
+
+    Refusal messages are fixed lowercase tokens. None is assembled from the
+    value it rejected: a message built from a field is how chat content, a
+    filesystem path or another program's error text reaches a log through a
+    validation error.
+    """
+
+    #: One of the four ``COVERAGE_*`` tokens.
+    status: str
+
+    #: One token from the closed reason set. Always present: a claim without an
+    #: account of itself is what this design removes.
+    reason: str
+
+    #: Inclusive start of the requested window, Unix seconds. ``None`` is
+    #: unbounded.
+    requested_start: int | None
+
+    #: Inclusive end of the requested window, Unix seconds. ``None`` is
+    #: unbounded.
+    requested_end: int | None
+
+    #: Newest moment this read is known to have looked at.
+    observed_through: int | None
+
+    #: Newest moment up to which the source can account for the window with no
+    #: gap.
+    complete_through: int | None
+
+    #: Orthogonal to ``status``: a read can cover its whole window and still
+    #: know the source moved underneath it.
+    freshness: ReadFreshness
+
+    #: Whether the answer was cut short rather than exhausted.
+    truncated: bool
+
+    #: Number of items in the accompanying result.
+    item_count: int
+
+    def __post_init__(self) -> None:
+        if self.status not in COVERAGE_STATUSES:
+            raise ValueError("coverage status is not in the closed vocabulary")
+
+        if self.reason not in COVERAGE_REASONS:
+            raise ValueError("coverage reason is not in the closed vocabulary")
+        if self.status not in REASON_STATUSES[self.reason]:
+            raise ValueError("coverage reason does not explain this status")
+
+        if self.status == COVERAGE_COMPLETE and self.truncated:
+            raise ValueError("a complete read cannot be truncated")
+
+        if self.item_count < 0:
+            raise ValueError("item count cannot be negative")
+
+        if self.reason == REASON_EMPTY_WINDOW and self.item_count != 0:
+            raise ValueError("an empty window reason requires no items")
+
+        if self.truncated and self.reason not in _TRUNCATING_REASONS:
+            raise ValueError("truncation requires a cut short reason")
+
+        if self.status in _SERVED_NOTHING:
+            if self.freshness is not ReadFreshness.UNKNOWN:
+                raise ValueError(
+                    "a status that served nothing has unknown freshness")
+            if self.item_count != 0:
+                raise ValueError("a status that served nothing has no items")
+            if self.observed_through is not None:
+                raise ValueError(
+                    "a status that served nothing has no observed point")
+            if self.complete_through is not None:
+                raise ValueError(
+                    "a status that served nothing has no complete point")
+
+        if self.complete_through is not None:
+            if self.observed_through is None:
+                raise ValueError("a complete point requires an observed point")
+            if self.complete_through > self.observed_through:
+                raise ValueError(
+                    "a complete point cannot exceed the observed point")
+
+        if self.status == COVERAGE_COMPLETE:
+            if (self.observed_through is not None
+                    and self.complete_through != self.observed_through):
+                raise ValueError(
+                    "a complete read completes through what it observed")
+
+        if self.requested_start is not None and self.requested_end is not None:
+            if self.requested_start > self.requested_end:
+                raise ValueError("the requested window is inverted")
+
+
 # --- Activation ---------------------------------------------------------------
 #
 # The names of the variables that select and configure a source live here, in
