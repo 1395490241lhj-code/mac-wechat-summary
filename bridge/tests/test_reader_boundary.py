@@ -186,6 +186,71 @@ def test_message_payload_omits_provenance():
     }
 
 
+def test_the_protocol_promises_a_result_envelope_not_a_bare_collection():
+    """The contract's own syntax, not its prose, is what callers compile against.
+
+    Read out of the syntax tree so that a docstring describing an envelope
+    cannot pass for a signature declaring one. ``status`` is checked in the
+    same pass precisely because it must *not* have moved: readiness and
+    per-read coverage are different questions with different lifetimes, and a
+    source that is ready can still answer partially.
+    """
+    import ast
+
+    tree = ast.parse(Path(ms.__file__).read_text(encoding="utf-8"))
+    protocol = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "MessageSource"
+    )
+    returns = {
+        node.name: ast.unparse(node.returns)
+        for node in protocol.body
+        if isinstance(node, ast.FunctionDef) and node.returns is not None
+    }
+
+    assert returns == {
+        "status": "SourceStatus",
+        "list_conversations": "ReadResult[NormalizedConversation]",
+        "get_messages": "ReadResult[NormalizedMessage]",
+        "get_recent_messages": "ReadResult[NormalizedMessage]",
+    }
+
+    for method in ("list_conversations", "get_messages", "get_recent_messages"):
+        assert not returns[method].startswith("list["), method
+
+
+def test_the_protocol_signatures_are_otherwise_untouched():
+    """Only the return annotations move; every call site keeps its arguments.
+
+    A renamed parameter or a dropped default would break callers silently at
+    the moment the shape changed, and would be indistinguishable in review from
+    the return-type migration it travelled with.
+    """
+    import ast
+
+    tree = ast.parse(Path(ms.__file__).read_text(encoding="utf-8"))
+    protocol = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "MessageSource"
+    )
+    signatures = {
+        node.name: (
+            [argument.arg for argument in node.args.args],
+            [ast.unparse(default) for default in node.args.defaults],
+        )
+        for node in protocol.body
+        if isinstance(node, ast.FunctionDef)
+    }
+
+    assert signatures == {
+        "status": (["self"], []),
+        "list_conversations": (["self", "limit"], []),
+        "get_messages": (
+            ["self", "conversation_id", "limit", "before_sequence"], ["None"]),
+        "get_recent_messages": (["self", "since_observed_at", "limit"], []),
+    }
+
+
 # --- Coverage vocabulary -----------------------------------------------------
 
 def test_the_boundary_owns_the_four_coverage_tokens():

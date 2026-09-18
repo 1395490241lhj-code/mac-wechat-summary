@@ -531,9 +531,18 @@ class MessageSource(Protocol):
     fixed surface and a source cannot widen it.
 
     Every method raises :class:`MessageSourceError` when it cannot answer.
-    Returning an empty list means the source answered and found nothing, which
-    is a different fact from being unable to answer, and callers rely on the
-    distinction.
+
+    An empty :class:`ReadResult` proves nothing on its own. What the answer is
+    worth is on its ``coverage``: a trustworthy empty is complete coverage with
+    zero items, while the same zero items under any other status means only
+    that this read did not establish there was nothing. A source that covered
+    part of what was asked says so there rather than handing back a short list
+    and leaving the shortfall to be guessed at.
+
+    ``status()`` stays separate and keeps returning :class:`SourceStatus`.
+    Whether a source can answer at all and how much of one window it covered
+    are different questions with different lifetimes; a ready source can still
+    answer partially.
     """
 
     #: One of :data:`SOURCE_NAMES`.
@@ -543,7 +552,9 @@ class MessageSource(Protocol):
         """Readiness only. Never raises for an unready source: it reports."""
         ...
 
-    def list_conversations(self, limit: int) -> list[NormalizedConversation]:
+    def list_conversations(
+        self, limit: int
+    ) -> ReadResult[NormalizedConversation]:
         ...
 
     def get_messages(
@@ -551,10 +562,10 @@ class MessageSource(Protocol):
         conversation_id: int,
         limit: int,
         before_sequence: int | None = None,
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
         ...
 
     def get_recent_messages(
         self, since_observed_at: float, limit: int
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
         ...
