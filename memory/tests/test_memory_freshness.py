@@ -10,7 +10,25 @@ from memory_freshness import memory_freshness
 from memory_ingest import MemoryIngestor
 from memory_query import MemoryQueryService
 from memory_store import COVERAGE_COMPLETE, COVERAGE_PARTIAL, COVERAGE_UNAVAILABLE, CoverageRecord, MemoryStore
-from message_source import SOURCE_DATABASE, SOURCE_VISUAL, MessageSourceError, SourceStatus
+from message_source import (
+    REASON_EMPTY_WINDOW,
+    SOURCE_DATABASE,
+    SOURCE_VISUAL,
+    MessageSourceError,
+    ReadCoverage,
+    ReadFreshness,
+    ReadResult,
+    SourceStatus,
+)
+
+
+def empty_result():
+    """A lawful trustworthy-empty ``ReadResult`` for stubs to answer with."""
+    return ReadResult(items=(), coverage=ReadCoverage(
+        status=COVERAGE_COMPLETE, reason=REASON_EMPTY_WINDOW,
+        requested_start=None, requested_end=None,
+        observed_through=None, complete_through=None,
+        freshness=ReadFreshness.UNKNOWN, truncated=False, item_count=0))
 
 T = 1_700_000_000.0  # synthetic "10:00"
 
@@ -94,8 +112,8 @@ def test_a_source_refusal_is_recorded_without_moving_observed_through(store):
         name = SOURCE_DATABASE
         def status(self): return SourceStatus(source=self.name, ready=False, state="x")
         def list_conversations(self, limit): raise MessageSourceError("reader_unavailable", "no")
-        def get_messages(self, *a, **k): return []
-        def get_recent_messages(self, *a, **k): return []
+        def get_messages(self, *a, **k): return empty_result()
+        def get_recent_messages(self, *a, **k): return empty_result()
     MemoryIngestor(store).ingest_from_source(Refusing(), now=T)
     s = by_source(store, SOURCE_DATABASE)
     assert s.last_attempt_state == "failed" and s.last_attempt_failure_state == "reader_unavailable"

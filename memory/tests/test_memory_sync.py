@@ -9,7 +9,29 @@ import memory_sync
 from conftest import app_state, conversation, visual_message
 from memory_query import MemoryQueryService
 from memory_store import MemoryStore
-from message_source import SOURCE_VISUAL, MessageSourceError, SourceStatus
+from message_source import (
+    COVERAGE_COMPLETE,
+    REASON_EMPTY_WINDOW,
+    REASON_FULL_WINDOW_OBSERVED,
+    SOURCE_VISUAL,
+    MessageSourceError,
+    ReadCoverage,
+    ReadFreshness,
+    ReadResult,
+    SourceStatus,
+)
+
+
+def complete_result(items):
+    """``items`` under lawful complete coverage the stub itself authors."""
+    items = tuple(items)
+    return ReadResult(items=items, coverage=ReadCoverage(
+        status=COVERAGE_COMPLETE,
+        reason=REASON_FULL_WINDOW_OBSERVED if items else REASON_EMPTY_WINDOW,
+        requested_start=None, requested_end=None,
+        observed_through=None, complete_through=None,
+        freshness=ReadFreshness.UNKNOWN, truncated=False,
+        item_count=len(items)))
 
 
 class FakeSource:
@@ -27,10 +49,10 @@ class FakeSource:
         self.calls += 1
         if self._fail:
             raise MessageSourceError(self._fail, "cannot")
-        return [conversation(7, "项目组")]
+        return complete_result([conversation(7, "项目组")])
 
     def get_messages(self, conversation_id, limit, before_sequence=None):
-        return self._messages[:limit]
+        return complete_result(self._messages[:limit])
 
     def get_recent_messages(self, since, limit):
         raise MessageSourceError("unsupported", "unused")

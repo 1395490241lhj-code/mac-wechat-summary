@@ -43,6 +43,7 @@ from memory_identity import (
 )
 from memory_store import (
     COVERAGE_COMPLETE,
+    COVERAGE_NOT_OBSERVED,
     COVERAGE_PARTIAL,
     COVERAGE_UNAVAILABLE,
     RUN_FAILED,
@@ -63,6 +64,7 @@ try:
         MessageSourceError,
         NormalizedConversation,
         NormalizedMessage,
+        ReadResult,
     )
 except ImportError:  # pragma: no cover - imported from another cwd
     # The reader boundary lives in ``bridge/`` and is imported, never copied:
@@ -84,6 +86,7 @@ except ImportError:  # pragma: no cover - imported from another cwd
         MessageSourceError,
         NormalizedConversation,
         NormalizedMessage,
+        ReadResult,
     )
 
 #: What a source's identifiers are worth, per source. A source that is not
@@ -398,13 +401,18 @@ class MemoryIngestor:
     ) -> IngestionReport:
         """Reads a whole source once and remembers what it said.
 
-        Coverage is recorded per conversation and reflects what happened:
-        complete when the conversation returned fewer messages than the limit,
-        partial when it filled the limit and therefore may have more above the
-        fold. When the source refuses at any point, the run is recorded as
-        failed with an ``unavailable`` coverage record and **nothing is
-        written**, because a partial batch with a success record would
-        overstate what we have.
+        Coverage is recorded per conversation and is the source's own
+        statement: each ``get_messages`` answer carries a ``ReadCoverage``,
+        and its status, reason and item count are copied, never inferred.
+        Nothing here counts messages against the limit to decide
+        completeness -- a source that truncated internally, below the
+        caller's limit, was once recorded as complete that way, and only the
+        source can say whether it covered what was asked. A read the source
+        marks ``not_observed`` writes no coverage row at all; the absence of
+        a row is how "this read did not look" is kept. When the source
+        refuses at any point, the run is recorded as failed with an
+        ``unavailable`` coverage record and **nothing is written**, because a
+        partial batch with a success record would overstate what we have.
 
         This method calls only the four questions in the ``MessageSource``
         protocol. It cannot widen the reader's surface, and it never falls back
@@ -414,10 +422,10 @@ class MemoryIngestor:
         name = source.name
         run = new_run_id(moment)
         try:
-            conversations = source.list_conversations(conversation_limit)
-            batches: list[tuple[NormalizedConversation, list[NormalizedMessage]]] = [
-                (conversation, list(source.get_messages(conversation.id, message_limit)))
-                for conversation in conversations
+            conversation_result = source.list_conversations(conversation_limit)
+            batches: list[tuple[NormalizedConversation, ReadResult[NormalizedMessage]]] = [
+                (conversation, source.get_messages(conversation.id, message_limit))
+                for conversation in conversation_result.items
             ]
         except MessageSourceError as error:
             self._store.begin_run(run, name, moment)
@@ -455,21 +463,49 @@ class MemoryIngestor:
 
         records: list[MemoryRecord] = []
         coverage: list[CoverageRecord] = []
-        for conversation, messages in batches:
+        for conversation, result in batches:
+            messages = result.items
+            stated = result.coverage
             records.extend(MemoryRecord(message=message) for message in messages)
+            if stated.status == COVERAGE_NOT_OBSERVED:
+                continue
             stamps = [message.first_observed_at for message in messages]
-            complete = len(messages) < message_limit
+            # The lower bound is the source's own when it was given one. When
+            # it was not -- and neither shipped source is, today -- the
+            # earliest observed message is kept as the bound. A None here is
+            # not "unknown" to the store, it is "all of time": _window_contains
+            # reads an open start as covering every earlier question, so
+            # copying an unbounded *request* verbatim would turn a genuine
+            # observation window into a claim about times the read never saw.
+            if stated.requested_start is not None:
+                window_start = stated.requested_start
+            elif stamps:
+                window_start = min(stamps)
+            else:
+                window_start = None
+            # The upper bound is source-authored where the source states one:
+            # a complete read's gap-free point, a partial read's observed
+            # point. Only when it states neither is the newest observed
+            # message used, and that is observation evidence, not a verdict.
+            if stated.status == COVERAGE_COMPLETE and stated.complete_through is not None:
+                window_end = stated.complete_through
+            elif stated.status != COVERAGE_COMPLETE and stated.observed_through is not None:
+                window_end = stated.observed_through
+            elif stamps:
+                window_end = max(stamps)
+            else:
+                window_end = None
             coverage.append(
                 CoverageRecord(
                     source=name,
-                    status=COVERAGE_COMPLETE if complete else COVERAGE_PARTIAL,
+                    status=stated.status,
                     conversation_canonical_id=conversation_canonical_id(
                         name, str(conversation.id)
                     ),
-                    window_start=min(stamps) if stamps else None,
-                    window_end=max(stamps) if stamps else None,
-                    reason=None if complete else REASON_LIMIT_REACHED,
-                    message_count=len(messages),
+                    window_start=window_start,
+                    window_end=window_end,
+                    reason=stated.reason,
+                    message_count=stated.item_count,
                 )
             )
         return self.ingest(
