@@ -258,6 +258,40 @@ None of the older `RoutingStep`, `RoutingExclusion`, `TraversalOutcome`,
 `ShardInventory` or role machinery returns. Recorded as D-031 amendment 6.
 No Python changed; P14 remains unstarted.
 
+### 0.9 What P15 preflight changed — identity is not coverage, and the parser owns the digest
+
+P15’s preflight found two stale sentences and one integration hazard.
+
+1. **Two sentences said identity failure downgrades coverage.** Final §8.4
+   (“It downgrades the provider’s coverage evidence”), the §5.1 data-flow line,
+   and resolved question 12 said so; T-8, the rest of §8.4, and P16’s
+   interface said otherwise — `ProviderDiagnostics.unresolved_identities`
+   exists and `ProviderResult.collapse` takes no identity argument. The earlier
+   revisions kept identity apart from coverage: `b34836f` carried a separate
+   `identity_resolution` status (“when self identity is unresolved, every
+   message is `other` and `identity_resolution` is not `COMPLETE` — never
+   guessed”), and `35e81f9` defined `observed_partial` by a limit, a refused
+   part, an unexplained stop or unknown remainder — never by a missing name.
+   The final simplification introduced the contradictory wording. This
+   correction removes it rather than adding a rule: identity resolution affects
+   names and the diagnostic count only, and never any `ReadCoverage` field.
+2. **P15’s ambiguity semantics were left to the executor.** Now written down:
+   room-member names are room-scoped and out-of-scope names are not
+   unresolved; the first applicable kind decides; duplicates of one name are
+   not ambiguity; an ambiguous stronger kind does not fall through to a weaker
+   one; `unresolved` counts actual applicable ambiguities once each.
+3. **Two spellings of one identity could have grown a translation layer.**
+   The router carries the full `Msg_<32 hex>` name; `session_names` is keyed
+   by the bare digest. `wechatdb.parse_conversation` already owns that
+   conversion (`CONVERSATION_TABLE.match`, `group(1).lower()`), so P17 passes
+   the full name unchanged and no provider layer strips, extracts, lowercases
+   or re-implements the digest. P15’s parser-integration test now proves the
+   mapping changes `session_id`, not merely that the types fit.
+
+The stale data-flow stop line (“remainder provably outside window”) is
+also brought to amendment 6’s semantics. No Python changed; P15 remains
+unstarted. Recorded as D-031 amendment 7.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -2139,14 +2173,47 @@ class IdentityResolver:
     def resolve(self, *, room: str | None = None) -> ResolvedIdentities: ...
 ```
 
-Behaviour, per spec §8.4: resolution is a **lookup, never an inference** — no
-fuzzy match, no edit distance, no tokenisation, no model, no heuristic;
-precedence is over distinct kinds so it is never a choice between two equally
-good answers; **ambiguity is refused, never resolved** — one identifier with two
-different names of the same kind resolves to no name and is simply absent from
-the mapping, leaving the parser's existing fallback to the sender identifier as
-the correct outcome; an unresolved identity **never raises**, never drops a
-message and never invents a name — it increments `unresolved`.
+Behaviour, per spec §8.4 (as corrected — see §0.9): resolution is a
+**lookup, never an inference** — no fuzzy match, no edit distance, no
+tokenisation, no model, no heuristic, no trimming, no case-folding; exact
+strings are evidence.
+
+**Exact resolution semantics, for one identifier and one `resolve(room=...)`
+call.** A `room_member` candidate is *applicable* only when `room is not None`
+and `candidate.room == room`; a member name from another room is out of scope
+for this call and is **not** an unresolved identity. Contact remark and contact
+nickname are global. Applicable kinds are considered in `NAME_PRECEDENCE`
+order and **the first kind with any applicable candidate decides**: one
+distinct name ⟹ resolve to it; repeated copies of the same name ⟹ still
+that one name; two or more different names ⟹ ambiguity ⟹ no name. An
+ambiguous stronger kind does **not** fall through to a weaker kind — that
+would silently bypass an unresolved stronger source — so the identifier is
+absent from `display_names` and `unresolved` increments **once** for it. An
+identifier with no applicable candidate at all is out of scope and is not
+counted; `unresolved` is an aggregate count of actual applicable ambiguities,
+never of unrelated room candidates. Resolution **never raises** merely because
+a name is absent or ambiguous, never drops a message, never invents a name.
+
+**Identity is not coverage.** Resolution affects names and
+`ProviderDiagnostics.unresolved_identities` only. It never changes
+`ReadCoverage` status, reason, requested bounds, `observed_through`,
+`complete_through`, freshness or `truncated`, and `identity.py` knows nothing
+about coverage at all.
+
+**`NameCandidate` invariants** (sealed at construction, fixed content-free
+`ValueError`): `identifier` a non-empty `str`; `kind` in `NAME_PRECEDENCE`;
+`name` a non-empty `str`; `room_member` requires a non-empty `room`; contact
+remark and contact nickname require `room is None`.
+
+**`session_names`** is received already in the parser’s native shape — bare
+lowercase table digest ⟹ conversation username — and P15 preserves it as a
+defensive copy. It is not derived from `ShardFacts.tables`, `Msg_` is not
+stripped, usernames are not hashed, missing names are not invented, and no
+second digest parser or regex exists in `identity.py`. `ResolvedIdentities`
+carries `session_names`, `display_names` and `unresolved` only — no coverage
+field, no status token, no raw candidate list — and its mappings are
+defensive copies, never aliases of caller-owned dictionaries. No new public
+type.
 
 `ResolvedIdentities` is exactly the `(session_names, display_names)` pair
 `wechatdb.parse_conversation` already accepts. That is the entire integration
@@ -2158,14 +2225,44 @@ surface; **the parser is not edited** (spec §8.3, §17.14).
 
 - `test_a_remark_beats_a_nickname`
 - `test_a_room_nickname_applies_inside_that_room_and_not_outside_it`
+- `test_another_rooms_member_name_is_out_of_scope_not_unresolved` — a member
+  name for a different room neither resolves nor counts.
 - `test_two_conflicting_same_kind_names_resolve_to_no_name` — and neither
   candidate string appears anywhere in the returned mapping.
+- `test_duplicate_same_kind_same_name_is_not_ambiguous` — two copies of one
+  `room_member` name resolve to that name; `unresolved == 0`.
+- `test_an_ambiguous_stronger_kind_does_not_fall_back_to_a_weaker_name` — two
+  conflicting `room_member` names for the requested room above one unambiguous
+  contact remark ⟹ identifier absent from `display_names`, `unresolved == 1`,
+  and the remark is **not** used.
 - `test_an_unresolved_identity_raises_nothing_and_is_counted`
+- `test_name_candidates_are_sealed_at_construction` — empty identifier, unknown
+  kind, empty name, `room_member` without a room, and a contact kind with a
+  room each raise a fixed content-free `ValueError`.
 - `test_resolution_is_never_a_guess` — `ast`/string scan of `identity.py` for
   `difflib`, `SequenceMatcher`, prefix matching, substring containment over
-  names, case-normalised matching, and any import beyond the standard library.
-- `test_the_resolver_produces_exactly_what_the_parser_accepts` — the two
-  mappings are passed to `wechatdb.parse_conversation` and it accepts them.
+  names, `lower`/`casefold`/`strip` applied to names or identifiers, and any
+  import beyond the standard library.
+- `test_identity_resolution_knows_nothing_about_coverage` — `ast` scan of
+  `identity.py`: it imports nothing from `message_source` or `bridge`, and no
+  identifier in it is `ReadCoverage`, `ReadFreshness`, `COVERAGE_COMPLETE`,
+  `COVERAGE_PARTIAL` or contains `coverage`. Matched on identifiers and
+  imports, not on prose, so a docstring saying what the module avoids cannot
+  trip it.
+- `test_session_names_are_preserved_not_derived` — the mapping handed in comes
+  back equal but not identical (a copy); nothing is read from any
+  `ShardFacts`; `identity.py` contains no `Msg_` literal and no `re.compile`.
+- `test_the_resolver_produces_exactly_what_the_parser_accepts` — a synthetic
+  part is opened and the **real** `wechatdb.parse_conversation(connection,
+  full_msg_table_name, session_names=resolved.session_names,
+  display_names=resolved.display_names)` is called with the **full
+  `Msg_<digest>` table name, unstripped**; the parser extracts the digest
+  itself. The test pins that the supplied `session_names` actually changes
+  `MessageRecord.session_id` to the mapped username (and that without it the
+  parser’s `msg_<digest>` placeholder appears), and that `display_names`
+  changes `sender_name`. This proves the integration, not merely type
+  compatibility. The bare-digest key shape is the same lowercase one
+  `wechatdb/tests/test_parser.py` already uses.
 
 **Prove RED**
 
@@ -2272,6 +2369,13 @@ Collapse rules, per spec §8.5 and §7.2–§7.3:
   window, also `COVERAGE_PARTIAL` with `REASON_TIMESTAMP_MISMATCH`; when either
   moment is absent, freshness `UNKNOWN` and **no** structural downgrade from
   freshness alone. A mismatch never alters, filters or re-orders data.
+
+**Identity and coverage stay apart.** `ProviderDiagnostics.unresolved_identities`
+is diagnostic-only. `ProviderResult.collapse` takes no unresolved count, never
+inspects `display_names` or `session_names`, and never downgrades coverage
+because a name is absent or ambiguous. Inventory, read, traversal and
+freshness evidence alone control `ReadCoverage`. The public interface above is
+unchanged by this statement.
 
 **Conversation identity — resolved, not deferred.** `ProviderResult.message`
 imports `conversation_identifier` from `bridge/conversation_identity.py`, the
@@ -2399,6 +2503,15 @@ load-bearing: **collect `limit + 1` ⟹ build contributions and collapse
 coverage ⟹ only then trim the public items to `limit`.** The sentinel must
 reach `ProviderResult.collapse`; trimming first would turn measured truncation
 back into a count. P17b is what exercises the measurement.
+
+**One integration rule, load-bearing.** The router yields the full parser
+table name, `Msg_<32 hex>`. P17 passes that table name **unchanged** to
+`wechatdb.parse_conversation(connection, conversation_table, ...,
+session_names=resolved.session_names, display_names=resolved.display_names)`.
+`parse_conversation` itself matches the name, extracts the bare digest and
+lowercases it to look up `ResolvedIdentities.session_names`. No provider layer
+strips `Msg_`, extracts or lowercases the digest, or duplicates that
+conversion in P16 or P17: the parser is its single owner.
 
 **Explicitly not done here:** no registration in `bridge/store_access.py`, no
 `MESSAGE_SOURCE_ENV` value, no addition to `SOURCE_NAMES` beyond the existing

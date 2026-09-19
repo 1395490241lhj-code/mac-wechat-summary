@@ -301,11 +301,13 @@ introduced.
  traversal ──────▶ wechatdb.parse_conversation(...) per planned part/table
    │                collects limit + 1, so "there is more" is measured
    ▼
- stop classify ──▶ exhausted | safe (remainder provably outside window)
-   │                         | unsafe  → observed_partial / unsafe_early_stop
+ stop classify ──▶ exhausted | safe   = every unvisited planned shard is
+   │                                   strictly older than oldest_collected_at
+   │                         | unsafe → observed_partial / unsafe_early_stop
    ▼
- IdentityResolver ▶ (session_names, display_names); unresolved names downgrade
-   │                coverage evidence and bump an aggregate diagnostic count
+ IdentityResolver ▶ (session_names, display_names); unresolved or ambiguous
+   │                names stay unnamed → aggregate diagnostic count only
+   │                → no coverage effect
    ▼
  ProviderResult ──▶ pessimistic collapse into ONE ReadCoverage
    │                complete_through = min over required coverage
@@ -905,9 +907,36 @@ the source's own tables.
   names of the same kind resolves to no name; the identifier is simply absent
   from the mapping handed to the parser, whose existing fallback to the sender
   identifier is then the correct outcome with no parser change.
-- **Unresolved identity does not crash.** It downgrades the provider's coverage
-  evidence and increments an aggregate diagnostic count. It never raises, never
-  drops a message, and never invents a name.
+- **Unresolved identity does not crash and does not weaken coverage.** A
+  missing or ambiguous display name means only that the message remains
+  unnamed; it never makes an observed message unobserved. Resolution failure
+  never raises merely because a name is absent or ambiguous, never drops a
+  message, never invents a name, increments
+  `ProviderDiagnostics.unresolved_identities`, and never changes `ReadCoverage`
+  status, reason, requested bounds, `observed_through`, `complete_through`,
+  freshness or `truncated`. Identity diagnostics are provider-local; no
+  identity state enters `ReadCoverage`.
+- **Scope and precedence, exactly.** A `room_member` candidate is applicable
+  only when a room was requested and the candidate’s room is that room; a
+  member name from another room is out of scope for this call and is not
+  itself an unresolved identity. Contact remark and contact nickname are
+  global. For one identifier the applicable kinds are considered in the order
+  room member, contact remark, contact nickname, and the **first kind with any
+  applicable candidate decides**: one distinct name resolves; repeated copies
+  of the same name are still that one name; two or more different names are
+  ambiguity and resolve to no name. An ambiguous stronger kind does **not**
+  fall through to a weaker one, because that would silently bypass an
+  unresolved stronger source; the identifier is absent from `display_names`
+  and counted unresolved once. An identifier with no applicable candidate at
+  all is simply out of scope and is not counted. Exact strings are evidence:
+  nothing is trimmed, case-folded or normalised.
+- **`session_names` is already the parser’s shape.** The resolver is handed a
+  mapping from bare table digest to conversation username and preserves it as
+  a defensive copy. It does not derive it from `ShardFacts.tables`, does not
+  strip `Msg_`, does not hash usernames and does not invent missing names.
+  `ResolvedIdentities` carries `session_names`, `display_names` and the
+  `unresolved` count, and nothing else: no coverage field, no status token, no
+  raw candidate list.
 
 ### 8.5 `ProviderResult` — the single translation point
 
@@ -1157,7 +1186,7 @@ source which always reports `observed_complete` is worthless.
 | **T-5** | Safe limited traversal | descending established ranges; the traversal has measured `caller_limit + 1` matching records; `oldest_collected_at` is known; every unvisited planned shard has `max_timestamp < oldest_collected_at` (strict); stop is `safe`; `observed_partial`, reason `caller_limit`, `truncated is True`, `observed_through` is stated. Proves the early stop did **not** become `unsafe_early_stop`; claims nothing about the whole window being enumerated |
 | **T-6** | Unsafe early stop | variant (a) an unvisited readable part has no established bounds; variant (b) an unvisited part’s `max_timestamp >= oldest_collected_at` — the comparison is against the traversal boundary, not the window edge; both ⟹ `observed_partial`, reason `unsafe_early_stop`, `truncated is True`, `observed_through is None` |
 | **T-7** | Timestamp mismatch, freshness downgrade | the source declares a newest moment later than the newest item read. (a) mismatch inside the window ⟹ `observed_partial` + `timestamp_mismatch` + `potentially_stale`. (b) mismatch outside the window ⟹ `observed_complete` + `potentially_stale`. (c) one moment absent ⟹ `unknown`, with no structural downgrade caused by freshness alone. No test anywhere compares against a clock or a constant |
-| **T-8** | Identity resolved and unresolved | remark beats nickname; a room nickname applies inside that room and not outside it; an identifier with two conflicting same-kind names resolves to **no name** and neither candidate appears anywhere in the result; an unresolved identity raises nothing, increments the aggregate diagnostic count, and **never** places a name in `ReadCoverage` |
+| **T-8** | Identity resolved and unresolved | remark beats nickname; a room nickname applies inside that room and not outside it, and another room’s member name is out of scope rather than unresolved; an identifier with two conflicting same-kind names resolves to **no name**, neither candidate appears anywhere in the result, and an ambiguous stronger kind does not fall through to a weaker one; repeated copies of one name are not ambiguity. Ambiguous or unresolved identity ⟹ the message remains present ⟹ its sender name falls back through the parser’s existing behaviour ⟹ the unresolved diagnostic count increments ⟹ **`ReadCoverage` is unchanged** in every field. It raises nothing and never places a name in `ReadCoverage` |
 | **T-9** | Zero messages, complete | every part readable, window genuinely empty ⟹ `items == ()`, `observed_complete`, reason `empty_window`; the caller may state "there are no messages" |
 | **T-10** | Zero messages, incomplete | identical window, one part unavailable ⟹ `items == ()`, `observed_partial`, reason `partial_inventory`; **identical `items` and identical requested bounds to T-9, opposite conclusion.** The single most important pair in the suite |
 | **T-11** | Source-internal truncation below the caller's limit | a source returns three items for a two-hundred-item request while having truncated internally ⟹ `observed_partial`, reason `source_limit`, `truncated is True`, never complete. Run against the Rion adapter's bounded sweep and the provider |
@@ -1295,8 +1324,10 @@ Every choice below is settled by this document. There are no open questions.
     coverage independently through `partial_inventory`, and keeping the two
     mechanisms separate means neither masks the other. §8.2.
 12. **Does an unresolvable name make a message unobserved?** No. It makes it
-    unnamed: coverage evidence is downgraded and an aggregate count is
-    incremented, and nothing crashes. §8.4, T-8.
+    unnamed: the message stays present under the parser’s own fallback, an
+    aggregate diagnostic count is incremented, nothing crashes, and
+    `ReadCoverage` is unchanged in every field. Identity state never touches
+    coverage. §8.4, T-8.
 13. **How does a multi-shard read collapse to one coverage?** Pessimistically:
     any unknown or unavailable required shard makes it partial, `complete_through`
     takes the minimum, `observed_through` the maximum, and `truncated` is true if
