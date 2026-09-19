@@ -874,6 +874,58 @@ contents away. It must preserve them:
 - `observed_complete` **only** when the upstream result set is exhausted within
   the requested window **and** no internal bound was hit.
 
+**Correction, 2026-09-19 — pagination evidence differs by command, and
+`sessions` has none.** An earlier revision of this section wrote as though every
+reader reply carried a `query` object. It does not. The exact Rion revision the
+sealed interface gate exercised —
+`Rion-Wu-tech/wechat-intelligence-hub` @ `3afe33e0742ef4e92b4babe399bf471fdcd86a7b`,
+`projects/rion-wechat-reader/rion_wechat_reader.py` — was inspected directly and
+settles it.
+
+1. **Evidence differs by command.** There is no uniform pagination envelope.
+2. **`history` supplies it.** That revision emits
+   `{"query": {"has_more": len(rows) == args.limit, "next_offset":
+   args.offset + len(rows)}, "messages": rows}`. Note the reader computes
+   `has_more` itself, as a full-page equality against the limit *it* was given.
+3. **`sessions` supplies neither.** It emits only
+   `{"sessions": sessions(db, args.limit, args.type_filter, args.keyword)}` —
+   no `query`, no `has_more`, no `next_offset`. The underlying `sessions()`
+   sorts newest-first and returns at most the caller-supplied limit; this
+   adapter calls it with no type filter and no keyword.
+
+`list_conversations` therefore **measures** truncation rather than inferring it,
+and is **not** permanently partial:
+
+4. It asks the reader for **`caller_limit + 1`** sessions.
+5. The extra row is **sentinel evidence only**. It is removed before the public
+   `ReadResult`, so a caller that asked for `L` still receives at most `L`
+   items and `coverage.item_count` still equals `len(items)`.
+6. **Sentinel present** (`limit + 1` rows came back) ⟹ a row exists that the
+   caller's own limit excluded ⟹ `observed_partial`, reason `caller_limit`,
+   `truncated = True`.
+7. **Sentinel absent** (at most `limit` rows) ⟹ this deliberately oversized,
+   unfiltered request exhausted the session list ⟹ `observed_complete`, reason
+   `full_window_observed` with items and `empty_window` with none,
+   `truncated = False`.
+8. A sentinel at **`RECENT_CONVERSATION_SCAN_LIMIT + 1`** proves the recent
+   sweep's own internal bound was reached, and becomes aggregate
+   `observed_partial` + `source_limit` + `truncated = True` in
+   `get_recent_messages`. Enumeration that genuinely exhausts *below* that bound
+   does not by itself prevent the aggregate read from being complete; child
+   history coverage is still inspected either way.
+9. **This is measured truncation, not short-count completeness inference.** The
+   forbidden rule is `len(rows) < caller_limit ⟹ complete`, which reads a
+   coincidence as evidence. Here the source was deliberately asked for one row
+   *beyond* what the caller wanted, so its absence is an answer the source gave
+   rather than a gap the adapter guessed at. It is the same "collect `limit + 1`
+   so truncation is measured rather than inferred" principle §8.2 already
+   applies to the provider's traversal.
+
+No generic vocabulary, type, status or reason changes: `caller_limit`,
+`source_limit`, `upstream_more`, `full_window_observed` and `empty_window` are
+the existing tokens, used as §6.5 already defines them. `history`'s explicit
+`upstream_more` is never rewritten as `caller_limit`.
+
 ### 9.2 `StoreMessageSource` — conservative by default
 
 The visual store authors conservative coverage:
@@ -1000,7 +1052,7 @@ source which always reports `observed_complete` is worthless.
 | **T-10** | Zero messages, incomplete | identical window, one part unavailable ⟹ `items == ()`, `observed_partial`, reason `partial_inventory`; **identical `items` and identical requested bounds to T-9, opposite conclusion.** The single most important pair in the suite |
 | **T-11** | Source-internal truncation below the caller's limit | a source returns three items for a two-hundred-item request while having truncated internally ⟹ `observed_partial`, reason `source_limit`, `truncated is True`, never complete. Run against the Rion adapter's bounded sweep and the provider |
 | **T-12** | Visual source conservative coverage | `StoreMessageSource` reports `observed_partial` + `unknown` for scopes OCR cannot prove complete; reports `observed_complete` only where the limit was not filled **and** the store's newest recorded moment for the scope was reached; never reports complete from item count alone |
-| **T-13** | Rion pagination preservation | `has_more` true ⟹ `observed_partial` + `upstream_more` + `truncated`; `next_offset` is preserved as adapter paging state and never appears in `ReadCoverage`; `observed_complete` only when upstream is exhausted in the requested window with no internal bound |
+| **T-13** | Rion pagination preservation | `has_more` true ⟹ `observed_partial` + `upstream_more` + `truncated`; `next_offset` is preserved as adapter paging state and never appears in `ReadCoverage`; `observed_complete` only when upstream is exhausted in the requested window with no internal bound . `has_more` / `next_offset` are **`history`-only** — `sessions` carries no `query`, and its exhaustion is measured by the `limit + 1` sentinel of §9.1 |
 | **T-14** | Memory consumes source coverage | `memory_ingest` records the **source's** status and reason; the `len(messages) < message_limit` branch is gone from the ingestor; a `not_observed` read writes **no** coverage row; `observed_through` / `complete_through` are copied from `ReadCoverage`, not derived from the items |
 | **T-15** | Technology-neutrality guard | AST and string scan: `bridge/message_source.py` contains none of `Msg_`, `Name2Id`, `real_sender_id`, `local_type`, `shard`, `message_0`, nor any table, column, path or vendor name; its import set is still `⊆ {__future__, dataclasses, enum, typing}` |
 | **T-16** | Import-direction guard | AST scan, never raw text. No module under `bridge/`, `memory/`, `shadow/`, `ai/`, `core/`, nor `app.py` / `mcp_server.py` imports `wechatdb` or the provider package at any depth; the provider imports nothing from `memory/`, `shadow/`, `ai/` or `core/`; `message_source` imports neither |

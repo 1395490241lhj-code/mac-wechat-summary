@@ -166,6 +166,34 @@ widening as it crosses into the generic contract is not a reason to widen the
 type it came from. `before_sequence: int | None` is a sequence, not a moment,
 and is untouched everywhere.
 
+### 0.6 What P9's second preflight changed — Rion pagination is per-command
+
+P9's contract gate asked whether the `sessions` command promises the same
+pagination metadata as `history`. It does not, and the repository could not
+answer it: the only `query` object anywhere in this tree is on the two
+`history` fixtures, the interface gate recorded counts rather than
+envelopes, and the design spec never mentioned `sessions` at all. Execution
+stopped there rather than inventing a signal.
+
+The exact Rion revision the sealed gate exercised has now been inspected —
+`Rion-Wu-tech/wechat-intelligence-hub` @
+`3afe33e0742ef4e92b4babe399bf471fdcd86a7b`,
+`projects/rion-wechat-reader/rion_wechat_reader.py` — and settles it:
+`history` emits `{"query": {"has_more": len(rows) == args.limit,
+"next_offset": args.offset + len(rows)}, ...}`, while `sessions` emits only
+`{"sessions": [...]}`. The design's assumption of a uniform pagination
+envelope was wrong.
+
+**Resolution, recorded in spec §9.1 and as D-031 amendment 4:**
+`list_conversations` requests `caller_limit + 1` sessions and measures
+truncation from whether the sentinel row comes back, dropping it before the
+public `ReadResult`. Conversation listing is therefore **not** permanently
+partial, and no count-only completeness heuristic returns — the forbidden
+rule reads a coincidence as evidence, whereas an absent row that was
+explicitly asked for is an answer. It is the same `limit + 1` measurement
+§8.2 already applies to the provider's traversal. No generic type, status or
+reason is added.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -1091,11 +1119,18 @@ production breakage.)*
 **Interface produced** — the adapter's three collection methods return
 `ReadResult[...]`. Behaviour, per spec §9.1:
 
-- The `query` object the reader already returns is parsed rather than discarded.
-  `has_more` true ⟹ `COVERAGE_PARTIAL`, `REASON_UPSTREAM_MORE`,
-  `truncated=True`.
+- **`history` only:** the `query` object the reader returns is parsed rather
+  than discarded. `has_more` true ⟹ `COVERAGE_PARTIAL`,
+  `REASON_UPSTREAM_MORE`, `truncated=True`, and it is never rewritten as
+  `REASON_CALLER_LIMIT`.
 - `next_offset` is retained as the adapter's own paging state (a private
   attribute) and **never** placed in `ReadCoverage`.
+- **`sessions` carries no `query` at all** (see §0.6). `list_conversations`
+  therefore asks for `caller_limit + 1` and measures truncation from the
+  sentinel: present ⟹ `COVERAGE_PARTIAL` + `REASON_CALLER_LIMIT` +
+  `truncated=True`, with the sentinel dropped before the public
+  `ReadResult`; absent ⟹ the oversized unfiltered request exhausted, and
+  the read may be `COVERAGE_COMPLETE`.
 - `get_recent_messages`'s bounded sweep — capped at
   `RECENT_CONVERSATION_SCAN_LIMIT = 50` — reports `COVERAGE_PARTIAL`,
   `REASON_SOURCE_LIMIT`, `truncated=True` whenever the cap was reached or any
@@ -1128,6 +1163,32 @@ production breakage.)*
   reason `full_window_observed`.
 - `test_an_empty_exhausted_window_is_a_trustworthy_empty` — reason
   `empty_window`, zero items, complete.
+
+Six more that P9 owes because `sessions` has no pagination metadata (§0.6),
+all against the **query-less** `SESSIONS` fixture:
+
+- the `SESSIONS` fixture **still carries no `query` object**, asserted
+  directly. It is load-bearing evidence about the real reader, not an
+  oversight, and P9 must not complete it into something the gated revision
+  never emits.
+- the adapter **asks `sessions` for one more row than the caller wanted**,
+  asserted from the stub's recorded argument vector rather than from the
+  answer.
+- **sentinel present** ⟹ `observed_partial` + `caller_limit` + `truncated`,
+  and the public `ReadResult` still carries exactly `caller_limit` items,
+  with `coverage.item_count == len(items)`.
+- **sentinel absent** ⟹ `observed_complete` + `full_window_observed`,
+  `truncated=False`.
+- **empty sessions** ⟹ `observed_complete` + `empty_window`, `items == ()`.
+- the recent sweep's sentinel at `RECENT_CONVERSATION_SCAN_LIMIT + 1` maps
+  to aggregate `source_limit`, while enumeration that exhausts below that
+  bound leaves the aggregate free to be complete once child history
+  coverage agrees.
+
+And one negative guard: **no generic `len(rows) < limit` completeness rule
+exists**. A short answer is evidence only because an extra row was
+deliberately requested and did not come back; the same short answer without
+the overfetch proves nothing, and no code path may treat it as though it did.
 
 Existing tests in this file that index or compare adapter results against lists
 (`test_conversations_are_normalized`, `test_messages_are_normalized_in_order`,
