@@ -35,11 +35,16 @@ def call(tool, **kwargs):
 # --- The stub reader ---------------------------------------------------------
 
 def make_reader(tmp_path: Path, replies: dict[str, str], *, exit_code: int = 0,
-                name: str = "reader") -> Path:
+                name: str = "reader", record: Path | None = None) -> Path:
     """Writes a stub that answers one subcommand with a fixed string.
 
     It parses no arguments beyond finding which subcommand it was asked for,
     opens no file, and reads no input.
+
+    With ``record`` it also appends its own argument vector to that path, one
+    invocation per line, so a test can assert what the adapter *asked for*
+    rather than only what it did with the answer. The recorded arguments are
+    the synthetic ones this suite passes; no real reader is ever run.
     """
     path = tmp_path / name
     path.write_text(
@@ -47,6 +52,10 @@ def make_reader(tmp_path: Path, replies: dict[str, str], *, exit_code: int = 0,
         "import sys\n"
         f"REPLIES = {replies!r}\n"
         f"EXIT = {exit_code}\n"
+        f"RECORD = {str(record) if record else None!r}\n"
+        "if RECORD:\n"
+        "    with open(RECORD, 'a', encoding='utf-8') as handle:\n"
+        "        handle.write(' '.join(sys.argv[1:]) + '\\n')\n"
         "chosen = ''\n"
         "for argument in sys.argv[1:]:\n"
         "    if argument in REPLIES:\n"
@@ -407,7 +416,8 @@ def test_status_reports_ready(tmp_path):
 
 
 def test_conversations_are_normalized(tmp_path):
-    conversations = build(make_reader(tmp_path, READY_REPLIES)).list_conversations(10)
+    result = build(make_reader(tmp_path, READY_REPLIES)).list_conversations(10)
+    conversations = result.items
 
     assert [item.title for item in conversations] == [
         "Fixture Contact A", "Fixture Room"]
@@ -427,7 +437,7 @@ def test_conversation_identifiers_are_stable_and_json_safe():
 
 def test_messages_are_normalized_in_order(tmp_path):
     messages = build(make_reader(tmp_path, READY_REPLIES)).get_messages(
-        CONVERSATION_A, 50)
+        CONVERSATION_A, 50).items
 
     assert [item.sequence for item in messages] == [1, 2, 3]
     assert [item.ownership for item in messages] == ["other", "own", "other"]
@@ -442,7 +452,7 @@ def test_messages_are_normalized_in_order(tmp_path):
 def test_a_wal_resident_zstd_message_normalizes_to_its_decoded_text(tmp_path):
     """The third row is the WAL-only, zstd-compressed shape from the gate."""
     messages = build(make_reader(tmp_path, READY_REPLIES)).get_messages(
-        CONVERSATION_A, 50)
+        CONVERSATION_A, 50).items
     third = messages[-1]
 
     assert third.text == "fixture three from the write ahead log"
@@ -458,12 +468,18 @@ def test_a_conversation_with_no_messages_returns_an_empty_answer(tmp_path):
     reader = make_reader(tmp_path, {"doctor": DOCTOR_READY, "sessions": SESSIONS,
                                     "history": EMPTY_HISTORY})
 
-    assert build(reader).get_messages(CONVERSATION_A, 50) == []
+    result = build(reader).get_messages(CONVERSATION_A, 50)
+
+    assert result.items == ()
+    # Empty is an answer here, not an absence: the reader said there is no
+    # further page, so the window was actually accounted for.
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "empty_window"
 
 
 def test_recent_messages_filter_and_sort(tmp_path):
     messages = build(make_reader(tmp_path, READY_REPLIES)).get_recent_messages(
-        200.0, 50)
+        200.0, 50).items
 
     assert [item.first_observed_at for item in messages] == [200.0, 200.0,
                                                              300.0, 300.0]
@@ -987,6 +1003,364 @@ def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeyp
     rendered = json.dumps([m.__dict__ for m in recent], default=str, ensure_ascii=False)
     assert "VISUAL-TEXT" in rendered
     assert "ARCHIVE-TEXT" not in rendered
+
+
+# --- P9: Rion authors its own coverage ---------------------------------------
+#
+# Pagination evidence differs by command in the gated Rion revision
+# (3afe33e0..., see spec section 9.1): `history` emits a `query` object,
+# `sessions` emits none. So conversation truncation is *measured* by asking for
+# one row more than the caller wanted, and the absence of that row is an answer
+# the source gave rather than a short count the adapter read meaning into.
+
+
+def session_row(index: int) -> dict:
+    return {"username": f"wxid_fixture_{index}", "type": 1, "unread_count": 0,
+            "summary": "fixture summary", "last_timestamp": 100 + index,
+            "display_name": f"Fixture {index}", "chat_type": "private"}
+
+
+def sessions_reply(count: int) -> str:
+    return envelope("sessions", {"sessions": [session_row(i) for i in range(count)]})
+
+
+#: One more conversation than the internal sweep bound, so the sentinel lands
+#: exactly at RECENT_CONVERSATION_SCAN_LIMIT + 1.
+SESSIONS_OVER_SWEEP = sessions_reply(adapter.RECENT_CONVERSATION_SCAN_LIMIT + 1)
+
+#: A next offset no legitimate coverage field could coincidentally hold. The
+#: real reader would send a small number here, which is exactly what makes a
+#: small number useless for proving the value did not leak: it would match an
+#: item count or a sequence by accident.
+LEAKY_OFFSET = 987_654
+
+#: The same three rows as HISTORY, but the reader says a page remains.
+HISTORY_MORE = envelope("history", {
+    "query": {"has_more": True, "next_offset": LEAKY_OFFSET},
+    "messages": json.loads(HISTORY)["data"]["messages"],
+})
+
+ONE_SESSION = sessions_reply(1)
+
+
+def recorded(path: Path) -> list[str]:
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+# --- The sessions contract ---------------------------------------------------
+
+def test_the_sessions_fixture_deliberately_carries_no_query():
+    """Evidence about the real reader, not an oversight in the fixture.
+
+    The gated revision emits `{"sessions": [...]}` and nothing else, while
+    `history` emits a `query` object. Completing this fixture with an invented
+    `query` would make every sessions coverage test prove something about a
+    reader that does not exist.
+    """
+    assert "query" not in json.loads(SESSIONS)["data"]
+    assert "query" in json.loads(HISTORY)["data"]
+
+
+def test_the_adapter_asks_sessions_for_one_row_more_than_the_caller_wanted(
+        tmp_path):
+    """Asserted from what was asked, not from what came back.
+
+    Reading this off the answer would pass just as well if the adapter had
+    asked for the caller's limit and trimmed nothing -- the overfetch is the
+    whole mechanism, so the argument vector is what the test pins.
+    """
+    log = tmp_path / "argv.log"
+    source = build(make_reader(tmp_path, READY_REPLIES, record=log))
+
+    source.list_conversations(10)
+    assert "sessions --limit 11" in recorded(log)
+
+    # The identifier cache is cold, so `_chat_for` refreshes over the internal
+    # sweep bound -- which overfetches by one as well.
+    source = build(make_reader(tmp_path, READY_REPLIES, record=log,
+                               name="reader2"))
+    source.get_messages(CONVERSATION_A, 10)
+    assert f"sessions --limit {adapter.RECENT_CONVERSATION_SCAN_LIMIT + 1}" in \
+        recorded(log)
+
+
+def test_a_returned_sentinel_row_proves_the_caller_limit_truncated(tmp_path):
+    """The extra row came back, so a conversation the caller cannot see exists."""
+    reader = make_reader(tmp_path, READY_REPLIES)
+    result = build(reader).list_conversations(1)
+
+    assert len(result.items) == 1
+    assert result.coverage.status == "observed_partial"
+    assert result.coverage.reason == "caller_limit"
+    assert result.coverage.truncated is True
+    assert result.coverage.item_count == 1
+    assert result.coverage.freshness is ms.ReadFreshness.UNKNOWN
+    # A caller-limited read names no gap-free point.
+    assert result.coverage.complete_through is None
+
+
+def test_an_absent_sentinel_row_proves_the_session_list_exhausted(tmp_path):
+    """Asked for eleven, given two: the source answered that there are two."""
+    result = build(make_reader(tmp_path, READY_REPLIES)).list_conversations(10)
+
+    assert len(result.items) == 2
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "full_window_observed"
+    assert result.coverage.truncated is False
+    assert result.coverage.observed_through == 300.0
+    assert result.coverage.complete_through == 300.0
+
+
+def test_an_empty_session_list_is_a_trustworthy_empty(tmp_path):
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": sessions_reply(0),
+                                    "history": EMPTY_HISTORY})
+    result = build(reader).list_conversations(10)
+
+    assert result.items == ()
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "empty_window"
+    assert result.coverage.truncated is False
+    assert result.coverage.observed_through is None
+    assert result.coverage.complete_through is None
+
+
+def test_the_sentinel_row_has_no_public_side_effect(tmp_path):
+    """Evidence only: it is never normalised, cached, or made resolvable.
+
+    A sentinel that reached `_chat_by_id` would silently widen the adapter's
+    reachable set by one conversation beyond the bound every caller was told
+    about, which is the opposite of what measuring the bound is for.
+    """
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": SESSIONS_OVER_SWEEP,
+                                    "history": EMPTY_HISTORY})
+    source = build(reader)
+
+    sweep = adapter.RECENT_CONVERSATION_SCAN_LIMIT
+    result = source.list_conversations(sweep)
+
+    assert len(result.items) == sweep
+    beyond = adapter.conversation_identifier(f"wxid_fixture_{sweep}")
+    assert beyond not in {item.id for item in result.items}
+    assert beyond not in source._chat_by_id
+
+    # And it stays unknown across the refresh `_chat_for` performs, which is
+    # itself bounded at the sweep limit.
+    with pytest.raises(adapter.MessageSourceError) as refusal:
+        source.get_messages(beyond, 10)
+    assert refusal.value.state == "conversation_unknown"
+
+    # The sentinel's own moment never leaks into a boundary either.
+    assert result.coverage.observed_through == float(100 + sweep - 1)
+
+
+# --- History pagination ------------------------------------------------------
+
+def test_upstream_has_more_is_preserved_as_partial_coverage(tmp_path):
+    """The reader said a page remains; that is not the caller's limit."""
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY, "sessions": SESSIONS,
+                                    "history": HISTORY_MORE})
+    result = build(reader).get_messages(CONVERSATION_A, 50)
+
+    assert len(result.items) == 3
+    assert result.coverage.status == "observed_partial"
+    assert result.coverage.reason == "upstream_more"
+    assert result.coverage.truncated is True
+    assert result.coverage.complete_through is None
+
+
+def test_next_offset_never_appears_in_coverage(tmp_path):
+    """Paging state is the adapter's own business, not the envelope's."""
+    import dataclasses
+
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY, "sessions": SESSIONS,
+                                    "history": HISTORY_MORE})
+    source = build(reader)
+    result = source.get_messages(CONVERSATION_A, 50)
+
+    assert source._next_offset == LEAKY_OFFSET
+
+    names = {field.name for field in dataclasses.fields(ms.ReadCoverage)}
+    assert "next_offset" not in names
+    for name in names:
+        assert getattr(result.coverage, name) != LEAKY_OFFSET, name
+
+    rendered = repr(result.coverage) + repr([i.payload() for i in result.items])
+    assert "next_offset" not in rendered
+    assert str(LEAKY_OFFSET) not in rendered
+
+
+def test_an_exhausted_window_is_complete(tmp_path):
+    result = build(make_reader(tmp_path, READY_REPLIES)).get_messages(
+        CONVERSATION_A, 50)
+
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "full_window_observed"
+    assert result.coverage.truncated is False
+    assert result.coverage.observed_through == 300.0
+    assert result.coverage.complete_through == 300.0
+
+
+def test_an_empty_exhausted_window_is_a_trustworthy_empty(tmp_path):
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY, "sessions": SESSIONS,
+                                    "history": EMPTY_HISTORY})
+    result = build(reader).get_messages(CONVERSATION_A, 50)
+
+    assert result.items == ()
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "empty_window"
+    assert result.coverage.truncated is False
+    # The fixture omits next_offset; absence is None, not a guess.
+    assert build(reader)._next_offset is None
+
+
+@pytest.mark.parametrize("query", [
+    None,
+    "not an object",
+    {},
+    {"has_more": "false"},
+    {"has_more": 0},
+    {"has_more": False, "next_offset": "3"},
+    {"has_more": False, "next_offset": True},
+])
+def test_malformed_history_pagination_fails_closed(tmp_path, query):
+    """Bad evidence is refused, never replaced with an assumption.
+
+    Guessing here would manufacture exactly the false completeness this whole
+    design exists to remove, from a reply the adapter could not read.
+    """
+    data = {"messages": []}
+    if query is not None:
+        data["query"] = query
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY, "sessions": SESSIONS,
+                                    "history": envelope("history", data)})
+
+    with pytest.raises(adapter.MessageSourceError) as refusal:
+        build(reader).get_messages(CONVERSATION_A, 50)
+    assert refusal.value.state == "reader_malformed_response"
+
+
+# --- The recent sweep --------------------------------------------------------
+
+def test_the_bounded_conversation_sweep_reports_its_own_limit(tmp_path):
+    """The internal 50-conversation bound stops being invisible.
+
+    The caller asked for messages, not for fifty conversations, so this is the
+    source's own limit and not the caller's -- naming it `caller_limit` would
+    describe a bound the caller never set.
+    """
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": SESSIONS_OVER_SWEEP,
+                                    "history": EMPTY_HISTORY})
+    result = build(reader).get_recent_messages(0.0, 50)
+
+    assert result.coverage.status == "observed_partial"
+    assert result.coverage.reason == "source_limit"
+    assert result.coverage.truncated is True
+
+
+def test_a_short_answer_to_a_large_request_is_not_complete(tmp_path):
+    """T-11, the defect this design exists to remove.
+
+    Three messages for a two-hundred-message request, with a child history the
+    reader itself said was incomplete. Under the old length inference this was
+    recorded as complete; the item count decides nothing here.
+    """
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": ONE_SESSION,
+                                    "history": HISTORY_MORE})
+    result = build(reader).get_recent_messages(0.0, 200)
+
+    assert len(result.items) == 3
+    assert result.coverage.status != "observed_complete"
+    assert result.coverage.status == "observed_partial"
+    assert result.coverage.reason == "source_limit"
+    assert result.coverage.truncated is True
+    assert result.coverage.item_count == 3
+
+
+def test_an_exhausted_sweep_over_exhausted_children_is_complete(tmp_path):
+    """Nothing was bounded anywhere, so the answer is worth its completeness."""
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": ONE_SESSION,
+                                    "history": HISTORY})
+    result = build(reader).get_recent_messages(0.0, 50)
+
+    assert len(result.items) == 3
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "full_window_observed"
+    assert result.coverage.truncated is False
+    assert result.coverage.observed_through == 300.0
+    assert result.coverage.complete_through == 300.0
+
+
+def test_an_internal_bound_outranks_the_caller_limit_explanation(tmp_path):
+    """Precedence: a source-internal truncation is never dressed as the caller's.
+
+    Here both could be said -- the sweep was bounded and nothing matched -- and
+    the source's own bound is the one that must survive, because it is the one
+    the caller could not have known about.
+    """
+    reader = make_reader(tmp_path, {"doctor": DOCTOR_READY,
+                                    "sessions": SESSIONS_OVER_SWEEP,
+                                    "history": EMPTY_HISTORY})
+    result = build(reader).get_recent_messages(0.0, 1)
+
+    assert result.coverage.reason == "source_limit"
+    assert result.coverage.reason != "caller_limit"
+
+
+def test_the_recent_lower_bound_keeps_its_fractional_precision(tmp_path):
+    """The caller's window is recorded as asked, not as rounded."""
+    result = build(make_reader(tmp_path, READY_REPLIES)).get_recent_messages(
+        100.25, 50)
+
+    assert result.coverage.requested_start == 100.25
+    assert result.coverage.requested_end is None
+
+
+def test_the_adapter_reads_no_clock(tmp_path):
+    """Freshness is UNKNOWN because the reader supplies no newest moment.
+
+    Not because a threshold was chosen: there is no clock in this path at all,
+    so there is no age to compare and nothing to tune.
+    """
+    import ast
+
+    source = build(make_reader(tmp_path, READY_REPLIES))
+    for result in (source.list_conversations(10),
+                   source.get_messages(CONVERSATION_A, 50),
+                   source.get_recent_messages(0.0, 50)):
+        assert result.coverage.freshness is ms.ReadFreshness.UNKNOWN
+
+    tree = ast.parse(Path(adapter.__file__).read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    identifiers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+        elif isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+        elif isinstance(node, ast.Name):
+            identifiers.add(node.id)
+
+    for forbidden in ("time", "datetime", "calendar"):
+        assert forbidden not in imported, forbidden
+    for forbidden in ("now", "monotonic", "perf_counter", "utcnow", "today"):
+        assert forbidden not in identifiers, forbidden
+
+
+def test_every_collection_answer_is_a_result_whose_count_matches(tmp_path):
+    source = build(make_reader(tmp_path, READY_REPLIES))
+    for result in (source.list_conversations(10),
+                   source.get_messages(CONVERSATION_A, 50),
+                   source.get_recent_messages(0.0, 50)):
+        assert isinstance(result, ms.ReadResult)
+        assert isinstance(result.items, tuple)
+        assert result.coverage.item_count == len(result.items)
 
 
 # --- The tools tolerate either shape -----------------------------------------

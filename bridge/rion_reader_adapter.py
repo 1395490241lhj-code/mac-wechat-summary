@@ -41,10 +41,20 @@ from typing import Any
 
 from conversation_identity import conversation_identifier
 from message_source import (
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
+    REASON_CALLER_LIMIT,
+    REASON_EMPTY_WINDOW,
+    REASON_FULL_WINDOW_OBSERVED,
+    REASON_SOURCE_LIMIT,
+    REASON_UPSTREAM_MORE,
     SOURCE_DATABASE,
     MessageSourceError,
     NormalizedConversation,
     NormalizedMessage,
+    ReadCoverage,
+    ReadFreshness,
+    ReadResult,
     SourceStatus,
 )
 
@@ -110,6 +120,11 @@ class RionReaderAdapter:
         # Populated by listing; a lookup that misses re-lists once rather than
         # guessing an identifier it has never seen.
         self._chat_by_id: dict[int, str] = {}
+        #: The reader's own next page offset from the last ``history`` reply.
+        #: Adapter paging state: it describes where this reader would resume,
+        #: which is a fact about the reader and not about coverage, so it never
+        #: enters a ``ReadCoverage``, an item, a log line or an error.
+        self._next_offset: int | None = None
 
     # -- process boundary ----------------------------------------------------
 
@@ -225,6 +240,43 @@ class RionReaderAdapter:
         return rows
 
     @staticmethod
+    def _pagination(data: dict[str, Any]) -> tuple[bool, int | None]:
+        """The ``query`` object ``history`` replies carry, validated.
+
+        Only ``history`` sends one; ``sessions`` sends none, and measures its
+        own truncation with a sentinel row instead. Malformed evidence is
+        refused rather than replaced with an assumption: guessing here would
+        manufacture exactly the false completeness this envelope exists to
+        remove, out of a reply that could not be read.
+        """
+        query = data.get("query")
+        if not isinstance(query, dict):
+            raise MessageSourceError(
+                "reader_malformed_response",
+                "The external reader returned a response without page state.",
+            )
+        has_more = query.get("has_more")
+        if not isinstance(has_more, bool):
+            raise MessageSourceError(
+                "reader_malformed_response",
+                "The external reader returned an unreadable page signal.",
+            )
+        offset = query.get("next_offset")
+        if offset is not None and (
+                isinstance(offset, bool) or not isinstance(offset, int)):
+            raise MessageSourceError(
+                "reader_malformed_response",
+                "The external reader returned an unreadable page offset.",
+            )
+        return has_more, offset
+
+    @staticmethod
+    def _newest(moments: Any) -> float | None:
+        """The newest moment actually reached, or ``None`` if none is known."""
+        known = [moment for moment in moments if moment is not None]
+        return max(known) if known else None
+
+    @staticmethod
     def _number(value: Any) -> float | None:
         if isinstance(value, bool) or value is None:
             return None
@@ -281,38 +333,73 @@ class RionReaderAdapter:
             message_count=None,
         )
 
-    def list_conversations(self, limit: int) -> list[NormalizedConversation]:
-        data = self._invoke(["sessions", "--limit", self._limit(limit)])
-        conversations: list[NormalizedConversation] = []
-        for row in self._rows(data, "sessions"):
-            chat = row.get("username")
-            if not isinstance(chat, str) or not chat:
-                raise MessageSourceError(
-                    "reader_malformed_response",
-                    "The external reader returned a conversation without an identifier.",
-                )
-            identifier = conversation_identifier(chat)
-            self._chat_by_id[identifier] = chat
-            title = row.get("display_name") or chat
-            conversations.append(
-                NormalizedConversation(
-                    id=identifier,
-                    title=title if isinstance(title, str) else chat,
-                    # A database read knows when the conversation was last
-                    # written, not when this machine first became aware of it.
-                    first_seen_at=None,
-                    last_seen_at=self._number(row.get("last_timestamp")),
-                    source=self.name,
-                )
+    def _conversation(self, row: dict[str, Any]) -> NormalizedConversation:
+        """One reader session row, normalised and cached under its derived id."""
+        chat = row.get("username")
+        if not isinstance(chat, str) or not chat:
+            raise MessageSourceError(
+                "reader_malformed_response",
+                "The external reader returned a conversation without an identifier.",
             )
-        return conversations
+        identifier = conversation_identifier(chat)
+        self._chat_by_id[identifier] = chat
+        title = row.get("display_name") or chat
+        return NormalizedConversation(
+            id=identifier,
+            title=title if isinstance(title, str) else chat,
+            # A database read knows when the conversation was last written,
+            # not when this machine first became aware of it.
+            first_seen_at=None,
+            last_seen_at=self._number(row.get("last_timestamp")),
+            source=self.name,
+        )
+
+    def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]:
+        """Conversations, with truncation measured rather than inferred.
+
+        ``sessions`` returns no page state -- unlike ``history`` it sends no
+        ``query`` object at all -- so this asks for one row beyond the caller's
+        limit. Whether that sentinel comes back is the source's own answer
+        about whether more exist, which is why a short reply here means
+        something that a merely short reply never could.
+
+        The sentinel is evidence and nothing else. It is not normalised, not
+        cached, not counted and not reachable: caching it would quietly widen
+        the reachable set by one conversation past the bound every caller was
+        told about.
+        """
+        capped = int(self._limit(limit))
+        data = self._invoke(["sessions", "--limit", str(capped + 1)])
+        rows = self._rows(data, "sessions")
+        truncated = len(rows) > capped
+        conversations = tuple(self._conversation(row) for row in rows[:capped])
+        observed = self._newest(item.last_seen_at for item in conversations)
+        if truncated:
+            coverage = ReadCoverage(
+                status=COVERAGE_PARTIAL, reason=REASON_CALLER_LIMIT,
+                requested_start=None, requested_end=None,
+                observed_through=observed, complete_through=None,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=True, item_count=len(conversations),
+            )
+        else:
+            coverage = ReadCoverage(
+                status=COVERAGE_COMPLETE,
+                reason=(REASON_FULL_WINDOW_OBSERVED if conversations
+                        else REASON_EMPTY_WINDOW),
+                requested_start=None, requested_end=None,
+                observed_through=observed, complete_through=observed,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=False, item_count=len(conversations),
+            )
+        return ReadResult(items=conversations, coverage=coverage)
 
     def get_messages(
         self,
         conversation_id: int,
         limit: int,
         before_sequence: int | None = None,
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
         if before_sequence is not None:
             # The reader pages on its own message identifiers, which are not
             # the ordering key published as `sequence`. Paging on a key that
@@ -326,32 +413,102 @@ class RionReaderAdapter:
         data = self._invoke(
             ["history", chat, "--limit", self._limit(limit), "--display-order", "asc"]
         )
-        return [
+        # The reader's own page signal, which this adapter used to discard.
+        has_more, self._next_offset = self._pagination(data)
+        messages = tuple(
             self._message(row, int(conversation_id))
             for row in self._rows(data, "messages")
-        ]
+        )
+        observed = self._newest(item.first_observed_at for item in messages)
+        if has_more:
+            # The reader said a page remains. That is its statement, not the
+            # caller's limit, and it is never restated as one.
+            coverage = ReadCoverage(
+                status=COVERAGE_PARTIAL, reason=REASON_UPSTREAM_MORE,
+                requested_start=None, requested_end=None,
+                observed_through=observed, complete_through=None,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=True, item_count=len(messages),
+            )
+        else:
+            coverage = ReadCoverage(
+                status=COVERAGE_COMPLETE,
+                reason=(REASON_FULL_WINDOW_OBSERVED if messages
+                        else REASON_EMPTY_WINDOW),
+                requested_start=None, requested_end=None,
+                observed_through=observed, complete_through=observed,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=False, item_count=len(messages),
+            )
+        return ReadResult(items=messages, coverage=coverage)
 
     def get_recent_messages(
         self, since_observed_at: float, limit: int
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
         """Messages at or after a timestamp, swept over recent conversations.
 
         The reader exposes no single cross-conversation query this adapter can
         express faithfully, so it visits a bounded set of conversations and
-        filters their messages itself. The bound is a real coverage limit, not
-        a total, and is documented rather than smoothed over.
+        filters their messages itself. That bound is a real coverage limit and
+        is now reported as one: the caller asked for messages, never for fifty
+        conversations, so a sweep that hit its cap is the *source's* limit and
+        is named ``source_limit`` rather than dressed up as the caller's.
+
+        The children are read for their coverage as well as their items. A
+        conversation whose own history the reader said was incomplete truncates
+        this answer just as surely as the sweep bound does, and neither may be
+        hidden behind the fact that few messages happened to match.
         """
         since = float(since_observed_at)
         capped = int(self._limit(limit))
+        conversations = self.list_conversations(RECENT_CONVERSATION_SCAN_LIMIT)
+        # The sentinel proved there is a conversation this sweep will not visit.
+        bounded = conversations.coverage.truncated
         collected: list[NormalizedMessage] = []
-        for conversation in self.list_conversations(RECENT_CONVERSATION_SCAN_LIMIT):
-            for message in self.get_messages(conversation.id, capped):
+        for conversation in conversations.items:
+            child = self.get_messages(conversation.id, capped)
+            if child.coverage.truncated:
+                bounded = True
+            for message in child.items:
                 if message.first_observed_at >= since:
                     collected.append(message)
         collected.sort(
             key=lambda item: (item.first_observed_at, item.conversation_id, item.sequence)
         )
-        return collected[:capped]
+        messages = tuple(collected[:capped])
+        observed = self._newest(item.first_observed_at for item in messages)
+        if bounded:
+            # An internal bound outranks the caller's, because it is the one
+            # the caller had no way of knowing about.
+            coverage = ReadCoverage(
+                status=COVERAGE_PARTIAL, reason=REASON_SOURCE_LIMIT,
+                requested_start=since, requested_end=None,
+                observed_through=observed, complete_through=None,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=True, item_count=len(messages),
+            )
+        elif len(collected) > capped:
+            # Measured, not guessed: more matching messages were in hand than
+            # this answer carries. A count that merely equals the limit while
+            # every source read was exhausted proves nothing and says nothing.
+            coverage = ReadCoverage(
+                status=COVERAGE_PARTIAL, reason=REASON_CALLER_LIMIT,
+                requested_start=since, requested_end=None,
+                observed_through=observed, complete_through=None,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=True, item_count=len(messages),
+            )
+        else:
+            coverage = ReadCoverage(
+                status=COVERAGE_COMPLETE,
+                reason=(REASON_FULL_WINDOW_OBSERVED if messages
+                        else REASON_EMPTY_WINDOW),
+                requested_start=since, requested_end=None,
+                observed_through=observed, complete_through=observed,
+                freshness=ReadFreshness.UNKNOWN,
+                truncated=False, item_count=len(messages),
+            )
+        return ReadResult(items=messages, coverage=coverage)
 
     # -- normalisation -------------------------------------------------------
 
