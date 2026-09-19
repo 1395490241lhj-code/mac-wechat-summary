@@ -727,12 +727,24 @@ generic module. These are responsibilities and contracts, not implementations.
 **Owns:** the inventory of a composite source, and the evidence for each part's
 state.
 
-- Inventories the provider's shards as **readable**, **unknown** or
-  **unavailable** — **internally only**. None of those three words, and no shard
-  identity, ever crosses into a generic type.
+- Inventories the provider's shards in **four** states — **known**,
+  **readable**, **unknown**, **unavailable** — **internally only**. None of
+  those four words, and no shard identity, ever crosses into a generic type.
+  - **known** — the name shape is recognised and the entry has **not** been
+    opened. No schema, readability or bounds claim exists yet.
+  - **readable** — opened, schema recognised, usable as a message part; bounds
+    are established from source rows or honestly absent.
+  - **unknown** — listed, but not characterisable by any known name shape.
+    Retained in the inventory and never silently discarded.
+  - **unavailable** — characterised as a candidate, but probing could not make
+    it readable: the open was refused, or it opened with an unrecognised schema.
 - Two passes, kept separate because they cost different amounts: a catalogue pass
-  classifies by name shape and **opens nothing**; a probe pass opens read-only,
-  recognises schema, and takes time bounds.
+  classifies by name shape and **opens nothing** — so it can only ever produce
+  **known** or **unknown**, never readable; a probe pass asks the injected opener
+  for a read-only connection to each **known** entry, recognises schema, and
+  takes time bounds. An **unknown** entry is not probed: opening it merely to
+  guess what it might be is exactly the characterisation the catalogue could not
+  honestly make.
 - **Nothing is ever dropped.** The probe pass returns an inventory whose key set
   equals its input's: probing changes what is known about a part, never how many
   parts there are. An entry nobody can characterise counts toward the unknown
@@ -747,6 +759,32 @@ state.
   or **absent**; absent bounds are never guessed.
 - The locator is **injected**. There is no implementation that searches a
   filesystem; the shipped one lists exactly the entries it was constructed with.
+- The opener is **injected too**, and is the only thing that turns an entry into
+  a connection. `ShardDiscovery(locator, opener)`: Discovery never opens
+  anything itself, so the read-only requirement is enforceable where the
+  connection is made rather than wished for after an injected callable has
+  already made it. An entry is `ShardEntry(name, handle)`, `handle` opaque to
+  Discovery and never copied into `ShardFacts`. The shipped opener turns an
+  explicitly supplied handle into a SQLite URI with `mode=ro`, `uri=True`, and
+  never `immutable=1`; it searches nothing, knows no default root, copies,
+  checkpoints and decrypts nothing. Opening an explicitly injected handle
+  read-only is not acquisition: the provider still cannot find a database.
+
+**Correction, 2026-09-19 — two boundaries restored.** The final simplification
+of this section dropped two things while keeping the behaviour that depends on
+them. Revision `35e81f9` carried the pre-probe **known** state (“catalogued,
+not opened”); without it, a catalogue that opens nothing has no honest state
+for an entry whose name is recognised but whose readability is untested, and
+the only alternatives are to call it readable before opening it or to open it
+during the catalogue. Revision `b34836f` carried the **`ShardOpener`** /
+read-only-opener separation and `ShardDiscovery(locator, opener)`; the
+simplification replaced it with an `open_connection` callable on the entry,
+after which Discovery could no longer enforce `mode=ro` or forbid `immutable=1`
+on a connection it did not make. This correction restores **only those two
+load-bearing boundaries**. It does not restore the older role taxonomy,
+`ShardDescriptor`, `ShardInventory`, the `ShardError` hierarchy or any other
+discarded complexity; the current simplified `ShardFacts` stays as it is, and
+these states remain provider-internal.
 
 ### 8.2 `ShardRouter` — which parts a windowed query must touch
 

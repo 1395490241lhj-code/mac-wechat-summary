@@ -194,6 +194,38 @@ explicitly asked for is an answer. It is the same `limit + 1` measurement
 §8.2 already applies to the provider's traversal. No generic type, status or
 reason is added.
 
+### 0.7 What P13 preflight changed — two discovery boundaries restored
+
+P13's preflight compared the final §8.1 and this task's interface against the
+two earlier design revisions and found two regressions introduced by the final
+simplification, each of which removed a boundary while keeping the behaviour
+that depends on it.
+
+1. **The pre-probe `KNOWN` state.** Revision `35e81f9` had four part states,
+   with **known** = “catalogued, not opened”. The final revision kept the rule
+   that `catalogue()` opens nothing but dropped `known`, leaving no honest state
+   for an entry whose name is recognised and whose readability is untested. It
+   is restored: the catalogue now produces only `KNOWN` or `UNKNOWN`, and only
+   `probe()` can produce `READABLE`.
+2. **The `ShardOpener` boundary.** Revision `b34836f` had `ShardOpener`, a
+   `ReadOnlySqliteOpener` (“opens `file:<path>?mode=ro` and nothing else …
+   `immutable=1` is forbidden here and asserted against by test”) and
+   `ShardDiscovery(locator, opener)`. The final revision replaced the opener with
+   an `open_connection` callable on `ShardEntry` while still requiring Discovery
+   to open read-only with `mode=ro` and never `immutable=1` — which Discovery
+   cannot enforce on a connection an injected callable has already made. It is
+   restored: `ShardEntry(name, handle)` with an opaque handle, an injected
+   `ShardOpener`, and a small concrete read-only opener that is pinned
+   independently.
+
+This restores **only** those two load-bearing boundaries. The older role
+taxonomy, `ShardDescriptor`, `ShardInventory` and the `ShardError` hierarchy are
+not restored; the current simplified `ShardFacts` stays; the four states remain
+provider-internal and never enter the generic boundary; no filesystem search,
+default root, glob, walk or path discovery is introduced anywhere — opening an
+explicitly injected handle read-only is not acquisition. Recorded as D-031
+amendment 5. P13 remains unstarted; no Python changed.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -240,7 +272,7 @@ Every type name below comes from the spec except where marked.
 | `ReadResult[T]` | `bridge/message_source.py` | §6.4 |
 | the twelve `REASON_*` tokens, `COVERAGE_REASONS` | `bridge/message_source.py` | §6.5 |
 | `conversation_identifier` | `bridge/conversation_identity.py` (**moved** by P0) | §8.5 |
-| `ShardDiscovery`, `ShardRouter`, `IdentityResolver`, `ProviderResult` | `wechatdb/provider/` | §8 |
+| `ShardDiscovery`, `ShardOpener`, `ShardRouter`, `IdentityResolver`, `ProviderResult` | `wechatdb/provider/` | §8 |
 | `ShardedMessageProvider` | `wechatdb/provider/provider.py` | **plan-introduced**, see below |
 
 **`ShardedMessageProvider` is the one name this plan introduces.** The spec's
@@ -1682,17 +1714,22 @@ this task adds a test *directory*, never a fifth test package.
 generic type)
 
 ```python
+SHARD_KNOWN       = "known"
 SHARD_READABLE    = "readable"
 SHARD_UNKNOWN     = "unknown"
 SHARD_UNAVAILABLE = "unavailable"
-SHARD_STATES = frozenset({SHARD_READABLE, SHARD_UNKNOWN, SHARD_UNAVAILABLE})
+SHARD_STATES = frozenset({
+    SHARD_KNOWN, SHARD_READABLE, SHARD_UNKNOWN, SHARD_UNAVAILABLE,
+})
 
 
 @dataclass(frozen=True, slots=True)
 class ShardEntry:
-    # One part of a composite source, as handed to the provider.
+    # One part of a composite source, as handed to the provider. `handle` is
+    # opaque to Discovery: only the opener knows what to do with it, and it is
+    # never copied into ShardFacts.
     name: str
-    open_connection: Callable[[], sqlite3.Connection]
+    handle: object
 
 
 @runtime_checkable
@@ -1704,6 +1741,19 @@ class ExplicitShardLocator:
     # Lists exactly the entries it was constructed with. Searches nothing.
     def __init__(self, entries: Sequence[ShardEntry]) -> None: ...
     def entries(self) -> tuple[ShardEntry, ...]: ...
+
+
+@runtime_checkable
+class ShardOpener(Protocol):
+    # The only thing that turns an entry into a connection.
+    def open(self, entry: ShardEntry) -> sqlite3.Connection: ...
+
+
+class ReadOnlySqliteOpener:
+    # explicitly supplied handle -> SQLite URI -> mode=ro, uri=True.
+    # Never immutable=1. No search, no default root, no path discovery, no
+    # copy, no checkpoint, no decryption, no SQLCipher, no process access.
+    def open(self, entry: ShardEntry) -> sqlite3.Connection: ...
 
 
 def shard_key(name: str) -> str:
@@ -1721,43 +1771,112 @@ class ShardFacts:
 
 
 class ShardDiscovery:
-    def __init__(self, locator: ShardLocator) -> None: ...
+    def __init__(self, locator: ShardLocator, opener: ShardOpener) -> None: ...
     def catalogue(self) -> dict[str, ShardFacts]:
-        # Pass one: classifies by name shape. Opens nothing.
+        # Pass one: classifies by name shape. Opens nothing. Produces only
+        # KNOWN or UNKNOWN -- never READABLE.
     def probe(self, inventory: dict[str, ShardFacts]) -> dict[str, ShardFacts]:
-        # Pass two: opens read-only, recognises schema, takes time bounds.
-        # The returned key set equals the input's.
+        # Pass two: asks the opener for each KNOWN entry, recognises schema,
+        # takes time bounds. UNKNOWN is left alone. The returned key set
+        # equals the input's.
 ```
 
+**The two-pass state transition**, which is the contract every test below pins:
+
+```
+locator.entries()
+        │
+        ▼
+catalogue()          recognised name shape  → KNOWN
+                     unrecognised name      → UNKNOWN
+                     opens nothing
+        │
+        ▼
+probe()              UNKNOWN                              → stays UNKNOWN, not opened
+                     KNOWN + read-only open + recognised schema → READABLE
+                     KNOWN + open refusal                 → UNAVAILABLE
+                     KNOWN + opened, schema unrecognised  → UNAVAILABLE
+                     key set identical to its input
+```
+
+**`ShardFacts` invariants by state.** KNOWN, UNKNOWN and UNAVAILABLE all carry
+`bounds_established=False`, `min_timestamp=None`, `max_timestamp=None`,
+`tables=()` — no positive schema or bounds claim exists for any of them, for
+three different reasons (not opened yet; not characterisable; probed and not
+readable). READABLE carries the recognised conversation-table set in `tables`,
+and bounds that are either **established** (`True`, both endpoints non-`None`)
+or **absent** (`False`, both `None`) for a legitimately readable but empty part.
+One endpoint is never guessed from the other.
+
 Behaviour, per spec §8.1: the locator is injected and there is **no**
-implementation that searches a filesystem; probing opens **read-only** and the
-`immutable` optimisation is forbidden (spec §12.5); time bounds are normalised
-through `wechatdb.normalise_timestamp`; bounds are either established or absent
-and are never guessed; an entry nobody can characterise counts toward the
-unknown tally for **every** role.
+implementation that searches a filesystem; the opener is injected and is the
+only thing that opens; the shipped opener is `mode=ro` and never `immutable`
+(spec §12.5); time bounds are normalised through `wechatdb.normalise_timestamp`;
+bounds are either established or absent and are never guessed; an entry nobody
+can characterise counts toward the unknown tally for **every** role. `shard_key`
+is stable, opaque, derived from the entry name, and never the raw name or a path;
+`ShardFacts` holds no raw name, no handle and no path.
+
+**Name-shape scope.** The project has verified one real `message_0` instance
+and nothing more. The synthetic multi-part tests may exercise the documented
+message-part naming convention, but that is synthetic orchestration evidence,
+not a claim that every real installation has those parts. P13 is
+message-shard discovery only: no contact or session role classification.
 
 **Depends on** P12.
 
 **RED tests** — `wechatdb/tests/provider/test_discovery.py`:
 
-- `test_the_catalogue_pass_opens_nothing` — the entry's `open_connection` is a
-  callable that fails the test if invoked.
+*Catalogue:*
+
+- `test_a_recognised_name_is_catalogued_as_known_not_readable` — a readable
+  synthetic part catalogues as `KNOWN`; **no** catalogue result is `READABLE`.
+- `test_an_uncharacterisable_entry_stays_in_the_inventory_as_unknown`.
+- `test_the_catalogue_pass_opens_nothing` — the injected opener fails the test
+  if invoked, and the entry's handle is never touched.
+- `test_nothing_is_claimed_before_probing` — every catalogue result has
+  `bounds_established=False`, both timestamps `None`, `tables=()`.
+
+*Probe:*
+
+- `test_a_known_readable_part_becomes_readable` — `KNOWN` + valid part →
+  `READABLE` with the conversation-table set in `tables`.
+- `test_a_part_that_will_not_open_is_unavailable_not_absent` — `KNOWN` + an
+  opener that raises → `UNAVAILABLE`, key still present.
+- `test_a_part_with_an_unrecognised_schema_is_unavailable`.
+- `test_an_unknown_entry_is_not_probed` — the opener is never asked for it and
+  it remains `UNKNOWN`.
 - `test_probing_never_changes_how_many_parts_there_are` — `probe(...).keys() ==
   catalogue().keys()`, including for entries that will not open.
-- `test_an_uncharacterisable_entry_stays_in_the_inventory_as_unknown`
-- `test_a_part_that_will_not_open_is_unavailable_not_absent`
-- `test_a_part_with_an_unrecognised_schema_is_unavailable`
+- `test_a_readable_empty_part_has_absent_bounds` — `READABLE`,
+  `bounds_established=False`, both `None`.
 - `test_mixed_second_and_millisecond_times_normalise_before_bounding` — a part
   whose rows mix the two does not report a maximum in the far future.
-- `test_bounds_are_established_or_absent_never_guessed`
+- `test_bounds_are_established_or_absent_never_guessed`.
 - `test_a_part_is_identified_by_an_opaque_digest_never_by_its_name` —
-  `shard_key` is stable across calls, and the entry name appears in no
-  `ShardFacts` field.
-- `test_the_locator_is_injected_and_searches_nothing` — `ast` scan of
-  `discovery.py` for `glob`, `rglob`, `listdir`, `walk`, `Path.home`,
-  `expanduser` and any string literal containing a path separator.
-- `test_discovery_opens_read_only_and_never_immutable` — scan asserting the
-  connection URI carries `mode=ro` and never `immutable=1`.
+  `shard_key` is stable across calls; the entry name, handle and any path appear
+  in no `ShardFacts` field.
+
+*Read-only boundary (replaces the former requirement that Discovery itself
+contain a SQLite URI, which an injected connection made unenforceable):*
+
+- `test_discovery_opens_only_through_the_injected_opener` — `ast` scan of
+  `discovery.py`: `ShardDiscovery` never calls `sqlite3.connect`; a counting
+  opener records exactly one `open` per `KNOWN` entry.
+- `test_the_read_only_opener_is_mode_ro_and_never_immutable` — the concrete
+  opener is independently pinned: `uri=True`, the URI carries `mode=ro`, and
+  `immutable` appears nowhere in the module.
+- `test_a_write_through_the_opener_is_refused` — functional: an `INSERT` on a
+  connection the opener returned raises `sqlite3.OperationalError`, and the
+  synthetic file is byte-identical afterwards.
+- `test_no_provider_component_searches_for_a_path` — `ast` scan of every
+  module under `wechatdb/provider/` for `glob`, `rglob`, `iterdir`, `listdir`,
+  `walk`, `Path.home`, `expanduser`, and any string literal containing a path
+  separator. P12's acquisition guard is not weakened; this is the same
+  property asserted from the discovery side.
+
+A test that needs an unopenable fixture injects a raising opener through
+`ShardOpener`; it never weakens the production opener to get one.
 
 **Prove RED**
 
@@ -1767,9 +1886,11 @@ cd wechatdb && PYTEST -q tests/provider/test_discovery.py
 
 Expected failure: collection error, `ModuleNotFoundError: wechatdb.provider.discovery`.
 
-**Minimum GREEN** — the constants, the dataclasses and protocols, the two
-passes. `probe` opens each entry inside `try/except sqlite3.Error` and downgrades
-to `SHARD_UNAVAILABLE`; it never lets an exception escape as a dropped key.
+**Minimum GREEN** — the four constants, the dataclasses and protocols, the
+small read-only opener, the two passes. `probe` asks the injected opener for each
+`KNOWN` entry inside `try/except (sqlite3.Error, <the opener's refusal>)` and
+downgrades to `SHARD_UNAVAILABLE`; it never opens anything itself, never touches
+`UNKNOWN`, and never lets an exception escape as a dropped key.
 
 **Validate**
 
