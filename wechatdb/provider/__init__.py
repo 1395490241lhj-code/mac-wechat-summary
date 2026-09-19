@@ -48,8 +48,30 @@ from .discovery import (
     ShardOpener,
     shard_key,
 )
+from .routing import (
+    EXCLUDED_CONVERSATION_ABSENT,
+    EXCLUDED_NOT_READABLE,
+    EXCLUDED_OUT_OF_WINDOW,
+    EXCLUSION_CAUSES,
+    STOP_EXHAUSTED,
+    STOP_KINDS,
+    STOP_SAFE,
+    STOP_UNSAFE,
+    RoutePlan,
+    ShardRouter,
+)
 
 __all__ = [
+    "EXCLUDED_CONVERSATION_ABSENT",
+    "EXCLUDED_NOT_READABLE",
+    "EXCLUDED_OUT_OF_WINDOW",
+    "EXCLUSION_CAUSES",
+    "STOP_EXHAUSTED",
+    "STOP_KINDS",
+    "STOP_SAFE",
+    "STOP_UNSAFE",
+    "RoutePlan",
+    "ShardRouter",
     "SHARD_KNOWN",
     "SHARD_READABLE",
     "SHARD_STATES",
