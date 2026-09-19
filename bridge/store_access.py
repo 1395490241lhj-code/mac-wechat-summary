@@ -27,12 +27,21 @@ try:
         READER_BIN_ENV as _READER_BIN_ENV,
         READER_CONFIG_ENV as _READER_CONFIG_ENV,
         READER_TIMEOUT_ENV as _READER_TIMEOUT_ENV,
+        COVERAGE_COMPLETE,
+        COVERAGE_PARTIAL,
+        REASON_CALLER_LIMIT,
+        REASON_EMPTY_WINDOW,
+        REASON_FULL_WINDOW_OBSERVED,
+        REASON_TIMESTAMP_MISMATCH,
         SOURCE_DATABASE,
         SOURCE_VISUAL,
         MessageSource,
         MessageSourceError,
         NormalizedConversation,
         NormalizedMessage,
+        ReadCoverage,
+        ReadFreshness,
+        ReadResult,
         SourceStatus,
     )
 except ImportError:  # pragma: no cover - imported by path from another cwd
@@ -42,12 +51,21 @@ except ImportError:  # pragma: no cover - imported by path from another cwd
         READER_BIN_ENV as _READER_BIN_ENV,
         READER_CONFIG_ENV as _READER_CONFIG_ENV,
         READER_TIMEOUT_ENV as _READER_TIMEOUT_ENV,
+        COVERAGE_COMPLETE,
+        COVERAGE_PARTIAL,
+        REASON_CALLER_LIMIT,
+        REASON_EMPTY_WINDOW,
+        REASON_FULL_WINDOW_OBSERVED,
+        REASON_TIMESTAMP_MISMATCH,
         SOURCE_DATABASE,
         SOURCE_VISUAL,
         MessageSource,
         MessageSourceError,
         NormalizedConversation,
         NormalizedMessage,
+        ReadCoverage,
+        ReadFreshness,
+        ReadResult,
         SourceStatus,
     )
 
@@ -216,12 +234,88 @@ def open_verified() -> tuple[sqlite3.Connection, int]:
 # --- Sources -----------------------------------------------------------------
 
 
+def _newest(moments: Any) -> float | None:
+    """The newest moment actually returned, or ``None`` when nothing was."""
+    known = [moment for moment in moments if moment is not None]
+    return max(known) if known else None
+
+
+def _conservative_coverage(
+    *,
+    item_count: int,
+    observed: float | None,
+    filled: bool,
+    newest: float | None,
+    requested_start: float | None = None,
+) -> ReadCoverage:
+    """What a visual read may claim, and no more.
+
+    Visual capture observes what was on screen; the absence of a row is not
+    evidence that a message does not exist. So a filled limit is always
+    partial, and a short answer is complete only when an independent query
+    for the store's newest recorded moment in the *exact* requested scope
+    shows this read reached it. ``newest`` is that query's answer; it is
+    never derived from the items, which is the whole point of asking again.
+
+    The two reads are not one transaction. If the store advanced between
+    them, ``newest`` runs ahead of ``observed`` and that is reported as a
+    mismatch -- evidence about currency, never repaired, filtered or retried.
+    """
+    if filled:
+        # Full answer. The store could hold one more for all this read can
+        # tell, and no newest-moment query was spent finding out.
+        return ReadCoverage(
+            status=COVERAGE_PARTIAL, reason=REASON_CALLER_LIMIT,
+            requested_start=requested_start, requested_end=None,
+            observed_through=observed, complete_through=None,
+            freshness=ReadFreshness.UNKNOWN,
+            truncated=True, item_count=item_count,
+        )
+    if item_count == 0 and newest is None:
+        # The trustworthy empty: nothing returned, and the scope is
+        # independently known to hold nothing.
+        return ReadCoverage(
+            status=COVERAGE_COMPLETE, reason=REASON_EMPTY_WINDOW,
+            requested_start=requested_start, requested_end=None,
+            observed_through=None, complete_through=None,
+            freshness=ReadFreshness.UNKNOWN,
+            truncated=False, item_count=0,
+        )
+    if newest is not None and observed is not None and newest <= observed:
+        # Equality is the ordinary stable-store case: the newest moment read
+        # is the newest moment the store itself records for this scope.
+        return ReadCoverage(
+            status=COVERAGE_COMPLETE, reason=REASON_FULL_WINDOW_OBSERVED,
+            requested_start=requested_start, requested_end=None,
+            observed_through=observed, complete_through=observed,
+            freshness=ReadFreshness.EVIDENCE_CONSISTENT,
+            truncated=False, item_count=item_count,
+        )
+    # The store moved under the read: a newer observation appeared in this
+    # scope after the item query. Reported, not chased.
+    return ReadCoverage(
+        status=COVERAGE_PARTIAL, reason=REASON_TIMESTAMP_MISMATCH,
+        requested_start=requested_start, requested_end=None,
+        observed_through=observed, complete_through=None,
+        freshness=ReadFreshness.POTENTIALLY_STALE,
+        truncated=False, item_count=item_count,
+    )
+
+
 class StoreMessageSource:
     """The store the macOS app fills from the visual capture path.
 
     This is the reader this bridge has always been. The statements, the
     ordering, the clamping and the two opt-ins are unchanged; they have only
     moved behind the same interface every other source implements.
+
+    What it now adds is a statement about each answer. Every collection read
+    is followed, when its limit was not filled, by one fixed query for the
+    store's newest recorded moment in exactly the scope that was read --
+    ``conversations.last_seen_at`` for the conversation list, because the app
+    updates that whenever a conversation is observed whether or not a message
+    was stored; ``messages.first_observed_at`` for the two message reads. The
+    read is complete only if it reached that moment.
     """
 
     name = SOURCE_VISUAL
@@ -251,7 +345,7 @@ class StoreMessageSource:
             message_count=int(messages),
         )
 
-    def list_conversations(self, limit: int) -> list[NormalizedConversation]:
+    def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]:
         connection, _ = open_verified()
         try:
             rows = connection.execute(
@@ -263,9 +357,16 @@ class StoreMessageSource:
                 """,
                 (limit,),
             ).fetchall()
+            filled = len(rows) >= limit
+            newest = None
+            if not filled:
+                # The conversations table's own clock, not the messages'.
+                newest = connection.execute(
+                    "SELECT MAX(last_seen_at) FROM conversations;"
+                ).fetchone()[0]
         finally:
             connection.close()
-        return [
+        conversations = tuple(
             NormalizedConversation(
                 id=row["id"],
                 title=row["title"],
@@ -274,7 +375,14 @@ class StoreMessageSource:
                 source=self.name,
             )
             for row in rows
-        ]
+        )
+        coverage = _conservative_coverage(
+            item_count=len(conversations),
+            observed=_newest(item.last_seen_at for item in conversations),
+            filled=filled,
+            newest=newest,
+        )
+        return ReadResult(items=conversations, coverage=coverage)
 
     def _message(self, row: sqlite3.Row) -> NormalizedMessage:
         """Only the stored structured fields.
@@ -303,7 +411,7 @@ class StoreMessageSource:
         conversation_id: int,
         limit: int,
         before_sequence: int | None = None,
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
         connection, _ = open_verified()
         try:
             # Newest-first with the cap applied, then reversed, so a limited
@@ -328,13 +436,38 @@ class StoreMessageSource:
                     """,
                     (conversation_id, int(before_sequence), limit),
                 ).fetchall()
+            filled = len(rows) >= limit
+            newest = None
+            if not filled:
+                # The same scope as the read, cursor included: a cursor is a
+                # page boundary, and what lies past it is not this page's.
+                if before_sequence is None:
+                    newest = connection.execute(
+                        "SELECT MAX(first_observed_at) FROM messages "
+                        "WHERE conversation_id = ?;",
+                        (conversation_id,),
+                    ).fetchone()[0]
+                else:
+                    newest = connection.execute(
+                        "SELECT MAX(first_observed_at) FROM messages "
+                        "WHERE conversation_id = ? AND sequence < ?;",
+                        (conversation_id, int(before_sequence)),
+                    ).fetchone()[0]
         finally:
             connection.close()
-        return [self._message(row) for row in reversed(rows)]
+        messages = tuple(self._message(row) for row in reversed(rows))
+        coverage = _conservative_coverage(
+            item_count=len(messages),
+            observed=_newest(item.first_observed_at for item in messages),
+            filled=filled,
+            newest=newest,
+        )
+        return ReadResult(items=messages, coverage=coverage)
 
     def get_recent_messages(
         self, since_observed_at: float, limit: int
-    ) -> list[NormalizedMessage]:
+    ) -> ReadResult[NormalizedMessage]:
+        since = float(since_observed_at)
         connection, _ = open_verified()
         try:
             rows = connection.execute(
@@ -345,11 +478,29 @@ class StoreMessageSource:
                 ORDER BY first_observed_at ASC, conversation_id ASC, sequence ASC
                 LIMIT ?;
                 """,
-                (since_observed_at, limit),
+                (since, limit),
             ).fetchall()
+            filled = len(rows) >= limit
+            newest = None
+            if not filled:
+                # Bounded below exactly as the read was; rows older than the
+                # caller's bound are not in this scope at all.
+                newest = connection.execute(
+                    "SELECT MAX(first_observed_at) FROM messages "
+                    "WHERE first_observed_at >= ?;",
+                    (since,),
+                ).fetchone()[0]
         finally:
             connection.close()
-        return [self._message(row) for row in rows]
+        messages = tuple(self._message(row) for row in rows)
+        coverage = _conservative_coverage(
+            item_count=len(messages),
+            observed=_newest(item.first_observed_at for item in messages),
+            filled=filled,
+            newest=newest,
+            requested_start=since,
+        )
+        return ReadResult(items=messages, coverage=coverage)
 
 
 def selected_source_name() -> str:

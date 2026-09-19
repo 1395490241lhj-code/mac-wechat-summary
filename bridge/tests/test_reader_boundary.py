@@ -985,14 +985,15 @@ def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeyp
     # simply not part of this count.
     assert status.detail is None or "ARCHIVE" not in str(status.detail)
 
-    conversations = source.list_conversations(limit=50)
+    conversations = source.list_conversations(limit=50).items
     rendered = json.dumps(
         [c.__dict__ for c in conversations], default=str, ensure_ascii=False
     )
     assert "ARCHIVE-KEY" not in rendered
 
-    messages = source.get_messages(conversations[0].id, limit=100)
-    rendered = json.dumps([m.__dict__ for m in messages], default=str, ensure_ascii=False)
+    result = source.get_messages(conversations[0].id, limit=100)
+    rendered = json.dumps([m.__dict__ for m in result.items], default=str,
+                          ensure_ascii=False)
     assert "VISUAL-TEXT" in rendered
     for leaked in ("ARCHIVE-TEXT", "ARCHIVE-SENDER", "ARCHIVE-KEY"):
         assert leaked not in rendered, f"{leaked} reached the visual read model"
@@ -1000,12 +1001,365 @@ def test_archive_evidence_is_invisible_to_the_visual_read_path(tmp_path, monkeyp
     # `imported_at` of 9999 is newer than the visual message's observation time;
     # a recent sweep must still see only the visual row.
     recent = source.get_recent_messages(since_observed_at=0.0, limit=100)
-    rendered = json.dumps([m.__dict__ for m in recent], default=str, ensure_ascii=False)
+    rendered = json.dumps([m.__dict__ for m in recent.items], default=str,
+                          ensure_ascii=False)
     assert "VISUAL-TEXT" in rendered
     assert "ARCHIVE-TEXT" not in rendered
 
+    # Nor may an archive moment advance the visual source's own coverage. The
+    # archive carries `imported_at` 9999 and `sent_at` 5000, both newer than
+    # the visual row at 1000; the newest-moment proof must see only 1000, so
+    # this short read is complete *at 1000* rather than stale against 9999.
+    for read in (result, recent):
+        assert read.coverage.status == "observed_complete"
+        assert read.coverage.observed_through == 1000.0
+        assert read.coverage.complete_through == 1000.0
 
-# --- P9: Rion authors its own coverage ---------------------------------------
+
+# --- P10: the visual store states conservative coverage ----------------------
+#
+# Visual capture observes what was on screen, so the absence of a row is not
+# evidence that a message does not exist. A read may claim completeness only
+# when the caller's limit was not filled AND an independent query for the
+# store's newest recorded moment in the *exact* requested scope shows the read
+# reached it. A short answer on its own proves nothing.
+
+
+def visual_store(tmp_path: Path, *, conversations=(), messages=(),
+                 name: str = "visual.sqlite") -> Path:
+    """A synthetic v1 store with exactly the rows a test names.
+
+    ``conversations`` are ``(title, first_seen_at, last_seen_at)``;
+    ``messages`` are ``(conversation_id, sequence, first_observed_at)``.
+    """
+    path = tmp_path / name
+    connection = sqlite3.connect(path)
+    connection.executescript(_V1_TABLES)
+    for title, first, last in conversations:
+        connection.execute(
+            "INSERT INTO conversations(title, first_seen_at, last_seen_at) "
+            "VALUES (?, ?, ?);", (title, first, last))
+    for conversation_id, sequence, observed in messages:
+        connection.execute(
+            "INSERT INTO messages(conversation_id, sequence, sender, ownership, "
+            "visible_time, text, kind, confidence, first_observed_at) "
+            "VALUES (?, ?, 'fixture', 'other', NULL, 'fixture text', 'text', "
+            "0.9, ?);", (conversation_id, sequence, observed))
+    connection.execute("PRAGMA user_version = 1;")
+    connection.commit()
+    connection.close()
+    return path
+
+
+def serve_store(monkeypatch, path: Path) -> store_access.StoreMessageSource:
+    monkeypatch.setenv(store_access.ALLOW_READ_ENV, "1")
+    monkeypatch.setenv(store_access.DB_PATH_ENV, str(path))
+    return store_access.StoreMessageSource()
+
+
+class AdvancingConnection:
+    """A read-only connection under which the live store moves.
+
+    Delegates everything to the real connection, but runs ``advance`` against
+    the store file just before the *second* statement the source issues --
+    which is after the item query and before the newest-moment query. This
+    is the race the design names, made deterministic: it does not depend on
+    the SQL text, only on the order of the two reads, so it fails just as
+    loudly if the second read is deleted and completeness is guessed from a
+    count instead.
+    """
+
+    def __init__(self, real, path: Path, advance):
+        self._real = real
+        self._path = path
+        self._advance = advance
+        self._statements = 0
+
+    def execute(self, sql, parameters=()):
+        self._statements += 1
+        if self._statements == 2:
+            self._advance(self._path)
+        return self._real.execute(sql, parameters)
+
+    def close(self):
+        self._real.close()
+
+
+def advancing(monkeypatch, path: Path, advance):
+    """Serve ``path`` through a connection that advances between its reads."""
+    real_open = store_access.open_verified
+
+    def open_advancing():
+        connection, version = real_open()
+        return AdvancingConnection(connection, path, advance), version
+
+    monkeypatch.setattr(store_access, "open_verified", open_advancing)
+
+
+def write(path: Path, sql: str, parameters=()):
+    connection = sqlite3.connect(path)
+    connection.execute(sql, parameters)
+    connection.commit()
+    connection.close()
+
+
+def newer_conversation(path: Path):
+    write(path, "INSERT INTO conversations(title, first_seen_at, last_seen_at) "
+                "VALUES ('appeared later', 1.0, 900.0);")
+
+
+def newer_message(path: Path):
+    write(path, "INSERT INTO messages(conversation_id, sequence, sender, "
+                "ownership, visible_time, text, kind, confidence, "
+                "first_observed_at) VALUES (1, 99, 'fixture', 'other', NULL, "
+                "'appeared later', 'text', 0.9, 900.0);")
+
+
+STORE_READS = [
+    ("list_conversations", lambda s: s.list_conversations(10), newer_conversation),
+    ("get_messages", lambda s: s.get_messages(1, 10), newer_message),
+    ("get_recent_messages", lambda s: s.get_recent_messages(0.0, 10), newer_message),
+]
+
+
+@pytest.mark.parametrize("name,read,advance", STORE_READS,
+                         ids=[r[0] for r in STORE_READS])
+def test_the_visual_store_never_reports_complete_from_item_count_alone(
+        tmp_path, monkeypatch, name, read, advance):
+    """One row for a limit of ten, and the store moved between the two reads.
+
+    Under `len(items) < limit` this is complete. It is not: a newer
+    observation in the very same scope appeared after the item query, and
+    the independent newest-moment query is the only thing that can see it.
+    Delete that query and this test fails.
+    """
+    path = visual_store(tmp_path, conversations=[("chat", 1.0, 100.0)],
+                        messages=[(1, 1, 100.0)])
+    source = serve_store(monkeypatch, path)
+    advancing(monkeypatch, path, advance)
+
+    result = read(source)
+
+    assert len(result.items) == 1
+    assert result.coverage.status == "observed_partial"
+    assert result.coverage.reason == "timestamp_mismatch"
+    assert result.coverage.freshness is ms.ReadFreshness.POTENTIALLY_STALE
+    assert result.coverage.truncated is False
+    assert result.coverage.observed_through == 100.0
+    assert result.coverage.complete_through is None
+    # The newer row is reported as evidence, never fetched, filtered or
+    # reordered into the answer.
+    assert all(getattr(item, "first_observed_at", getattr(item, "last_seen_at",
+               None)) == 100.0 for item in result.items)
+
+
+@pytest.mark.parametrize("name,read,_", STORE_READS,
+                         ids=[r[0] for r in STORE_READS])
+def test_the_visual_store_reports_complete_only_at_its_newest_moment(
+        tmp_path, monkeypatch, name, read, _):
+    """The stable case: the newest moment read equals the store's newest.
+
+    Equality, not a threshold. The independent query and the item read agree
+    on one moment, so the read reached everything the store itself claims to
+    hold for the scope.
+    """
+    path = visual_store(tmp_path, conversations=[("chat", 1.0, 100.0)],
+                        messages=[(1, 1, 50.0), (1, 2, 100.0)])
+    result = read(serve_store(monkeypatch, path))
+
+    assert 0 < len(result.items) < 10
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "full_window_observed"
+    assert result.coverage.truncated is False
+    assert result.coverage.freshness is ms.ReadFreshness.EVIDENCE_CONSISTENT
+    assert result.coverage.observed_through == 100.0
+    assert result.coverage.complete_through == 100.0
+
+
+def test_the_visual_store_can_produce_a_trustworthy_empty(tmp_path, monkeypatch):
+    """Zero items is knowledge only when the scope is independently empty.
+
+    Each scope here is empty for its own reason -- no conversations at all, a
+    conversation with no messages, a lower bound past every observation --
+    and each is accepted as empty only after the newest-moment query for that
+    exact scope also came back empty.
+    """
+    path = visual_store(tmp_path, conversations=[("quiet", 1.0, 2.0),
+                                                  ("chat", 1.0, 3.0)],
+                        messages=[(2, 1, 50.0)])
+    source = serve_store(monkeypatch, path)
+
+    for result in (source.get_messages(1, 10),
+                   source.get_recent_messages(60.0, 10)):
+        assert result.items == ()
+        assert result.coverage.status == "observed_complete"
+        assert result.coverage.reason == "empty_window"
+        assert result.coverage.truncated is False
+        assert result.coverage.freshness is ms.ReadFreshness.UNKNOWN
+        assert result.coverage.observed_through is None
+        assert result.coverage.complete_through is None
+
+    empty = serve_store(monkeypatch, visual_store(tmp_path, name="none.sqlite"))
+    result = empty.list_conversations(10)
+    assert result.items == ()
+    assert result.coverage.reason == "empty_window"
+
+    # And the negative half: an empty item read whose scope is *not*
+    # independently empty is not a trustworthy empty. The store gained a row
+    # in scope between the two reads; that is the mismatch case, not the
+    # empty one. (Re-served: the empty store above re-pointed the path.)
+    source = serve_store(monkeypatch, path)
+    advancing(monkeypatch, path, newer_message)
+    raced = source.get_messages(1, 10)
+    assert raced.items == ()
+    assert raced.coverage.status == "observed_partial"
+    assert raced.coverage.reason == "timestamp_mismatch"
+    assert raced.coverage.freshness is ms.ReadFreshness.POTENTIALLY_STALE
+
+
+def test_a_filled_limit_on_the_visual_store_is_partial(tmp_path, monkeypatch):
+    """A filled limit never proves exhaustion, even when the scope holds
+    exactly that many rows.
+
+    Three rows, a limit of three: the answer is full, and the store could
+    hold a fourth for all this read can tell. The visual path stays
+    conservative and does not spend a newest-moment query to find out.
+    """
+    path = visual_store(
+        tmp_path,
+        conversations=[("a", 1.0, 10.0), ("b", 1.0, 20.0), ("c", 1.0, 30.0)],
+        messages=[(1, 1, 10.0), (1, 2, 20.0), (1, 3, 30.0)])
+    source = serve_store(monkeypatch, path)
+
+    for result in (source.list_conversations(3),
+                   source.get_messages(1, 3),
+                   source.get_recent_messages(0.0, 3)):
+        assert len(result.items) == 3
+        assert result.coverage.status == "observed_partial"
+        assert result.coverage.reason == "caller_limit"
+        assert result.coverage.truncated is True
+        assert result.coverage.freshness is ms.ReadFreshness.UNKNOWN
+        assert result.coverage.observed_through == 30.0
+        assert result.coverage.complete_through is None
+        assert result.coverage.item_count == 3
+
+
+def test_conversation_coverage_is_judged_by_last_seen_at_not_message_time(
+        tmp_path, monkeypatch):
+    """The two observation clocks are not the same clock.
+
+    The app updates `conversations.last_seen_at` whenever a conversation is
+    observed, whether or not a message was stored, so it can run ahead of
+    every `messages.first_observed_at` -- or behind it. Conversation-list
+    coverage must be measured against the conversations table's own moment
+    in both directions.
+    """
+    # Conversation observed later than any message it holds.
+    ahead = visual_store(tmp_path, name="ahead.sqlite",
+                         conversations=[("chat", 1.0, 500.0)],
+                         messages=[(1, 1, 100.0)])
+    result = serve_store(monkeypatch, ahead).list_conversations(10)
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.observed_through == 500.0
+    assert result.coverage.complete_through == 500.0
+
+    # Conversation observed earlier than a message it holds. A newest-moment
+    # query aimed at `messages` would see 500 > 100 and call this stale; the
+    # conversations table says 100 == 100 and the list is complete.
+    behind = visual_store(tmp_path, name="behind.sqlite",
+                          conversations=[("chat", 1.0, 100.0)],
+                          messages=[(1, 1, 500.0)])
+    result = serve_store(monkeypatch, behind).list_conversations(10)
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.reason == "full_window_observed"
+    assert result.coverage.observed_through == 100.0
+
+
+def test_a_historical_page_is_judged_within_its_own_cursor(tmp_path, monkeypatch):
+    """`before_sequence` is a cursor, and the newest-moment proof honours it.
+
+    Newer messages exist past the cursor, and in another conversation. Neither
+    is in this page's scope, so neither may make the page stale or partial.
+    """
+    path = visual_store(tmp_path, conversations=[("chat", 1.0, 1.0),
+                                                  ("other", 1.0, 1.0)],
+                        messages=[(1, 1, 10.0), (1, 2, 20.0), (1, 3, 30.0),
+                                  (1, 4, 40.0), (1, 5, 50.0),
+                                  (2, 1, 999.0)])
+    source = serve_store(monkeypatch, path)
+
+    page = source.get_messages(1, 10, before_sequence=3)
+    assert [m.sequence for m in page.items] == [1, 2]
+    assert page.coverage.status == "observed_complete"
+    assert page.coverage.reason == "full_window_observed"
+    assert page.coverage.observed_through == 20.0
+    assert page.coverage.complete_through == 20.0
+    # A cursor is not a time window.
+    assert page.coverage.requested_start is None
+    assert page.coverage.requested_end is None
+
+    # The other conversation's 999 is out of scope for this one as well.
+    whole = source.get_messages(1, 10)
+    assert whole.coverage.status == "observed_complete"
+    assert whole.coverage.observed_through == 50.0
+
+
+def test_the_recent_lower_bound_scopes_the_proof_and_keeps_its_precision(
+        tmp_path, monkeypatch):
+    """Rows older than the bound are outside the scope entirely.
+
+    A newest-moment query that ignored the bound would see the 50.0 row and
+    turn an honestly empty window into a mismatch. It must not.
+    """
+    path = visual_store(tmp_path, conversations=[("chat", 1.0, 1.0)],
+                        messages=[(1, 1, 50.0), (1, 2, 100.25), (1, 3, 150.0)])
+    source = serve_store(monkeypatch, path)
+
+    result = source.get_recent_messages(100.25, 10)
+    assert [m.first_observed_at for m in result.items] == [100.25, 150.0]
+    assert result.coverage.requested_start == 100.25
+    assert result.coverage.requested_end is None
+    assert result.coverage.status == "observed_complete"
+    assert result.coverage.observed_through == 150.0
+
+    # Past every observation: empty, and provably so despite the older rows.
+    beyond = source.get_recent_messages(200.5, 10)
+    assert beyond.items == ()
+    assert beyond.coverage.reason == "empty_window"
+    assert beyond.coverage.requested_start == 200.5
+
+
+def test_every_visual_answer_is_a_result_whose_count_matches(tmp_path, monkeypatch):
+    source = serve_store(monkeypatch, make_store(tmp_path))
+    for result in (source.list_conversations(10),
+                   source.get_messages(1, 10),
+                   source.get_recent_messages(0.0, 10)):
+        assert isinstance(result, ms.ReadResult)
+        assert isinstance(result.items, tuple)
+        assert result.coverage.item_count == len(result.items)
+
+
+def test_the_visual_store_still_refuses_hard_and_reads_no_clock(
+        tmp_path, monkeypatch):
+    """A refusal is a refusal; there is no envelope for it, and no clock."""
+    import ast
+
+    monkeypatch.setenv(store_access.ALLOW_READ_ENV, "1")
+    monkeypatch.setenv(store_access.DB_PATH_ENV, str(tmp_path / "absent.sqlite"))
+    with pytest.raises(store_access.BridgeUnavailable) as refusal:
+        store_access.StoreMessageSource().list_conversations(10)
+    assert refusal.value.state == "database_missing"
+
+    tree = ast.parse(Path(store_access.__file__).read_text(encoding="utf-8"))
+    imported = {
+        (alias.name if isinstance(node, ast.Import) else (node.module or ""))
+        .split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in (node.names if isinstance(node, ast.Import) else [None])
+    }
+    for forbidden in ("time", "datetime", "calendar"):
+        assert forbidden not in imported, forbidden
 #
 # Pagination evidence differs by command in the gated Rion revision
 # (3afe33e0..., see spec section 9.1): `history` emits a `query` object,
