@@ -32,7 +32,7 @@ from typing import Protocol, Sequence, runtime_checkable
 from urllib.parse import quote
 
 import wechatdb
-from wechatdb.parser import MANDATORY_COLUMNS
+from wechatdb.parser import CONVERSATION_TABLE, MANDATORY_COLUMNS
 
 # -- states, provider-internal only -------------------------------------------
 
@@ -132,6 +132,12 @@ class ShardFacts:
         if self.state == SHARD_READABLE:
             if not self.tables:
                 raise ValueError("a readable part names its tables")
+            # The parser owns the conversation-table contract; a readable part
+            # may not cite a name the parser would never read.
+            if any(not isinstance(table, str)
+                   or CONVERSATION_TABLE.fullmatch(table) is None
+                   for table in self.tables):
+                raise ValueError("a readable part carries only conversation tables")
         elif self.tables or self.bounds_established:
             raise ValueError("a part that was not read carries no evidence")
 

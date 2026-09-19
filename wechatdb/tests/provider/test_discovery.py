@@ -301,6 +301,33 @@ def test_state_invariants_are_enforced_at_construction():
         ShardFacts(key="k", state="mystery", **quiet)
 
 
+
+def test_readable_facts_refuse_non_conversation_tables():
+    """READABLE carries recognised conversation tables, or it is not READABLE.
+
+    The parser owns the `Msg_<32 hex>` contract; the type must not be able to
+    express a readable part whose evidence is a name the parser would never
+    read. P14 consumes `tables` as routing evidence, so the claim is sealed at
+    construction rather than trusted to whoever populated it.
+    """
+    quiet = dict(key="k", state=SHARD_READABLE, bounds_established=False,
+                 min_timestamp=None, max_timestamp=None)
+    good = "Msg_" + "0123456789abcdef" * 2          # exactly 32 hex characters
+    ShardFacts(tables=(good,), **quiet)
+    ShardFacts(tables=(good, "Msg_" + "F" * 32), **quiet)   # upper-case hex is hex
+
+    for bad in ("not_a_conversation_table", "Msg_deadbeef", "Msg_" + "0" * 31,
+                "Msg_" + "0" * 33, "Msg_" + "g" * 32, "msg_" + "0" * 32, ""):
+        with pytest.raises(ValueError) as refusal:
+            ShardFacts(tables=(bad,), **quiet)
+        assert bad == "" or bad not in str(refusal.value)
+
+    with pytest.raises(ValueError):
+        ShardFacts(tables=(good, "not_a_conversation_table"), **quiet)  # one bad among good
+    with pytest.raises(ValueError):
+        ShardFacts(tables=(42,), **quiet)  # not even a string
+
+
 def test_a_part_is_identified_by_an_opaque_digest_never_by_its_name(tmp_path):
     part = fixtures.readable_part(tmp_path, "message_0.db", CONVERSATION, MESSAGES)
     key = shard_key("message_0.db")
