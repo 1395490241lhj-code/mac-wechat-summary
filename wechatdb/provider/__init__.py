@@ -60,8 +60,24 @@ from .routing import (
     RoutePlan,
     ShardRouter,
 )
+from .identity import (
+    NAME_CONTACT_NICKNAME,
+    NAME_CONTACT_REMARK,
+    NAME_PRECEDENCE,
+    NAME_ROOM_MEMBER,
+    IdentityResolver,
+    NameCandidate,
+    ResolvedIdentities,
+)
 
 __all__ = [
+    "NAME_CONTACT_NICKNAME",
+    "NAME_CONTACT_REMARK",
+    "NAME_PRECEDENCE",
+    "NAME_ROOM_MEMBER",
+    "IdentityResolver",
+    "NameCandidate",
+    "ResolvedIdentities",
     "EXCLUDED_CONVERSATION_ABSENT",
     "EXCLUDED_NOT_READABLE",
     "EXCLUDED_OUT_OF_WINDOW",
