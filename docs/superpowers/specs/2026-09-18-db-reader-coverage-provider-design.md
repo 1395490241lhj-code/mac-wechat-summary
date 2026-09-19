@@ -796,18 +796,56 @@ for stopping.
   the inventory without a recorded reason.
 - **Inclusion** requires that the part is readable, its bounds overlap the
   requested window, and — for a conversation-scoped read — that it holds that
-  conversation. A part whose bounds are **not established always overlaps**, and
-  is therefore always visited.
+  conversation. A **readable** part whose bounds are **not established always
+  overlaps**, and is therefore always visited. Known, unknown and unavailable
+  parts are `not_readable` exclusions; absent bounds do not turn them into
+  visits. For every inventory key exactly one thing happens — a visit, or an
+  exclusion with exactly one cause — and the cause is chosen by a fixed
+  precedence so no part ever gets an arbitrary one: **not readable**
+  `not_readable`; else a conversation-scoped request whose table the part
+  lacks `conversation_absent`; else established bounds disjoint from the window
+  `out_of_window`; else visit.
+- **Conversation scope** is expressed as `conversation_table`: `None` for no
+  filter, otherwise the **exact parser table name** `Msg_<32 hex>`, tested by
+  membership in `ShardFacts.tables`. It is never hashed, never stripped, never
+  converted, and never the generic conversation identifier, which is a
+  different digest of a different thing. The same table legitimately occurs in
+  several parts, so routing is many-parts-to-one-conversation and never a
+  one-table-to-one-shard map.
 - **Ordering** is newest-first by established maximum bound, with
   unestablished-bounds parts sorted **first**, so they are visited rather than
   skipped and any later stop is evaluated against a remainder that is entirely
-  bounded.
-- **Safe early stop** is permitted **only** when every unscanned shard is
-  provably outside the requested window. Such a read is `observed_complete` with
-  reason `window_bound`.
-- **Any other early stop yields `observed_partial` with reason
-  `unsafe_early_stop`**, `truncated = True`, and `observed_through = None`. An
-  unexplained stop may not claim how far forward it looked.
+  bounded. Ties break on the opaque shard key; no raw name or path
+  participates.
+- **Stops are classified against the traversal boundary, not the window.**
+  The planner has already excluded every part whose established bounds miss the
+  window, so a stop rule phrased as “every unscanned shard is provably outside
+  the requested window” can never be satisfied for a planned part. The
+  boundary is `oldest_collected_at`, the oldest candidate the newest-first
+  traversal has collected so far. `exhausted` when every planned part was
+  visited. **`safe`** when the traversal stopped early *and* `oldest_collected_at`
+  is known *and* every unvisited planned part has established bounds with
+  `max_timestamp < oldest_collected_at` — strictly, so nothing skipped could
+  contribute a record newer than or equal to what is already in hand. **Any
+  other early stop is `unsafe`**: an unvisited readable part with unestablished
+  bounds, an unvisited maximum at or after the boundary, or no collected
+  boundary at all. There is no fall-back to `requested_start` for an empty
+  collection; the planner already did that work, and blurring the two would
+  make the stop rule mean two things.
+- **A safe stop is traversal safety, not completeness.** It means only that
+  skipping the remaining planned parts cannot alter the limited answer already
+  collected. Because the traversal collects `limit + 1` and a safe stop happens
+  *after* that, the answer is caller-limited and stays `observed_partial` with
+  reason `caller_limit`, `truncated = True`; `observed_through` **may** be
+  stated, because the remainder was proven strictly older. It is never upgraded
+  to `observed_complete`, and this provider's path does **not** emit
+  `window_bound` for it. `window_bound` stays in the generic vocabulary for a
+  source or traversal whose unvisited remainder genuinely lies outside its
+  requested window.
+- **An unsafe stop yields `observed_partial` with reason `unsafe_early_stop`**,
+  `truncated = True`, and `observed_through = None`, and takes precedence over
+  the caller-limit explanation: the returned top-N cannot be proven valid
+  against what was skipped, so it may not claim how far forward it looked.
 - Unknown and unavailable parts do **not** make a stop unsafe. They were never
   visitable, so the traversal did not skip them; they downgrade coverage
   separately, through `partial_inventory`, and always. Keeping the two mechanisms
@@ -822,6 +860,25 @@ relate. The design is safe regardless: early stop is gated on measured bounds, s
 if the assumption is false the router simply never finds a safe stop, visits
 everything, and the answer is still correct. The assumption buys efficiency,
 never correctness.
+
+**Correction, 2026-09-19 — the reachable stop and the honest stop.** Revision
+`35e81f9` classified a stop as safe when “every unvisited planned part is
+provably older than the boundary already reached”; revision `b34836f` made that
+boundary explicit as `classify_stop(…, oldest_collected_at)`, and both
+revisions’ T-5 already asserted `truncated is True` with a limit reason for the
+safe stop. The final simplification deleted the boundary parameter and
+rewrote safety as “outside the requested window” even though `plan()` had
+already excluded every such part — leaving `STOP_SAFE` unreachable — and then
+mapped that unreachable branch to `observed_complete` / `window_bound`, which
+the current generic contract (caller truncation `⟹` partial, complete `⟹` not
+truncated) could not have honoured even if it were reached. This correction
+restores the traversal boundary and records that a safe stop is traversal
+safety, not completeness. It restores none of the older `RoutingStep`,
+`RoutingExclusion`, `TraversalOutcome`, `ShardInventory` or role machinery.
+It also renames the conversation-scope parameter to `conversation_table`, the
+exact parser table name, because P13 sealed `ShardFacts.tables` as
+parser-recognised names that must never be compared to the generic
+conversation identifier.
 
 ### 8.3 `wechatdb` — one readable database, one table
 
@@ -877,7 +934,22 @@ the source's own tables.
   - `observed_through` = the **furthest, i.e. maximum**, observed point across
     contributing reads;
   - `truncated` = `True` if **any** contributing read was cut short or the
-    caller's limit was hit.
+    caller's limit was hit;
+  - **stop and limit, in precedence.** The traversal collects `limit + 1`, and
+    that sentinel survives until collapse so `caller_limit_hit` is **measured**
+    as more matching records in hand than the caller asked for — never
+    inferred from a count equal to the limit. Then: `unsafe` stop `⟹`
+    `observed_partial` + `unsafe_early_stop` + `truncated`, `observed_through =
+    None`, outranking every other explanation; `safe` stop with
+    `caller_limit_hit` `⟹` `observed_partial` + `caller_limit` + `truncated`,
+    `observed_through` may be stated — safety prevents `unsafe_early_stop`, it
+    does not grant completeness; `exhausted` with `caller_limit_hit` `⟹`
+    likewise `observed_partial` + `caller_limit` + `truncated`, because visiting
+    every part does not undo the cut; `observed_complete` only when there is no
+    required inventory gap, no unsafe stop, the caller’s limit cut no measured
+    matching record, and the contributions otherwise account for the scope —
+    which keeps `complete ⟹ not truncated`. This provider’s path emits no
+    `window_bound`.
 - **No shard name, path, table name, column name, digest or schema identifier
   escapes.** The provider's vocabulary ends at this boundary.
 - **Diagnostics carry aggregate counts and category tallies only** — how many
@@ -1082,8 +1154,8 @@ source which always reports `observed_complete` is worthless.
 | **T-2** | Unknown intersecting shard | T-1 plus one entry matching no known shape and overlapping the window; `observed_partial`; reason `partial_inventory`; **messages identical to T-1** — an unknown part changes the claim, not the content |
 | **T-3** | Unavailable intersecting shard | variants for "will not open" and "opens with unrecognised schema"; `observed_partial`; reason `partial_inventory`; **the readable parts' messages are still returned** — a per-part failure is not fatal |
 | **T-4** | Read spanning shards | one conversation present in several parts; all are planned; messages correctly merge-ordered across part boundaries. (a) every contribution accountable ⟹ `observed_complete` and `complete_through == observed_through`. (b) one contribution capped ⟹ the **minimum** complete point caps the aggregate while `observed_through` still reports the **maximum** observed point, so the two differ and the read is partial |
-| **T-5** | Safe early stop | descending established ranges; every unscanned shard provably outside the window; `observed_complete` with reason `window_bound`; `truncated is False`; `observed_through` is stated |
-| **T-6** | Unsafe early stop | variant (a) an unvisited part has no established bounds; variant (b) an unvisited part's maximum lies inside the window; both ⟹ `observed_partial`, reason `unsafe_early_stop`, `truncated is True`, `observed_through is None` |
+| **T-5** | Safe limited traversal | descending established ranges; the traversal has measured `caller_limit + 1` matching records; `oldest_collected_at` is known; every unvisited planned shard has `max_timestamp < oldest_collected_at` (strict); stop is `safe`; `observed_partial`, reason `caller_limit`, `truncated is True`, `observed_through` is stated. Proves the early stop did **not** become `unsafe_early_stop`; claims nothing about the whole window being enumerated |
+| **T-6** | Unsafe early stop | variant (a) an unvisited readable part has no established bounds; variant (b) an unvisited part’s `max_timestamp >= oldest_collected_at` — the comparison is against the traversal boundary, not the window edge; both ⟹ `observed_partial`, reason `unsafe_early_stop`, `truncated is True`, `observed_through is None` |
 | **T-7** | Timestamp mismatch, freshness downgrade | the source declares a newest moment later than the newest item read. (a) mismatch inside the window ⟹ `observed_partial` + `timestamp_mismatch` + `potentially_stale`. (b) mismatch outside the window ⟹ `observed_complete` + `potentially_stale`. (c) one moment absent ⟹ `unknown`, with no structural downgrade caused by freshness alone. No test anywhere compares against a clock or a constant |
 | **T-8** | Identity resolved and unresolved | remark beats nickname; a room nickname applies inside that room and not outside it; an identifier with two conflicting same-kind names resolves to **no name** and neither candidate appears anywhere in the result; an unresolved identity raises nothing, increments the aggregate diagnostic count, and **never** places a name in `ReadCoverage` |
 | **T-9** | Zero messages, complete | every part readable, window genuinely empty ⟹ `items == ()`, `observed_complete`, reason `empty_window`; the caller may state "there are no messages" |
@@ -1233,8 +1305,8 @@ Every choice below is settled by this document. There are no open questions.
     `(session_names, display_names)` pair `parse_conversation` already accepts;
     that is the entire integration surface. §8.3.
 15. **What if the time-partitioning assumption is wrong?** Nothing breaks.
-    Unestablished bounds always overlap and never satisfy the safe-stop test, so
-    such a part is always visited. The assumption buys efficiency, not
+    A readable part with unestablished bounds always overlaps and never
+    satisfies the safe-stop test, so it is always visited. The assumption buys efficiency, not
     correctness. §8.2.
 16. **Where do FTS and caching go?** Nowhere, now. One constraint is recorded: an
     indexed or cached answer may never claim coverage stronger than an unindexed

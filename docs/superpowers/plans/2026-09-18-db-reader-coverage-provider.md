@@ -226,6 +226,38 @@ default root, glob, walk or path discovery is introduced anywhere — opening an
 explicitly injected handle read-only is not acquisition. Recorded as D-031
 amendment 5. P13 remains unstarted; no Python changed.
 
+### 0.8 What P14 preflight changed — a reachable stop, an honest stop, and an unambiguous key
+
+P14’s preflight found three related contract problems in the final §8.2, §8.5,
+T-5 and this plan’s P14/P16/P17b text.
+
+1. **`STOP_SAFE` was unreachable.** `plan()` excludes every readable part whose
+   established bounds miss the requested window as `out_of_window`, so every
+   unvisited planned part already overlaps the window or has no bounds — and
+   the final stop rule, “safe only when every unscanned shard is provably
+   outside the requested window”, could never hold for one. Revision `35e81f9`
+   had it right: safe when every unvisited planned part is “provably older than
+   the boundary already reached”. Revision `b34836f` made that boundary explicit
+   as `oldest_collected_at`. The final simplification deleted the parameter and
+   rewrote safety against the window. The traversal boundary is restored.
+2. **The historical safe stop cannot map to complete.** Both historical T-5s
+   already asserted `truncated is True` with a limit reason. Under the current
+   generic contract a caller cut is `observed_partial` / `caller_limit` /
+   `truncated=True` and complete is never truncated, so a safe stop reached
+   after collecting `limit + 1` is a caller-limited answer. `STOP_SAFE` now
+   means only that the skipped remainder cannot alter the limited result; it
+   does not map to `observed_complete` / `window_bound`, and this provider
+   emits no `window_bound`. The generic token is untouched.
+3. **`conversation_key` was ambiguous.** P13 sealed `ShardFacts.tables` as
+   exact parser names `Msg_<32 hex>`, which must never meet
+   `bridge.conversation_identifier(...)`, a different digest of a different
+   thing. The parameter is `conversation_table`: the exact table name, tested
+   by membership, never hashed, stripped, converted or identified.
+
+None of the older `RoutingStep`, `RoutingExclusion`, `TraversalOutcome`,
+`ShardInventory` or role machinery returns. Recorded as D-031 amendment 6.
+No Python changed; P14 remains unstarted.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -1941,7 +1973,7 @@ class ShardRouter:
         *,
         requested_start: int | None,
         requested_end: int | None,
-        conversation_key: str | None = None,
+        conversation_table: str | None = None,   # exact Msg_<32 hex>, or no filter
     ) -> RoutePlan: ...
 
     def classify_stop(
@@ -1949,20 +1981,50 @@ class ShardRouter:
         plan: RoutePlan,
         inventory: Mapping[str, ShardFacts],
         *,
-        visited: Sequence[str],
-        requested_start: int | None,
-        requested_end: int | None,
+        visited: Sequence[str],           # a prefix of plan.visit, in order
+        oldest_collected_at: int | None,  # the traversal boundary; None if nothing collected
     ) -> str:  # one of STOP_KINDS
         ...
 ```
 
-Behaviour, per spec §8.2: total accounting; a part whose bounds are **not
-established always overlaps** and is therefore always visited; ordering is
-newest-first by established maximum bound with unestablished-bounds parts sorted
-**first**; a safe early stop requires that every unscanned shard is provably
-outside the requested window; any other early stop is unsafe; unknown and
-unavailable parts do **not** make a stop unsafe — they downgrade coverage
-separately through `partial_inventory`, always.
+Behaviour, per spec §8.2 (as corrected — see §0.8):
+
+- **Total accounting with fixed precedence.** For every inventory key exactly
+  one of visit or one-cause exclusion, chosen in this order: not `READABLE`
+  ⟹ `not_readable`; else `conversation_table` given and absent from
+  `facts.tables` ⟹ `conversation_absent`; else established bounds disjoint
+  from the requested window ⟹ `out_of_window`; else **visit**. A **readable**
+  part with unestablished bounds cannot satisfy step 3 and therefore visits;
+  `KNOWN`, `UNKNOWN` and `UNAVAILABLE` are `not_readable` however their bounds
+  look.
+- **`conversation_table`** is the exact parser table name, `Msg_<32 hex>`,
+  validated only through the parser-owned `CONVERSATION_TABLE` if validated at
+  all. Membership in `facts.tables`, never hashed, stripped or converted, and
+  **never** passed through or compared with `conversation_identifier` — that
+  is a different digest of a different thing. The same table legitimately
+  appears in several parts: routing is many-parts-to-one-conversation, and no
+  one-table→one-shard dictionary is ever built.
+- **Ordering**: readable parts with unestablished bounds first; then
+  established bounds by descending `max_timestamp`; ties broken by opaque
+  shard key. No raw name or path participates.
+- **`visited` is a prefix of `plan.visit`**, in order, with no duplicates and
+  no unknown keys; anything else raises a fixed, content-free `ValueError`
+  rather than being classified, because stop classification depends on
+  traversal order.
+- **Stops against the traversal boundary.** `STOP_EXHAUSTED` when
+  `tuple(visited) == plan.visit`, regardless of unknown or unavailable
+  exclusions (those are `ProviderResult`’s to downgrade). For an actual early
+  stop, `STOP_SAFE` requires all three: `oldest_collected_at is not None`;
+  every unvisited planned part has established bounds; every such part’s
+  `max_timestamp < oldest_collected_at`, **strictly**. Anything else is
+  `STOP_UNSAFE`, including an unvisited readable part with unestablished
+  bounds, an unvisited `max_timestamp >= oldest_collected_at`, and no collected
+  boundary at all. There is no `requested_start` fall-back for an empty
+  collection.
+- **`STOP_SAFE` is traversal safety, not completeness.** It says only that
+  the skipped remainder cannot alter the limited answer in hand. What coverage
+  that becomes is P16’s decision, and it is `caller_limit`, not
+  `window_bound`.
 
 The time-partitioning assumption stays graded **Hypothesis** with no project
 evidence; if it is false the router simply never finds a safe stop, visits
@@ -1972,16 +2034,45 @@ everything, and the answer is still correct.
 
 **RED tests** — `wechatdb/tests/provider/test_routing.py`:
 
+*Planning:*
+
 - `test_every_part_is_either_visited_or_excluded_with_a_cause`
 - `test_no_part_appears_twice_across_the_plan`
-- `test_a_part_without_established_bounds_is_always_visited`
+- `test_exclusion_causes_follow_a_fixed_precedence` — a part that is both
+  unreadable and out of window is `not_readable`; readable, conversation-absent
+  and out of window is `conversation_absent`.
+- `test_only_a_readable_part_is_ever_visited` — `KNOWN`, `UNKNOWN`,
+  `UNAVAILABLE` with absent bounds are all `not_readable`, never visits.
+- `test_a_readable_part_without_established_bounds_is_always_visited`
 - `test_unestablished_bounds_are_visited_first`
-- `test_visit_order_is_newest_first_by_established_maximum`
-- `test_a_stop_is_safe_only_when_every_unscanned_part_is_outside_the_window`
+- `test_visit_order_is_newest_first_by_established_maximum_then_by_key` —
+  equal maxima order by opaque key; no name or path is consulted.
+- `test_a_conversation_scoped_read_excludes_parts_that_do_not_hold_it` —
+  `conversation_table` is the exact `Msg_<32 hex>` name; membership in
+  `facts.tables`.
+- `test_the_same_conversation_table_routes_to_every_part_that_holds_it` —
+  two readable parts holding the table both visit.
+- `test_conversation_table_is_never_the_generic_identifier` — `ast` scan of
+  `routing.py`: no import of `conversation_identity` or
+  `rion_reader_adapter`, no call to `conversation_identifier`, no hashing of
+  the table name.
+
+*Stops:*
+
+- `test_visited_must_be_an_in_order_prefix_of_the_plan` — out of order,
+  duplicated, or unknown keys raise `ValueError`; the message carries no key.
+- `test_visiting_every_planned_part_is_exhausted_whatever_was_excluded`
+- `test_a_stop_is_safe_only_below_the_oldest_collected_boundary` (T-5 routing
+  half) — every unvisited planned part bounded strictly below
+  `oldest_collected_at` ⟹ `STOP_SAFE`.
+- `test_an_unvisited_maximum_equal_to_the_boundary_is_unsafe` — strict `<`,
+  not `<=`.
 - `test_a_stop_with_an_unbounded_unvisited_part_is_unsafe` (T-6a)
-- `test_a_stop_with_an_unvisited_maximum_inside_the_window_is_unsafe` (T-6b)
+- `test_a_stop_with_an_unvisited_maximum_at_or_after_the_boundary_is_unsafe`
+  (T-6b)
+- `test_a_stop_with_nothing_collected_is_unsafe` — `oldest_collected_at is
+  None`; no `requested_start` fall-back.
 - `test_unknown_and_unavailable_parts_do_not_make_a_stop_unsafe`
-- `test_a_conversation_scoped_read_excludes_parts_that_do_not_hold_it`
 
 **Prove RED**
 
@@ -1991,7 +2082,8 @@ cd wechatdb && PYTEST -q tests/provider/test_routing.py
 
 Expected failure: `ModuleNotFoundError: wechatdb.provider.routing`.
 
-**Minimum GREEN** — the constants, `RoutePlan`, `plan`, `classify_stop`.
+**Minimum GREEN** — the constants, `RoutePlan`, `plan` with its fixed precedence and
+key tie-break, the prefix check, `classify_stop` against `oldest_collected_at`.
 
 **Validate**
 
@@ -2159,9 +2251,22 @@ Collapse rules, per spec §8.5 and §7.2–§7.3:
 - `observed_through` = the **maximum** observed point across contributing reads;
 - `truncated` = `True` if **any** contributing read was cut short or the
   caller's limit was hit;
-- `STOP_UNSAFE` ⟹ `COVERAGE_PARTIAL`, `REASON_UNSAFE_EARLY_STOP`,
-  `truncated=True`, `observed_through=None`;
-- `STOP_SAFE` ⟹ `COVERAGE_COMPLETE`, `REASON_WINDOW_BOUND`, `truncated=False`;
+- **caller truncation is measured, not inferred.** P17 collects
+  `caller_limit + 1` and does not trim before collapse, so
+  `caller_limit_hit = sum(len(c.records) for c in contributions) > caller_limit`
+  is evidence; a total merely equal to the limit proves nothing;
+- **stop and limit, in precedence** (spec §8.5, as corrected):
+  `STOP_UNSAFE` ⟹ `COVERAGE_PARTIAL`, `REASON_UNSAFE_EARLY_STOP`,
+  `truncated=True`, `observed_through=None`, outranking the caller-limit
+  explanation; `STOP_SAFE` and `caller_limit_hit` ⟹ `COVERAGE_PARTIAL`,
+  `REASON_CALLER_LIMIT`, `truncated=True`, `observed_through` may be stated —
+  safety prevents `unsafe_early_stop` and does **not** upgrade to complete;
+  `STOP_EXHAUSTED` and `caller_limit_hit` ⟹ likewise `COVERAGE_PARTIAL`,
+  `REASON_CALLER_LIMIT`, `truncated=True`; `COVERAGE_COMPLETE` only with no
+  required inventory gap, no unsafe stop, no measured caller cut, and
+  contributions that otherwise account for the scope. **This provider never
+  emits `REASON_WINDOW_BOUND`**; the token stays in the generic vocabulary
+  untouched;
 - `source_newest` later than the newest item read ⟹ freshness
   `POTENTIALLY_STALE`; when that newer material falls **inside** the requested
   window, also `COVERAGE_PARTIAL` with `REASON_TIMESTAMP_MISMATCH`; when either
@@ -2193,8 +2298,18 @@ escapes this module.** The provider's vocabulary ends here.
 - `test_every_contribution_accountable_yields_a_complete_read` (T-4a)
 - `test_any_inventory_gap_makes_the_read_partial` (T-2, T-3)
 - `test_any_truncated_contribution_truncates_the_whole_read`
-- `test_an_unsafe_stop_states_no_observed_point` (T-6)
-- `test_a_safe_stop_is_complete_with_a_window_bound` (T-5)
+- `test_an_unsafe_stop_states_no_observed_point` (T-6) — and outranks a
+  measured caller limit.
+- `test_a_safe_limited_stop_remains_caller_limited_not_unsafe` (T-5) —
+  `STOP_SAFE` with `limit + 1` measured ⟹ `observed_partial` /
+  `caller_limit` / `truncated=True`, `observed_through` stated; never
+  `unsafe_early_stop`, never complete, never `window_bound`.
+- `test_exhausting_every_part_never_hides_a_caller_cut` — `STOP_EXHAUSTED`
+  with `limit + 1` measured ⟹ `observed_partial` / `caller_limit`.
+- `test_a_count_equal_to_the_limit_is_not_a_cut` — exactly `limit` records,
+  `STOP_EXHAUSTED`, no gap ⟹ complete; `caller_limit_hit` is `>`, not `>=`.
+- `test_this_provider_never_emits_window_bound` — across every collapse case
+  in this module the reason is never `REASON_WINDOW_BOUND`.
 - `test_a_mismatch_inside_the_window_is_partial_and_stale` (T-7a)
 - `test_a_mismatch_outside_the_window_is_complete_and_stale` (T-7b)
 - `test_an_absent_moment_is_unknown_with_no_structural_downgrade` (T-7c)
@@ -2278,9 +2393,12 @@ discovery → routing → leaf parse → identity → `ProviderResult` chain; mu
 merge and ordering; a complete read; and a trustworthy zero-message complete
 read. Every part in every fixture here is **readable**, every stop is
 `STOP_EXHAUSTED` or a plain full traversal, and no freshness mismatch is
-introduced. The traversal already collects `limit + 1` matching records so that
-truncation is **measured** rather than inferred (spec §8.2) — P17b is what
-exercises the measurement.
+introduced. The traversal collects `limit + 1` matching records so that
+truncation is **measured** rather than inferred (spec §8.2), and the order is
+load-bearing: **collect `limit + 1` ⟹ build contributions and collapse
+coverage ⟹ only then trim the public items to `limit`.** The sentinel must
+reach `ProviderResult.collapse`; trimming first would turn measured truncation
+back into a count. P17b is what exercises the measurement.
 
 **Explicitly not done here:** no registration in `bridge/store_access.py`, no
 `MESSAGE_SOURCE_ENV` value, no addition to `SOURCE_NAMES` beyond the existing
@@ -2358,8 +2476,8 @@ the design's whole claim lives.
 |---|---|
 | `test_an_unknown_intersecting_part_changes_the_claim_not_the_content` | **T-2** |
 | `test_an_unavailable_part_still_returns_the_readable_parts` — two variants: will not open, opens with unrecognised schema | **T-3** |
-| `test_a_safe_early_stop_is_complete` | **T-5** |
-| `test_an_unsafe_early_stop_is_partial` — variants (a) unvisited part with no established bounds, (b) unvisited maximum inside the window | **T-6** |
+| `test_a_safe_early_stop_preserves_a_correct_caller_limited_answer` — T-5 as corrected: `STOP_SAFE`, `limit + 1` measured, `observed_partial` / `caller_limit` / `truncated=True`, `observed_through` stated; the top-N is exactly what a full traversal would have produced. Invents no coverage rule of its own | **T-5** |
+| `test_an_unsafe_early_stop_is_partial` — variants (a) unvisited readable part with no established bounds, (b) unvisited `max_timestamp >= oldest_collected_at`, the traversal boundary | **T-6** |
 | `test_a_source_newer_than_the_read_downgrades_freshness` — variants (a) mismatch inside the window, (b) outside it, (c) one moment absent | **T-7** |
 | `test_zero_messages_with_an_unavailable_part_is_not_trustworthy` | **T-10** |
 | `test_the_provider_truncating_internally_is_never_complete` | **T-11** |
@@ -2439,7 +2557,9 @@ Every suite passes, including P17a's, unchanged.
    | Mutation | Must break |
    |---|---|
    | make every source author `COVERAGE_COMPLETE` unconditionally | T-1…T-3, T-6, T-10…T-14 |
-   | make `ShardRouter.classify_stop` always return `STOP_SAFE` | T-5, T-6 |
+   | make `ShardRouter.classify_stop` always return `STOP_SAFE` | T-6 |
+   | make `ShardRouter.classify_stop` always return `STOP_UNSAFE` | T-5 |
+   | trim to `limit` before `collapse` (drop the sentinel) | T-5, T-11 |
    | make `ShardDiscovery.probe` drop unreadable keys | T-2, T-3, T-10 |
    | make `collapse` take the maximum complete point instead of the minimum | T-4b |
    | make `IdentityResolver` pick the first of two conflicting names | T-8 |
