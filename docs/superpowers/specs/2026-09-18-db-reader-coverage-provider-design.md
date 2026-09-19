@@ -420,10 +420,10 @@ class ReadCoverage:
 
     status: str
     reason: str
-    requested_start: int | None
-    requested_end: int | None
-    observed_through: int | None
-    complete_through: int | None
+    requested_start: float | None
+    requested_end: float | None
+    observed_through: float | None
+    complete_through: float | None
     freshness: ReadFreshness
     truncated: bool
     item_count: int
@@ -447,6 +447,39 @@ Windowed evidence is represented **only** by `requested_start` /
 `requested_end` + `truncated` + `status` / `reason`. There is no separate window
 object and no `windowed` flag: a stored flag can contradict the bounds sitting
 beside it.
+
+**Correction, 2026-09-18 — the four moment fields are `float | None`.** This
+revision of §6.3 declared them `int | None`. That was a drafting regression
+introduced when the former `ReadWindow` was flattened into `ReadCoverage`, not a
+timestamp policy: at spec revision `35e81f9` the same moments were
+`ReadWindow.start` / `.end: float | None` and `observed_through` /
+`complete_through: float | None`. Four points settle it.
+
+- **Unix seconds may carry fractional precision.** Every moment a shipped source
+  can supply is already a float: `NormalizedMessage.first_observed_at`,
+  `NormalizedConversation.first_seen_at` / `.last_seen_at`,
+  `MessageSource.get_recent_messages`'s own `since_observed_at`, and the visual
+  store's SQLite `REAL` columns. `RionReaderAdapter._number()` returns
+  `float | None` deliberately.
+- **The Reader boundary preserves source precision.** It does not round, floor
+  or cast a moment. §7.3 states that mapping a `ReadCoverage` onto a
+  `CoverageRecord` is a field copy with no translation table, and
+  `memory_freshness.SourceFreshness.observed_through` / `.complete_through` and
+  `CoverageRecord.window_start` / `.window_end` are all `float | None`. Under
+  `int` that copy would be a rounding step, and a rounding step on a window
+  bound moves the window.
+- **An integer-valued source stays ordinary evidence** and needs no conversion
+  policy. This widens what may be carried; it requires nothing of a source that
+  has only whole seconds.
+- **Provider-internal integer timestamps are untouched.** `wechatdb`'s
+  `normalise_timestamp()` returns `int` and `MessageRecord.timestamp` is `int`;
+  shard bounds and `Contribution` moments in §8 legitimately stay integers. The
+  correction applies to this generic contract, not to every timestamp that
+  eventually flows into it.
+
+**No `ReadWindow` returns.** There are still exactly three new generic Reader
+types — `ReadFreshness`, `ReadCoverage`, `ReadResult[T]` — and no status,
+reason, invariant or field meaning changes.
 
 ### 6.4 `ReadResult[T]`
 

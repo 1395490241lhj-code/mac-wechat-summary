@@ -135,6 +135,37 @@ Across both revisions the task count moved 18 → 19 → 20. P1–P16 and P18 ke
 their numbers throughout, so review comments on either earlier revision still
 address the same tasks.
 
+### 0.5 What P9 preflight changed — one contract correction, applied before P9
+
+P9 is the first task that builds a `ReadCoverage` out of moments a real source
+supplies, and its preflight exposed a type regression that P0–P8 could not have
+surfaced: §6.3 and this plan's P5 snippet declared the four moment fields
+`int | None`, while every moment a shipped source can produce is a `float`
+(`NormalizedMessage.first_observed_at`, `NormalizedConversation`'s boundaries,
+`get_recent_messages(since_observed_at: float)`, `RionReaderAdapter._number()`)
+and both memory-side records they are documented to copy into without a
+translation table are `float | None`. At spec revision `35e81f9` these same
+moments were `float | None`; the `int` arrived when the former `ReadWindow` was
+flattened into `ReadCoverage`.
+
+The four generic moment fields are therefore **`float | None`**, corrected in
+`bridge/message_source.py`, in §6.3 of the spec, and in P5's snippet above,
+**before** P9 runs. No invariant, status, reason or field meaning changes, no
+`ReadWindow` returns, and the design still adds exactly three generic types. The
+correction is pinned by two tests in `bridge/tests/test_read_coverage.py`, one
+on the evaluated annotations and one on a fractional value surviving
+construction unchanged.
+
+**This is not a global retype.** Provider-internal integer timestamps in Stage 6
+stay integers: `ShardFacts.min_timestamp` / `.max_timestamp`, `ShardRouter`'s
+`requested_start` / `requested_end` parameters, `Contribution.observed_through`
+/ `.complete_through`, `ProviderResult.collapse`'s parameters and
+`ShardedMessageProvider`'s keyword bounds are all fed by `wechatdb`'s
+`normalise_timestamp() -> int` and `MessageRecord.timestamp: int`. A value
+widening as it crosses into the generic contract is not a reason to widen the
+type it came from. `before_sequence: int | None` is a sequence, not a moment,
+and is untouched everywhere.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -807,10 +838,10 @@ Field order and types are the spec's, unchanged:
 class ReadCoverage:
     status: str
     reason: str
-    requested_start: int | None
-    requested_end: int | None
-    observed_through: int | None
-    complete_through: int | None
+    requested_start: float | None
+    requested_end: float | None
+    observed_through: float | None
+    complete_through: float | None
     freshness: ReadFreshness
     truncated: bool
     item_count: int

@@ -236,6 +236,12 @@ class ReadCoverage:
     value it rejected: a message built from a field is how chat content, a
     filesystem path or another program's error text reaches a log through a
     validation error.
+
+    The four moment fields are Unix seconds and carry whatever precision their
+    source had. Nothing here rounds, floors or casts one: these values are
+    copied into the memory layer's own float boundaries without a translation
+    table, and a rounding step on a window bound would move the window. An
+    integer-valued source is ordinary evidence and needs no conversion.
     """
 
     #: One of the four ``COVERAGE_*`` tokens.
@@ -247,18 +253,18 @@ class ReadCoverage:
 
     #: Inclusive start of the requested window, Unix seconds. ``None`` is
     #: unbounded.
-    requested_start: int | None
+    requested_start: float | None
 
     #: Inclusive end of the requested window, Unix seconds. ``None`` is
     #: unbounded.
-    requested_end: int | None
+    requested_end: float | None
 
     #: Newest moment this read is known to have looked at.
-    observed_through: int | None
+    observed_through: float | None
 
     #: Newest moment up to which the source can account for the window with no
     #: gap.
-    complete_through: int | None
+    complete_through: float | None
 
     #: Orthogonal to ``status``: a read can cover its whole window and still
     #: know the source moved underneath it.

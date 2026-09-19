@@ -590,3 +590,78 @@ def test_a_result_refusal_never_quotes_what_it_refused():
         assert message.isascii(), message
         assert "wxid" not in message
         assert "/" not in message
+
+
+# --- The moment fields carry the precision their sources have ----------------
+
+#: The four fields that hold a moment rather than a count or a token.
+MOMENT_FIELDS = ("requested_start", "requested_end",
+                 "observed_through", "complete_through")
+
+
+def test_the_moment_fields_preserve_source_precision():
+    """Unix seconds may be fractional, and this boundary translates nothing.
+
+    Every moment a shipped source can supply is already a float --
+    ``NormalizedMessage.first_observed_at``, ``NormalizedConversation``'s two
+    boundaries, ``get_recent_messages``'s own lower bound -- and the memory
+    record these fields are documented to copy into without a translation table
+    is a float too. An ``int`` here would make that copy a rounding step, and a
+    rounding step on a window bound moves the window.
+
+    Checked against evaluated hints rather than the source text, so the
+    annotation is pinned as the type it actually resolves to.
+    """
+    import typing
+
+    hints = typing.get_type_hints(ReadCoverage)
+    for name in MOMENT_FIELDS:
+        assert hints[name] == (float | None), (name, hints[name])
+
+    # Nothing else moved: the two non-moment fields keep their own types.
+    assert hints["item_count"] is int
+    assert hints["truncated"] is bool
+
+
+def test_a_fractional_moment_survives_construction_unchanged():
+    """The value read back is the value handed in, to the bit.
+
+    Asserting the exact float rather than merely that construction succeeded:
+    a silent ``int()`` would still construct, and would still satisfy every
+    invariant, while quietly moving a window bound by up to a second.
+    """
+    coverage = complete(
+        requested_start=100.25, requested_end=200.75,
+        observed_through=200.75, complete_through=200.75,
+    )
+
+    assert coverage.requested_start == 100.25
+    assert coverage.requested_end == 200.75
+    assert coverage.observed_through == 200.75
+    assert coverage.complete_through == 200.75
+
+    for name in MOMENT_FIELDS:
+        value = getattr(coverage, name)
+        assert isinstance(value, float), name
+        assert value != int(value), name
+
+    # An integer-valued source stays valid evidence; this is about precision
+    # that exists, not about requiring precision that does not.
+    integral = complete(requested_start=100, requested_end=200,
+                        observed_through=200, complete_through=200)
+    assert integral.observed_through == 200
+
+
+def test_the_invariants_still_hold_on_fractional_moments():
+    """The comparisons in __post_init__ need no numeric type of their own."""
+    with pytest.raises(ValueError):
+        complete(requested_start=200.75, requested_end=200.25)
+
+    with pytest.raises(ValueError):
+        partial(observed_through=150.25, complete_through=150.75)
+
+    with pytest.raises(ValueError):
+        complete(observed_through=200.75, complete_through=200.25)
+
+    assert partial(observed_through=150.5,
+                   complete_through=150.5).complete_through == 150.5
