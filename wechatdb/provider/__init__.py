@@ -33,4 +33,34 @@ once they exist.
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from .discovery import (
+    SHARD_KNOWN,
+    SHARD_READABLE,
+    SHARD_STATES,
+    SHARD_UNAVAILABLE,
+    SHARD_UNKNOWN,
+    ExplicitShardLocator,
+    ReadOnlySqliteOpener,
+    ShardDiscovery,
+    ShardEntry,
+    ShardFacts,
+    ShardLocator,
+    ShardOpener,
+    shard_key,
+)
+
+__all__ = [
+    "SHARD_KNOWN",
+    "SHARD_READABLE",
+    "SHARD_STATES",
+    "SHARD_UNAVAILABLE",
+    "SHARD_UNKNOWN",
+    "ExplicitShardLocator",
+    "ReadOnlySqliteOpener",
+    "ShardDiscovery",
+    "ShardEntry",
+    "ShardFacts",
+    "ShardLocator",
+    "ShardOpener",
+    "shard_key",
+]
