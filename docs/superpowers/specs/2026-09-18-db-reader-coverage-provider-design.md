@@ -1358,9 +1358,10 @@ grant of it.
 - **P2 — Standing acquisition remains a separate decision.** This design neither
   requires nor justifies obtaining access material, and supplies no argument for
   doing so.
-- **P3 — D-030 has lapsed** and is not reopened here. Real multi-part
-  verification is therefore **not satisfiable today**, and §8.2's partitioning
-  assumption stays unverified; correctness does not depend on it.
+- **P3 — D-030 has lapsed** and is not reopened here. At design approval, real
+  multi-part verification was therefore **not satisfiable**. D-032 records the
+  post-G1 structural evidence that superseded that operational state; P3 remains
+  unmet until the corrected provider passes a later real-evidence gate.
 - **P4 — Complete-container coverage and future-WeChat-version compatibility
   remain unproven.** E-022's evidence is scoped to one operator's current
   `message_0` and must not be generalised. No claim to the contrary may be made

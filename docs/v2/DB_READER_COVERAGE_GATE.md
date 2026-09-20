@@ -8,15 +8,37 @@
 >   `Decisions.md`. None exists. An import statement, a green test run and a
 >   merged branch are none of them a promotion decision.
 > - **P2 — Standing acquisition remains a separate decision.** Not taken.
-> - **P3 — D-030 has lapsed** and is not reopened. Real multi-part
->   verification is **not satisfiable today**.
+> - **P3 — D-030 has lapsed** and is not reopened. At the time of G1, real
+>   multi-part verification was not satisfiable. That historical state is
+>   superseded by D-032's post-G1 structural evidence, but P3 remains unmet
+>   until the corrected provider passes a later real-evidence gate.
 > - **P4 — Complete-container coverage and future-WeChat-version
 >   compatibility remain unproven.**
 > - **P5 — Visual capture stays the default.** It is the production path.
 >
-> D-030 is lapsed. Real multi-part verification is not satisfiable today.
-> Visual capture remains the production/default path. G1 implies none of the
-> above and this document argues for none of them.
+> D-030 is lapsed. Visual capture remains the production/default path. G1
+> implies none of the above and this document argues for none of them.
+
+## Post-G1 evidence update — D-032
+
+Operator-owned evidence collected after G1 establishes only these structural
+facts:
+
+- real multi-part message storage exists, and one conversation may span several
+  message parts;
+- a valid message part may contain no `Msg_*` table;
+- `local_id` restarts in different parts, while positive signed-64 `server_id`
+  is the source-authored message-identity candidate;
+- an active WAL may contain state newer than the main database; and
+- source-authored database metadata can recover conversation identity.
+
+D-032 authorizes the bounded correctness correction needed to represent those
+facts in the isolated synthetic provider. It authorizes no product wiring and
+introduces no standing acquisition capability. D-005 remains true for shipped
+product dependencies; visual remains the production/default path; the provider
+remains isolated and unregistered; no sensitive data or access material enters
+Git. P1, P2, P4 and P5 remain unmet, and P3 remains unmet until the corrected
+provider passes a later real-evidence gate.
 
 ## 1. Gate identity
 
