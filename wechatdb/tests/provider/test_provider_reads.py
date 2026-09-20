@@ -62,7 +62,7 @@ def inject_partial_read(monkeypatch, part_name, *, keep, observed_through,
 
 
 def six():
-    return [M(i, 100 * i, ALPHA if i % 2 else BETA, f"fixture text {i}")
+    return [M(i, 100 * i, ALPHA if i % 2 else BETA, f"fixture text {i}", server_id=i)
             for i in range(1, 7)]
 
 
@@ -135,11 +135,55 @@ def test_a_conversation_spanning_parts_merges_in_order(tmp_path):
     c = got.coverage
     assert c.status == ms.COVERAGE_COMPLETE
     assert c.complete_through == c.observed_through == 600
-    # before_sequence narrows, and the limit keeps the newest, oldest first.
-    older = p.get_messages(cid, 2, before_sequence=5)
+    # before_sequence narrows by the public timestamp/local-id sequence, and
+    # the limit keeps the newest, oldest first.
+    older = p.get_messages(cid, 2, before_sequence=(500 << 31) | 5)
     assert [m.id for m in older.items] == [3, 4]
     assert older.coverage.reason == ms.REASON_CALLER_LIMIT
     assert older.coverage.item_count == 2 == len(older.items)
+
+
+def test_paging_uses_public_sequence_when_local_ids_restart_in_each_part(tmp_path):
+    older = fixtures.readable_part(tmp_path, "message_0.db", ROOM, [
+        M(1, 100, ALPHA, "older one", server_id=101),
+        M(2, 200, BETA, "older two", server_id=102),
+    ])
+    newer = fixtures.readable_part(tmp_path, "message_1.db", ROOM, [
+        M(1, 300, ALPHA, "newer one", server_id=103),
+        M(2, 400, BETA, "newer two", server_id=104),
+    ])
+    provider = provider_over([older, newer])
+    conversation = conversation_identifier(ROOM)
+
+    first = provider.get_messages(conversation, 2)
+    cursor = first.items[0].sequence
+    second = provider.get_messages(conversation, 2, before_sequence=cursor)
+
+    assert [message.id for message in first.items] == [103, 104]
+    assert [message.id for message in second.items] == [101, 102]
+    assert {message.id for message in first.items}.isdisjoint(
+        message.id for message in second.items)
+    assert all(message.sequence < cursor for message in second.items)
+
+
+@pytest.mark.parametrize("parts", [
+    lambda tmp_path: [
+        fixtures.readable_part(tmp_path, "message_0.db", ROOM,
+                               [M(1, 100, ALPHA, "id collision a", server_id=99)]),
+        fixtures.readable_part(tmp_path, "message_1.db", ROOM,
+                               [M(2, 200, BETA, "id collision b", server_id=99)]),
+    ],
+    lambda tmp_path: [
+        fixtures.readable_part(tmp_path, "message_0.db", ROOM,
+                               [M(1, 100, ALPHA, "sequence collision a", server_id=101)]),
+        fixtures.readable_part(tmp_path, "message_1.db", ROOM,
+                               [M(1, 100, BETA, "sequence collision b", server_id=102)]),
+    ],
+])
+def test_public_message_identity_collisions_fail_closed_with_fixed_copy(tmp_path, parts):
+    with pytest.raises(ValueError, match="^message identity collision$") as refusal:
+        provider_over(parts(tmp_path)).get_messages(conversation_identifier(ROOM), 50)
+    assert "collision a" not in str(refusal.value)
 
 
 def test_the_sentinel_reaches_collapse_before_the_public_trim(tmp_path, monkeypatch):
@@ -184,10 +228,13 @@ def test_names_reach_the_parser_and_the_table_name_is_passed_unchanged(tmp_path,
 
 def test_a_conversation_spanning_parts_caps_at_the_weakest_complete_point(tmp_path, monkeypatch):
     whole = fixtures.readable_part(tmp_path, "message_0.db", ROOM,
-                                   [M(1, 380, ALPHA, "a"), M(2, 400, BETA, "b")])
+                                   [M(1, 380, ALPHA, "a", server_id=1),
+                                    M(2, 400, BETA, "b", server_id=2)])
     capped = fixtures.readable_part(tmp_path, "message_1.db", ROOM, [
-        M(11, 100, ALPHA, "c"), M(12, 200, BETA, "d"), M(13, 300, ALPHA, "e"),
-        M(14, 350, BETA, "f")])
+        M(11, 100, ALPHA, "c", server_id=11),
+        M(12, 200, BETA, "d", server_id=12),
+        M(13, 300, ALPHA, "e", server_id=13),
+        M(14, 350, BETA, "f", server_id=14)])
     inject_partial_read(monkeypatch, "message_1.db", keep=2,
                         observed_through=350, complete_through=200)
     got = provider_over([whole, capped]).get_messages(conversation_identifier(ROOM), 50)

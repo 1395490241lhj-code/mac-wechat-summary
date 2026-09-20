@@ -125,6 +125,9 @@ class MessageRecord:
 
     ``reply_to`` is the server id of the quoted message, as a string, for a
     quote and nothing else.
+
+    ``server_id`` is the source-authored message identifier when the stored
+    value is a positive signed-64 integer; every other shape is absent.
     """
 
     session_id: str
@@ -136,6 +139,7 @@ class MessageRecord:
     content: str | None
     media_id: str | None
     reply_to: str | None
+    server_id: int | None = None
 
 
 def normalise_timestamp(value: object) -> int:
@@ -147,6 +151,13 @@ def normalise_timestamp(value: object) -> int:
     if raw >= MILLISECOND_THRESHOLD:
         return raw // 1000
     return raw
+
+
+def _server_id(value: object) -> int | None:
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value <= 0 or value >= 1 << 63):
+        return None
+    return value
 
 
 def conversation_tables(connection: sqlite3.Connection) -> list[str]:
@@ -283,6 +294,7 @@ def _record(
         content=_content(kind, payload),
         media_id=_media_id(values, payload),
         reply_to=xml_tag(payload, "svrid") if kind == KIND_QUOTE else None,
+        server_id=_server_id(values.get("server_id")),
     )
 
 

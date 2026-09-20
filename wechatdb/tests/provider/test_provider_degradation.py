@@ -211,8 +211,13 @@ def test_the_provider_truncating_internally_is_never_complete(tmp_path, monkeypa
 
 def test_ambiguity_events_are_summed_across_the_rooms_a_read_resolves(tmp_path):
     other = "fixture_room_0002@chatroom"
+    other_messages = [
+        M(i, 1_000 + 100 * i, ALPHA if i % 2 else BETA, f"other fixture {i}",
+          server_id=1_000 + i)
+        for i in range(1, 7)
+    ]
     parts = [fixtures.readable_part(tmp_path, "message_0.db", ROOM, six()),
-             fixtures.readable_part(tmp_path, "message_1.db", other, six())]
+             fixtures.readable_part(tmp_path, "message_1.db", other, other_messages)]
     candidates = [NameCandidate(ALPHA, NAME_ROOM_MEMBER, name, room=room)
                   for room in (ROOM, other) for name in ("One", "Another")]
     p = provider_over(parts, conversations=(ROOM, other), candidates=candidates)

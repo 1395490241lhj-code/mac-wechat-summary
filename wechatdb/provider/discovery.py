@@ -103,11 +103,12 @@ def shard_key(name: str) -> str:
 class ShardFacts:
     """Everything Discovery is entitled to say about one part, and no more.
 
-    Only a readable part carries evidence. Known, unknown and unavailable parts
-    all carry none, for three different reasons: not opened yet, not
-    characterisable, probed and not readable. Bounds are established with both
-    endpoints or absent with neither; one endpoint is never guessed from the
-    other. No name, handle or path lives here.
+    Only a readable part carries evidence. A structurally valid empty message
+    part is readable with no conversation tables and no bounds. Known, unknown
+    and unavailable parts all carry none, for three different reasons: not
+    opened yet, not characterisable, probed and not readable. Bounds are
+    established with both endpoints or absent with neither; one endpoint is
+    never guessed from the other. No name, handle or path lives here.
     """
 
     key: str
@@ -130,8 +131,6 @@ class ShardFacts:
         elif have_min or have_max:
             raise ValueError("absent bounds carry no endpoint")
         if self.state == SHARD_READABLE:
-            if not self.tables:
-                raise ValueError("a readable part names its tables")
             # The parser owns the conversation-table contract; a readable part
             # may not cite a name the parser would never read.
             if any(not isinstance(table, str)
@@ -240,7 +239,7 @@ class ShardDiscovery:
             return _unavailable(key)
         try:
             tables = tuple(wechatdb.conversation_tables(connection))
-            if not tables:
+            if not tables and not _is_valid_empty_message_part(connection):
                 return _unavailable(key)
             for table in tables:
                 present = {row[1] for row in
@@ -266,3 +265,12 @@ class ShardDiscovery:
                               tables=tables)
         return ShardFacts(key=key, state=SHARD_READABLE, bounds_established=False,
                           min_timestamp=None, max_timestamp=None, tables=tables)
+
+
+def _is_valid_empty_message_part(connection: sqlite3.Connection) -> bool:
+    names = {row[0] for row in connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    if not {"TimeStamp", "wcdb_builtin_compression_record"} <= names:
+        return False
+    columns = {row[1] for row in connection.execute("PRAGMA table_info('TimeStamp')")}
+    return "timestamp" in columns

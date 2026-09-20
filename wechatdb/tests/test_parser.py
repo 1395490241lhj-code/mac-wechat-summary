@@ -160,6 +160,39 @@ def test_name2id_maps_rowids_to_usernames(database):
     }
 
 
+def test_server_id_is_carried_only_when_it_is_a_positive_signed_64_integer(database):
+    parsed = records(database)
+    assert {record.server_id for record in parsed} == {
+        1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+        2001, 2002, 2003, 2004, 2005,
+    }
+
+    maximum = (1 << 63) - 1
+    for raw, expected in (
+        (maximum, maximum),
+        (1, 1),
+        (0, None),
+        (-1, None),
+        (None, None),
+        (True, None),
+        ("12", None),
+        (1 << 63, None),
+    ):
+        assert parser._server_id(raw) == expected
+
+
+def test_invalid_stored_server_ids_reach_records_as_absent(tmp_path):
+    connection = fixtures.new_database(tmp_path / "invalid-server-ids.db")
+    table = fixtures.add_conversation(connection, DIRECT)
+    for raw in (None, 0, -1, "invalid", str(1 << 63)):
+        fixtures.insert(connection, table, server_id=raw, local_type=1,
+                        create_time=SECONDS, message_content=b"fixture")
+    connection.commit()
+
+    assert [record.server_id for record in parse_database(connection)] == [None] * 5
+    connection.close()
+
+
 def test_a_database_without_name2id_still_parses(tmp_path):
     connection = sqlite3.connect(str(tmp_path / "bare.db"))
     table = fixtures.add_conversation(connection, DIRECT)
@@ -349,7 +382,7 @@ def test_a_display_name_is_injected_never_guessed(database):
 
 REQUIRED_FIELDS = {
     "session_id", "local_id", "timestamp", "sender_id", "sender_name",
-    "message_type", "content", "media_id", "reply_to",
+    "message_type", "content", "media_id", "reply_to", "server_id",
 }
 
 

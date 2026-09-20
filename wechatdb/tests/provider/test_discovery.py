@@ -203,6 +203,38 @@ def test_a_part_with_an_unrecognised_schema_is_unavailable(tmp_path):
     assert facts.tables == ()
 
 
+def test_a_valid_empty_message_part_is_readable_without_invented_bounds(tmp_path):
+    path = tmp_path / "message_8.db"
+    connection = sqlite3.connect(str(path))
+    connection.execute("CREATE TABLE TimeStamp (timestamp INTEGER)")
+    connection.execute("CREATE TABLE wcdb_builtin_compression_record (id INTEGER)")
+    connection.commit(); connection.close()
+    part = fixtures.SyntheticPart("message_8.db", path, lambda: None)
+    d = discovered(tmp_path, (part, None))
+
+    [facts] = d.probe(d.catalogue()).values()
+
+    assert facts.state == SHARD_READABLE
+    assert facts.tables == ()
+    assert facts.bounds_established is False
+    assert (facts.min_timestamp, facts.max_timestamp) == (None, None)
+
+
+def test_message_metadata_without_the_timestamp_column_is_unavailable(tmp_path):
+    path = tmp_path / "message_9.db"
+    connection = sqlite3.connect(str(path))
+    connection.execute("CREATE TABLE TimeStamp (not_timestamp INTEGER)")
+    connection.execute("CREATE TABLE wcdb_builtin_compression_record (id INTEGER)")
+    connection.commit(); connection.close()
+    part = fixtures.SyntheticPart("message_9.db", path, lambda: None)
+    d = discovered(tmp_path, (part, None))
+
+    [facts] = d.probe(d.catalogue()).values()
+
+    assert facts.state == SHARD_UNAVAILABLE
+    assert facts.tables == ()
+
+
 def test_a_conversation_table_missing_a_mandatory_column_is_unavailable(tmp_path):
     """Recognised name, recognised table name, but not the parser's contract."""
     path = tmp_path / "message_4.db"
@@ -295,8 +327,7 @@ def test_state_invariants_are_enforced_at_construction():
         with pytest.raises(ValueError):
             ShardFacts(key="k", state=state, bounds_established=True,
                        min_timestamp=1, max_timestamp=1)
-    with pytest.raises(ValueError):
-        ShardFacts(key="k", state=SHARD_READABLE, **quiet)  # no tables
+    ShardFacts(key="k", state=SHARD_READABLE, **quiet)  # valid empty message part
     with pytest.raises(ValueError):
         ShardFacts(key="k", state="mystery", **quiet)
 

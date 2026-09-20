@@ -87,6 +87,7 @@ except ImportError:  # pragma: no cover - imported from another cwd
     )
 
 from ..parser import MessageRecord
+from .message_identity import message_id, message_sequence
 from .routing import STOP_KINDS, STOP_SAFE, STOP_UNSAFE
 
 
@@ -151,9 +152,9 @@ class ProviderResult:
         because the canonical owner derives it from the record's own key.
         """
         return NormalizedMessage(
-            id=record.local_id,
+            id=message_id(record),
             conversation_id=conversation_identifier(record.session_id),
-            sequence=record.local_id,
+            sequence=message_sequence(record),
             # The parser already fell back to the sender identifier when no
             # display name was mapped.
             sender=record.sender_name,

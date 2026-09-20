@@ -38,6 +38,7 @@ from .discovery import (
 )
 from .discovery import SHARD_READABLE, SHARD_UNAVAILABLE, SHARD_UNKNOWN
 from .identity import IdentityResolver
+from .message_identity import message_sequence
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 from .routing import STOP_EXHAUSTED, STOP_SAFE, STOP_UNSAFE, ShardRouter
 
@@ -75,8 +76,8 @@ class _Traversal:
     inventory_gap: bool
 
 
-def _order(record: MessageRecord) -> tuple[int, int, str]:
-    return (record.timestamp, record.local_id, record.session_id)
+def _order(record: MessageRecord) -> int:
+    return message_sequence(record)
 
 
 def _positive(limit: int) -> int:
@@ -274,7 +275,8 @@ class ShardedMessageProvider:
                 records = [r for r in records
                            if (start is None or r.timestamp >= start)
                            and (end is None or r.timestamp <= end)
-                           and (before_sequence is None or r.local_id < before_sequence)]
+                           and (before_sequence is None
+                                or message_sequence(r) < before_sequence)]
                 kept.extend(records)
         finally:
             connection.close()
@@ -307,5 +309,10 @@ class ShardedMessageProvider:
         reads = trail.reads
         merged = sorted((r for read in reads.values() for r in read.records), key=_order)
         coverage = self._collapse(trail, self._contributions(reads), start, end, limit)
-        items = tuple(ProviderResult.message(record) for record in merged[-limit:])
+        projected = tuple(ProviderResult.message(record) for record in merged)
+        ids = {message.id for message in projected}
+        sequences = {message.sequence for message in projected}
+        if len(ids) != len(projected) or len(sequences) != len(projected):
+            raise ValueError("message identity collision")
+        items = projected[-limit:]
         return ReadResult(items=items, coverage=coverage)

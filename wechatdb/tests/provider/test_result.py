@@ -28,10 +28,11 @@ SESSION = "fixture_session_alpha"
 
 
 def record(local_id, timestamp=1_756_000_000, *, session=SESSION, sender_name="Fixture Sender",
-           content="fixture text", kind="text"):
+           content="fixture text", kind="text", server_id="local"):
     return MessageRecord(session_id=session, local_id=local_id, timestamp=timestamp,
                          sender_id="wxid_fixture_sender", sender_name=sender_name,
-                         message_type=kind, content=content, media_id=None, reply_to=None)
+                         message_type=kind, content=content, media_id=None, reply_to=None,
+                         server_id=local_id if server_id == "local" else server_id)
 
 
 def contribution(count, *, observed, complete="same", truncated=False, first_id=1):
@@ -110,7 +111,7 @@ def test_message_projection_uses_unknown_ownership_without_guessing_self():
     assert dataclasses.asdict(projected) == {
         "id": 7,
         "conversation_id": conversation_identifier(SESSION),
-        "sequence": 7,
+        "sequence": 3_770_981_550_028_488_711,
         "sender": "Me (the account owner)",
         "ownership": "unknown",
         "visible_time": None,
@@ -151,6 +152,8 @@ def test_the_provider_derives_identity_from_the_generic_owner():
     assert not any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                    and n.name == "conversation_identifier" for n in ast.walk(tree))
     assert not any(isinstance(n, ast.Attribute) and n.attr == "blake2b" for n in ast.walk(tree))
+    assert "hashlib" not in {a.name.split(".")[0] for n in ast.walk(tree)
+                             if isinstance(n, ast.Import) for a in n.names}
     for path in (ROOT / "wechatdb").rglob("*.py"):
         if "tests" in path.parts or "__pycache__" in path.parts:
             continue

@@ -77,6 +77,7 @@ class SyntheticMessage:
     create_time: int
     sender: str
     text: str
+    server_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -121,9 +122,9 @@ def _write_messages(
     connection.execute(MESSAGE_TABLE_SQL.format(table=table))
     for message in messages:
         connection.execute(
-            f'INSERT INTO "{table}" (local_id, local_type, real_sender_id,'
-            " create_time, message_content) VALUES (?, ?, ?, ?, ?)",
-            (message.local_id, TEXT_TYPE, ids[message.sender],
+            f'INSERT INTO "{table}" (local_id, server_id, local_type, real_sender_id,'
+            " create_time, message_content) VALUES (?, ?, ?, ?, ?, ?)",
+            (message.local_id, message.server_id, TEXT_TYPE, ids[message.sender],
              message.create_time, message.text.encode("utf-8")),
         )
     connection.commit()
