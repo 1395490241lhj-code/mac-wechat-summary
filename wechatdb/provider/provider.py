@@ -35,9 +35,10 @@ from .discovery import (
     ShardLocator,
     shard_key,
 )
+from .discovery import SHARD_READABLE, SHARD_UNAVAILABLE, SHARD_UNKNOWN
 from .identity import IdentityResolver
-from .result import Contribution, ProviderResult
-from .routing import STOP_EXHAUSTED, ShardRouter
+from .result import Contribution, ProviderDiagnostics, ProviderResult
+from .routing import STOP_EXHAUSTED, STOP_SAFE, STOP_UNSAFE, ShardRouter
 
 # `.result` has already made the Reader boundary importable, in the flat style
 # the repository uses for it; the two modules below are the whole crossing.
@@ -53,6 +54,10 @@ from message_source import (
 #: An internal bound of this source: a table holding more is cut, and says so.
 _PART_RECORD_BOUND = 10_000
 
+#: The most parts one read visits. Reaching it with planned parts left over is
+#: an early stop, and is classified like any other.
+_PART_VISIT_BOUND = 256
+
 
 @dataclass(frozen=True, slots=True)
 class _PartRead:
@@ -62,6 +67,15 @@ class _PartRead:
     observed_through: int | None
     truncated: bool
     complete_through: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Traversal:
+    """The visited parts in plan order, and the evidence about the rest."""
+
+    reads: dict[str, _PartRead]
+    stop: str
+    inventory_gap: bool
 
 
 def _order(record: MessageRecord) -> tuple[int, int, str]:
@@ -94,13 +108,18 @@ class ShardedMessageProvider:
         self._names = getattr(identities, "resolve")
         self._source_newest = source_newest
         self._opener = ReadOnlySqliteOpener()
+        #: Aggregate counts for the most recent read. Beside the envelope,
+        #: never inside it, and never an input to the collapse.
+        self.diagnostics = ProviderDiagnostics(
+            readable=0, unknown=0, unavailable=0, unresolved_identities=0)
         self._router = ShardRouter()
 
     # -- the three reads -----------------------------------------------------
 
     def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]:
         limit = _positive(limit)
-        reads = self._traverse(None, None, None, None)
+        trail = self._traverse(None, None, None, None, None)
+        reads = trail.reads
         newest: dict[str, tuple[MessageRecord, str]] = {}
         for key, read in reads.items():
             for record in read.records:
@@ -117,7 +136,7 @@ class ShardedMessageProvider:
                 truncated=read.truncated,
                 complete_through=read.complete_through)
             for key, read in reads.items()})
-        coverage = self._collapse(contributions, None, None, limit)
+        coverage = self._collapse(trail, contributions, None, None, limit)
         ranked = sorted((rec for rec, _ in newest.values()), key=_order, reverse=True)
         items = tuple(
             NormalizedConversation(
@@ -139,16 +158,16 @@ class ShardedMessageProvider:
         requested_end: float | None = None,
     ) -> ReadResult[NormalizedMessage]:
         limit = _positive(limit)
-        reads = self._traverse(requested_start, requested_end, conversation_id,
-                               before_sequence)
-        return self._answer(reads, requested_start, requested_end, limit)
+        trail = self._traverse(requested_start, requested_end, conversation_id,
+                              before_sequence, limit)
+        return self._answer(trail, requested_start, requested_end, limit)
 
     def get_recent_messages(
         self, since_observed_at: float, limit: int
     ) -> ReadResult[NormalizedMessage]:
         limit = _positive(limit)
-        reads = self._traverse(since_observed_at, None, None, None)
-        return self._answer(reads, since_observed_at, None, limit)
+        trail = self._traverse(since_observed_at, None, None, None, limit)
+        return self._answer(trail, since_observed_at, None, limit)
 
     # -- orchestration -------------------------------------------------------
 
@@ -158,17 +177,62 @@ class ShardedMessageProvider:
         end: float | None,
         conversation_id: int | None,
         before_sequence: int | None,
-    ) -> dict[str, _PartRead]:
-        """Discover, plan, and read every planned part, in the plan's order."""
+        limit: int | None,
+    ) -> _Traversal:
+        """Discover, plan, and read planned parts in order until a stop.
+
+        The traversal ends early in two ways only. It may stop once it holds
+        more than the caller asked for *and* the router proves every unvisited
+        part strictly older than everything in hand; while that proof is
+        missing it keeps going. Or it reaches this source's own visit bound.
+        Either way the router classifies the stop, and that classification is
+        what the collapse is told. A listing counts conversations, not
+        records, so it has no measured limit to stop on and passes none.
+        """
         discovery = ShardDiscovery(self._locator, self._opener)
         inventory = discovery.probe(discovery.catalogue())
         entries = {shard_key(entry.name): entry for entry in self._locator.entries()}
         plan = self._router.plan(inventory, requested_start=start, requested_end=end)
+        states = [facts.state for facts in inventory.values()]
+        events: dict[str, int] = {}
         reads: dict[str, _PartRead] = {}
+        stop = STOP_EXHAUSTED
         for key in plan.visit:
+            if len(reads) >= _PART_VISIT_BOUND:
+                stop = self._classify(plan, inventory, reads, limit)
+                break
             reads[key] = self._read_part(entries[key], inventory[key], start, end,
-                                         conversation_id, before_sequence)
-        return reads
+                                         conversation_id, before_sequence, events)
+            if (limit is not None and len(reads) < len(plan.visit)
+                    and self._held(reads) > limit
+                    and self._classify(plan, inventory, reads, limit) == STOP_SAFE):
+                stop = STOP_SAFE
+                break
+        self.diagnostics = ProviderDiagnostics(
+            readable=states.count(SHARD_READABLE),
+            unknown=states.count(SHARD_UNKNOWN),
+            unavailable=states.count(SHARD_UNAVAILABLE),
+            unresolved_identities=sum(events.values()))
+        # Parts that could never be visited were not skipped by the traversal;
+        # they are a gap in the inventory, always, and separately from any stop.
+        gap = SHARD_UNKNOWN in states or SHARD_UNAVAILABLE in states
+        return _Traversal(reads=reads, stop=stop, inventory_gap=gap)
+
+    @staticmethod
+    def _held(reads: dict[str, _PartRead]) -> int:
+        return sum(len(read.records) for read in reads.values())
+
+    def _classify(self, plan, inventory, reads, limit) -> str:
+        oldest = min((r.timestamp for read in reads.values() for r in read.records),
+                     default=None)
+        stop = self._router.classify_stop(
+            plan, inventory, visited=tuple(reads), oldest_collected_at=oldest)
+        if stop == STOP_SAFE and (limit is None or self._held(reads) <= limit):
+            # Proven older, but the answer in hand is not full: what was
+            # skipped would have been part of it. Only a measured caller cut
+            # makes a stop safe.
+            return STOP_UNSAFE
+        return stop
 
     def _read_part(
         self,
@@ -178,7 +242,10 @@ class ShardedMessageProvider:
         end: float | None,
         conversation_id: int | None,
         before_sequence: int | None,
+        events: dict[str, int],
     ) -> _PartRead:
+        # Taken for the parser-shaped mapping alone: no name from this call
+        # reaches any message, so it is not a resolution event of the read.
         session_names = self._names().session_names
         kept: list[MessageRecord] = []
         observed: list[int] = []
@@ -198,6 +265,9 @@ class ShardedMessageProvider:
                         and conversation_identifier(session_id) != conversation_id):
                     continue
                 resolved = self._names(room=session_id)
+                # One event per conversation a read resolves, however many
+                # parts hold it; events are summed and identifiers never kept.
+                events[session_id] = resolved.unresolved
                 if resolved.display_names:
                     records = list(wechatdb.parse_conversation(
                         connection, table, name2id=name2id,
@@ -234,14 +304,15 @@ class ShardedMessageProvider:
                 complete_through=complete, truncated=read.truncated))
         return tuple(built)
 
-    def _collapse(self, contributions, start, end, limit):
+    def _collapse(self, trail: _Traversal, contributions, start, end, limit):
         return ProviderResult.collapse(
             contributions, requested_start=start, requested_end=end,
-            caller_limit=limit, stop=STOP_EXHAUSTED, inventory_gap=False,
-            source_newest=None)
+            caller_limit=limit, stop=trail.stop, inventory_gap=trail.inventory_gap,
+            source_newest=self._source_newest)
 
-    def _answer(self, reads, start, end, limit) -> ReadResult[NormalizedMessage]:
+    def _answer(self, trail: _Traversal, start, end, limit) -> ReadResult[NormalizedMessage]:
+        reads = trail.reads
         merged = sorted((r for read in reads.values() for r in read.records), key=_order)
-        coverage = self._collapse(self._contributions(reads), start, end, limit)
+        coverage = self._collapse(trail, self._contributions(reads), start, end, limit)
         items = tuple(ProviderResult.message(record) for record in merged[-limit:])
         return ReadResult(items=items, coverage=coverage)
