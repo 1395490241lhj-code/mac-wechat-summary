@@ -10,6 +10,7 @@ from .contracts import (
 from .keystore import KeyDescriptor, KeyStore, KeyStoreError, SecretBytes
 from .snapshot import EncryptedSource
 from .coordinator import AcquisitionCoordinator, AcquisitionSourceSet
+from .source_locator import LocatedSource, SourceLocator
 
 __all__ = [
     "AcquisitionOutcome",
@@ -24,4 +25,6 @@ __all__ = [
     "EncryptedSource",
     "AcquisitionCoordinator",
     "AcquisitionSourceSet",
+    "LocatedSource",
+    "SourceLocator",
 ]

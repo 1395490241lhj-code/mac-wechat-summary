@@ -38,6 +38,7 @@ from .discovery import (
 )
 from .discovery import SHARD_READABLE, SHARD_UNAVAILABLE, SHARD_UNKNOWN
 from .identity import IdentityResolver
+from .compatibility import require_supported_surface
 from .message_identity import message_sequence
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 from .routing import STOP_EXHAUSTED, STOP_SAFE, STOP_UNSAFE, ShardRouter
@@ -253,6 +254,11 @@ class ShardedMessageProvider:
         try:
             name2id = wechatdb.load_name2id(connection)
             for table in facts.tables:
+                # A table that parses is not necessarily the generation this
+                # provider supports. The envelope is checked before any row is
+                # read, so a changed schema fails closed instead of yielding
+                # whatever the old reader could still find in it.
+                require_supported_surface(connection, table)
                 # The table name goes to the parser unchanged; the parser alone
                 # turns it into the conversation key every record then carries.
                 records = list(wechatdb.parse_conversation(

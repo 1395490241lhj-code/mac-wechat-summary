@@ -284,10 +284,10 @@ def test_package_initializer_only_reexports_the_contract_api():
     tree = ast.parse(PACKAGE.read_text(encoding="utf-8"))
     imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
 
-    assert len(imports) == 4
+    assert len(imports) == 5
     assert [(node.level, node.module) for node in imports] == [
         (1, "contracts"), (1, "keystore"), (1, "snapshot"),
-        (1, "coordinator"),
+        (1, "coordinator"), (1, "source_locator"),
     ]
     assert {alias.name for alias in imports[0].names} == {
         "AcquisitionOutcome", "AcquisitionReadiness", "AcquisitionState",
@@ -300,9 +300,12 @@ def test_package_initializer_only_reexports_the_contract_api():
     assert {alias.name for alias in imports[3].names} == {
         "AcquisitionCoordinator", "AcquisitionSourceSet",
     }
+    assert {alias.name for alias in imports[4].names} == {
+        "LocatedSource", "SourceLocator",
+    }
 
 
-def test_product_selection_stays_visual_and_does_not_import_acquisition(
+def test_product_selection_stays_visual_and_only_owned_adapter_imports_acquisition(
     monkeypatch,
 ):
     monkeypatch.syspath_prepend(str(ROOT / "bridge"))
@@ -311,8 +314,11 @@ def test_product_selection_stays_visual_and_does_not_import_acquisition(
     monkeypatch.delenv(store_access.MESSAGE_SOURCE_ENV, raising=False)
 
     assert store_access.selected_source_name() == message_source.SOURCE_VISUAL
-    for path in (ROOT / "bridge").glob("*.py"):
-        assert "acquisition" not in _imported_roots(path), path.name
+    importers = [
+        path.name for path in (ROOT / "bridge").glob("*.py")
+        if "acquisition" in _imported_roots(path)
+    ]
+    assert importers == ["acquired_database_source.py"]
 
 
 def test_provider_stays_unwired_from_acquisition():

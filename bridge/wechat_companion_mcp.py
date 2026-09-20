@@ -101,6 +101,7 @@ try:
         open_verified,
         resolve_access,
         selected_source_name,
+        source_for_conversation,
         verify_schema,
     )
 except ImportError:  # pragma: no cover - launched by path from another cwd
@@ -126,6 +127,7 @@ except ImportError:  # pragma: no cover - launched by path from another cwd
         open_verified,
         resolve_access,
         selected_source_name,
+        source_for_conversation,
         verify_schema,
     )
 
@@ -240,7 +242,7 @@ def get_messages(
                 "state": "invalid_argument",
                 "detail": "conversation_id must be an integer."}
     try:
-        source = active_source()
+        source = source_for_conversation(conversation_id)
         ordered = tuple(
             source.get_messages(conversation_id, capped, before_sequence)
         )

@@ -406,6 +406,45 @@ ACTIVATION_ENV_NAMES: frozenset[str] = frozenset({
 })
 
 
+# --- Source affinity for conversation references ------------------------------
+#
+# A conversation reference outlives the read that produced it: a client lists
+# conversations and then asks for one of them. If that second call were free to
+# choose a source again, a reference one reader minted could be answered by
+# another -- and a database identifier quietly reinterpreted as a visual query
+# returns an empty list, which reads exactly like "this conversation has no
+# messages".
+#
+# So the reference carries its own origin, and no cache, map or session state
+# is needed to remember it. The store's own conversation ids are positive
+# rowids, so the database source mints the same stable identifier negated. The
+# sign is the whole discriminator: deterministic, process-independent, and
+# stable across restarts.
+
+
+def database_conversation_reference(conversation_id: int) -> int:
+    """The public reference for a database-origin conversation id."""
+    if (isinstance(conversation_id, bool) or not isinstance(conversation_id, int)
+            or conversation_id <= 0):
+        raise ValueError("conversation reference invalid")
+    return -conversation_id
+
+
+def database_conversation_id(conversation_id: int) -> int:
+    """The database's own conversation id behind a database reference."""
+    if (isinstance(conversation_id, bool) or not isinstance(conversation_id, int)
+            or conversation_id >= 0):
+        raise ValueError("conversation reference invalid")
+    return -conversation_id
+
+
+def conversation_reference_source(conversation_id: int) -> str:
+    """Which source owns a public conversation reference."""
+    if isinstance(conversation_id, bool) or not isinstance(conversation_id, int):
+        raise ValueError("conversation reference invalid")
+    return SOURCE_DATABASE if conversation_id < 0 else SOURCE_VISUAL
+
+
 class MessageSourceError(Exception):
     """A source cannot answer, and will not guess.
 

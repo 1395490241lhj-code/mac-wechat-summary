@@ -48,6 +48,11 @@ from .discovery import (
     ShardOpener,
     shard_key,
 )
+from .compatibility import (
+    SUPPORTED_CONVERSATION_COLUMNS,
+    UnsupportedGeneration,
+    require_supported_surface,
+)
 from .routing import (
     EXCLUDED_CONVERSATION_ABSENT,
     EXCLUDED_NOT_READABLE,
@@ -74,6 +79,9 @@ from .provider import ShardedMessageProvider
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 
 __all__ = [
+    "SUPPORTED_CONVERSATION_COLUMNS",
+    "UnsupportedGeneration",
+    "require_supported_surface",
     "Contribution",
     "ProviderDiagnostics",
     "ProviderResult",

@@ -42,6 +42,7 @@ try:
         ReadCoverage,
         ReadFreshness,
         ReadResult,
+        conversation_reference_source,
         SourceStatus,
     )
 except ImportError:  # pragma: no cover - imported by path from another cwd
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - imported by path from another cwd
         ReadCoverage,
         ReadFreshness,
         ReadResult,
+        conversation_reference_source,
         SourceStatus,
     )
 
@@ -510,11 +512,28 @@ def selected_source_name() -> str:
 
 
 def build_database_source() -> MessageSource:
-    """Constructs the external reader source from explicit configuration.
+    """Construct the database source from explicit configuration.
 
-    The adapter is imported here rather than at module scope so that the
-    visual path never depends on it being present or importable.
+    The recorded source decision comes first: when the product has recorded
+    one, database mode is served by the acquisition Fast Lane. The adapter is
+    imported here rather than at module scope so that the visual path never
+    depends on the acquisition package, the schema provider or crypto.
+
+    With no recorded decision an explicitly configured external reader still
+    answers, exactly as it did before, and nothing else is searched for. If
+    neither is configured the selection is refused rather than quietly served
+    by the store: an explicit database request is never a request for visual.
+    The acquisition path's own fallback is narrower and lives in the adapter,
+    where it applies only before any database answer exists.
     """
+    try:
+        from acquired_database_source import open_database_source
+    except ImportError:  # pragma: no cover - acquisition not bundled
+        open_database_source = None
+    if open_database_source is not None:
+        acquired = open_database_source(StoreMessageSource)
+        if acquired is not None:
+            return acquired
     executable = os.environ.get(READER_BIN_ENV, "").strip()
     if not executable:
         raise BridgeUnavailable(
@@ -542,6 +561,41 @@ def build_database_source() -> MessageSource:
     )
 
 
+def source_for_conversation(conversation_id: int) -> MessageSource:
+    """The one source that owns a public conversation reference.
+
+    A reference carries its own origin, so a follow-up read is answered by the
+    reader that minted it rather than by whichever source is currently
+    selected. A database-origin reference is never reinterpreted by the visual
+    store: when database mode is no longer available that is a refusal, and
+    never a silent substitution.
+    """
+    if conversation_reference_source(conversation_id) == SOURCE_VISUAL:
+        # Not minted by the acquisition Fast Lane, so the ordinary selection
+        # decides -- including the external reader, whose own references are
+        # ordinary ids and must keep being served by it.
+        return active_source()
+    if os.environ.get(ALLOW_READ_ENV) != "1":
+        raise BridgeUnavailable(
+            "agent_read_disabled",
+            f"Agent read access is off. Set {ALLOW_READ_ENV}=1 to enable it.",
+        )
+    try:
+        from acquired_database_source import open_database_source
+    except ImportError:  # pragma: no cover - acquisition not bundled
+        raise BridgeUnavailable(
+            "database_unavailable",
+            "No database source is recorded for this reference.",
+        ) from None
+    source = open_database_source(StoreMessageSource)
+    if source is None:
+        raise BridgeUnavailable(
+            "database_unavailable",
+            "No database source is recorded for this reference.",
+        )
+    return source
+
+
 def active_source() -> MessageSource:
     """The one source that will answer this request.
 
@@ -564,4 +618,3 @@ def active_source() -> MessageSource:
     raise BridgeUnavailable(
         "source_unknown", "The configured message source is not recognised."
     )
-

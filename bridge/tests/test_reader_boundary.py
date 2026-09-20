@@ -635,6 +635,12 @@ def test_selecting_the_database_source_requires_the_agent_opt_in(monkeypatch, tm
 
 
 def test_the_database_source_without_an_executable_is_unavailable(monkeypatch):
+    """A database request with nothing to serve it is refused, not substituted.
+
+    P5 adds a recorded source decision ahead of the external reader. With
+    neither present the request still fails closed, so an explicit database
+    selection never quietly reads the visual store.
+    """
     monkeypatch.setenv(bridge.ALLOW_READ_ENV, "1")
     monkeypatch.setenv(bridge.MESSAGE_SOURCE_ENV, ms.SOURCE_DATABASE)
 
@@ -1789,6 +1795,8 @@ class ShapedSource:
 def serve_with(monkeypatch, *, envelope: bool):
     source = ShapedSource(envelope=envelope)
     monkeypatch.setattr(bridge, "active_source", lambda: source)
+    monkeypatch.setattr(
+        bridge, "source_for_conversation", lambda conversation_id: source)
     return source
 
 
@@ -1854,27 +1862,19 @@ def test_paging_state_survives_a_result_envelope(monkeypatch):
                 limit=5)["next_before_sequence"] is None
 
 
-# --- D-017: an isolated schema provider stays isolated ------------------------
+# --- D-017: the schema provider crosses only through its owned adapter --------
 
-#: Every Python tree that is product core or a generic abstraction. A
-#: WeChat-specific schema provider may exist in this repository, but nothing
-#: here may depend on one: the Reader contract is the only data boundary
-#: product core is allowed to know.
+#: Every Python tree that is product core or a generic abstraction. P4/P5
+#: permits exactly one owned bridge adapter to depend on the provider; every
+#: generic layer and all other product modules remain isolated from it.
 PRODUCT_TREES = ("bridge", "memory", "shadow", "ai", "core")
 
-#: The candidate provider. Isolated by construction today; this test is what
-#: keeps it isolated when someone is in a hurry.
+#: The schema provider. Its one production crossing is pinned below.
 CANDIDATE_PROVIDER = "wechatdb"
 
 
-def test_no_product_module_imports_the_candidate_schema_provider():
-    """`wechatdb` is a candidate provider, not a wired one.
-
-    It parses a plaintext WeChat 4.1+ schema and is exercised against synthetic
-    fixtures only. Until it has been proven against a real database and adopted
-    through the Reader contract, an import of it from product core would be a
-    production routing decision made by an import statement.
-    """
+def test_only_the_owned_adapter_imports_the_schema_provider():
+    """P4/P5 wires one bridge adapter; generic/product peers stay isolated."""
     import ast
 
     root = Path(__file__).resolve().parents[2]
@@ -1897,7 +1897,7 @@ def test_no_product_module_imports_the_candidate_schema_provider():
             if any(name.split(".")[0] == CANDIDATE_PROVIDER for name in names):
                 offenders.append(str(path.relative_to(root)))
 
-    assert offenders == [], offenders
+    assert offenders == ["bridge/acquired_database_source.py"], offenders
 
 
 # --- P0: one canonical conversation identity ---------------------------------
