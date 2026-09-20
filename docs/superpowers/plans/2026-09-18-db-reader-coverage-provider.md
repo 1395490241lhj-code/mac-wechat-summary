@@ -329,6 +329,32 @@ No generic type, status or reason changes; `REASON_WINDOW_BOUND` is untouched;
 no deduplication contract is invented. Recorded as D-031 amendment 8. P16
 remains unstarted.
 
+### 0.11 What the last P16 preflight changed — the identity handoff, and the unlawful safe stop
+
+1. **Two competing conversation-id owners.** P0 created
+   `bridge/conversation_identity.py` as the one canonical owner — “every source
+   imports it” — and its dependency diagram names
+   `wechatdb/provider/result.py` as the second consumer. §0.10’s correction
+   nevertheless gave `ProviderResult.message` a caller-supplied
+   `conversation_id`, which made that owner bypassable: an arbitrary integer
+   could disagree with it and `result.py` would have had no reason to import
+   it. The parameter is removed. P16 again derives the generic id from
+   `MessageRecord.session_id` through the canonical owner; the parser authors
+   `session_id`, so every conversion in the chain has one owner. Message `id`
+   and `sequence` remain `local_id`; no historical hash is restored.
+2. **`STOP_SAFE` without a measured sentinel.** Amendment 6 already makes every
+   lawful safe stop a measured caller-limited stop. `STOP_SAFE` with
+   `caller_limit_hit` false is therefore contradictory evidence, and the
+   precedence would otherwise have let it fall through to complete. It is
+   refused with a fixed `ValueError` before reason selection. The six-step
+   precedence is unchanged.
+3. **A source cut beside an inventory gap.** `source_limit` still outranks
+   `partial_inventory` in the one reason field; a coexistence test now proves
+   the gap stays visible in `ProviderDiagnostics`, which is never passed into
+   `collapse`.
+
+Recorded as D-031 amendment 9. No Python changed; P16 remains unstarted.
+
 ---
 
 ## 1. Scope guard — what this plan must not produce
@@ -576,7 +602,10 @@ Each task states: **files**, **interface**, **depends on**, **RED test**,
 **Why this exists, and why it is first.** Spec §8.5 requires the database
 provider to derive conversation identifiers *"with the same construction
 `rion_reader_adapter.conversation_identifier` uses, so two readers can never
-disagree about what a conversation's identifier is."* The provider must **not**
+disagree about what a conversation's identifier is."* *(That was the spec's
+wording when this task was written; §8.5 has since been reworded to name the
+canonical module this task created, rather than the adapter — see §0.11.)* The
+provider must **not**
 obtain that by importing the Rion adapter: the two are sibling implementations
 behind the same generic boundary, and a sibling dependency would make the
 database provider inherit an external-reader transport it has nothing to do
@@ -2360,9 +2389,9 @@ class ProviderResult:
     @staticmethod
     def message(
         record: MessageRecord,
-        *,
-        conversation_id: int,
     ) -> NormalizedMessage: ...
+    # No conversation_id parameter. The generic id is derived inside, from
+    # record.session_id, through the one canonical owner (P0).
 
     @staticmethod
     def collapse(
@@ -2391,7 +2420,19 @@ candidate_count   = sum(len(c.records) for c in contributions)
 caller_limit_hit  = candidate_count > caller_limit      # strictly; == proves nothing
 source_limit_hit  = any(c.truncated for c in contributions)
 public_item_count = min(candidate_count, caller_limit)  # ReadCoverage.item_count
+
+if stop == STOP_SAFE and not caller_limit_hit:
+    raise ValueError("a safe stop requires measured caller truncation")
 ```
+
+**A safe stop without a measured sentinel is not a lawful state.** Amendment 6
+defines `STOP_SAFE` as an early stop taken after `limit + 1` candidates were
+collected, so `STOP_SAFE` with `caller_limit_hit == False` is contradictory
+provider evidence. It is refused — fixed, content-free wording — **before**
+reason selection, and is never converted into complete, partial,
+`source_limit` or unsafe. The precedence below is unchanged: every lawful
+`STOP_SAFE` has `caller_limit_hit` true, so it reaches rule 2 when a
+provider-internal cut also occurred and rule 3 otherwise.
 
 The sentinel participates in `caller_limit_hit` and **never** in
 `item_count`. No provider-internal deduplication is specified or invented
@@ -2447,7 +2488,7 @@ provider→generic projection point:
 | `NormalizedMessage` | from |
 |---|---|
 | `id` | `record.local_id` |
-| `conversation_id` | the supplied canonical generic `conversation_id` |
+| `conversation_id` | `conversation_identifier(record.session_id)` — derived inside, through the canonical owner; nothing supplied from outside |
 | `sequence` | `record.local_id` |
 | `sender` | `record.sender_name` (the parser already fell back to `sender_id`) |
 | `ownership` | **`"unknown"`** |
@@ -2464,7 +2505,18 @@ never inferred from a sender name, an identifier’s shape, room membership or
 conversation identity. `id` and `sequence` both use `local_id`, matching the
 existing database adapter’s fallback convention; no new hash or
 message-identity algorithm is invented, no claim is made that `local_id` is
-globally unique, and `conversation_id` already travels separately.
+globally unique, and `conversation_id` already travels separately. The
+historical XOR/hash message-id construction is **not** restored.
+
+**Why `record.session_id` is the input.** The parser already authors it:
+`session_id = session_names.get(digest) or f"msg_{digest}"`, carried on every
+`MessageRecord`. So the generic-id chain has one owner per step — full
+`Msg_<digest>` table name → `parse_conversation` →
+`MessageRecord.session_id` → `conversation_identifier` →
+`NormalizedMessage.conversation_id` — and P16 neither inspects nor derives the
+table digest. P16 does **not** call `conversation_identifier` on
+`conversation_table`, on a bare digest or on a display name, does not duplicate
+its hashing, and does not import the Rion adapter.
 
 **`unresolved_identities` counts ambiguity events.** P15’s
 `ResolvedIdentities.unresolved` is per `resolve()` call. A read that performs
@@ -2482,7 +2534,7 @@ freshness evidence alone control `ReadCoverage`. The public interface above is
 unchanged by this statement.
 
 **Conversation identity — resolved, not deferred.** `ProviderResult.message`
-imports `conversation_identifier` from `bridge/conversation_identity.py`, the
+takes the record alone and imports `conversation_identifier` from `bridge/conversation_identity.py`, the
 canonical generic owner established by **P0**. It does **not** import
 `bridge/rion_reader_adapter.py`: the Rion adapter and this provider are sibling
 implementations behind the same boundary, and neither may depend on the other.
@@ -2528,11 +2580,28 @@ escapes this module.** The provider's vocabulary ends here.
   `ReadFreshness` member, a bool, an int, a **float** (the generic moment
   fields) or `None`; and no field value contains a shard key, a table name, a
   digest, a path, a fixture identifier or a schema name.
-- `test_the_provider_derives_identity_from_the_generic_owner` — asserts, by
-  `ast`, that `result.py` imports `conversation_identifier` from
-  `conversation_identity`, that it defines no function of that name and calls no
-  `blake2b`, and that no module under `wechatdb/` imports `rion_reader_adapter`
-  or `message_source`'s absent equivalent.
+- `test_the_provider_derives_identity_from_the_generic_owner` — **behaviour
+  first**: two synthetic `MessageRecord`s with the same `session_id` and
+  different `local_id` project to the **same** `conversation_id`, equal to
+  `conversation_identifier(session_id)`; a third with a different `session_id`
+  differs; changing `local_id` never changes `conversation_id`; and `message`
+  accepts no `conversation_id` argument (`TypeError` if one is passed). **Then
+  the P0 architecture guard, unweakened**, by `ast`: `result.py` imports
+  `conversation_identifier` from `conversation_identity`, defines no function
+  of that name, calls no `blake2b`, and no module under `wechatdb/` imports
+  `rion_reader_adapter`.
+- `test_a_safe_stop_without_a_measured_sentinel_is_refused` —
+  `caller_limit=10` with `candidate_count` of `10` and of `9` under
+  `STOP_SAFE` each raise a fixed `ValueError`; the positive control,
+  `candidate_count=11` under `STOP_SAFE` with nothing stronger, is
+  `observed_partial` / `caller_limit`.
+- `test_a_source_cut_and_an_inventory_gap_coexist` — `Contribution.truncated
+  = True` with `inventory_gap=True` ⟹ `ReadCoverage.reason == source_limit`
+  by the unchanged precedence, **while** a separately constructed
+  `ProviderDiagnostics(readable=…, unknown=…, unavailable=…,
+  unresolved_identities=…)` still lawfully carries the inventory counts. A
+  coexistence proof only: diagnostics are never passed into `collapse`,
+  `ReadCoverage` is not widened, and P17 owns the actual census.
 - `test_diagnostics_carry_counts_only` — and every field refuses a `bool`, a
   negative and a non-`int`.
 - `test_fractional_requested_bounds_survive_collapse_exactly` —
@@ -2664,6 +2733,16 @@ session_names=resolved.session_names, display_names=resolved.display_names)`.
 lowercases it to look up `ResolvedIdentities.session_names`. No provider layer
 strips `Msg_`, extracts or lowercases the digest, or duplicates that
 conversion in P16 or P17: the parser is its single owner.
+
+**The identity handoff.** P17 calls `ProviderResult.message(record)` — the
+record alone, with no generic `conversation_id` supplied. Every
+`NormalizedConversation.id` P17 eventually emits must come from the same
+canonical owner over the **same parser-native string conversation key** its
+messages carry in `session_id`, so a conversation and its messages can never
+disagree. That is never achieved by hashing `Msg_<digest>` or by comparing a
+table name with the generic integer id. How P17 maps a caller’s generic
+`conversation_id` back to a routed table is P17’s own orchestration and cache;
+this only pins the identity’s owner and its input.
 
 **Explicitly not done here:** no registration in `bridge/store_access.py`, no
 `MESSAGE_SOURCE_ENV` value, no addition to `SOURCE_NAMES` beyond the existing

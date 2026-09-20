@@ -947,9 +947,19 @@ the source's own tables.
   `first_observed_at`, leaves `visible_time` as `None` because it never saw a
   rendered time, and reports full confidence because a decoded row is exact and
   there is no estimator on this path.
-- Derives conversation identifiers with the same construction
-  `rion_reader_adapter.conversation_identifier` uses, so two readers can never
-  disagree about what a conversation's identifier is.
+- Derives conversation identifiers through the **one canonical owner**,
+  `conversation_identifier` in `bridge/conversation_identity.py`, which every
+  source imports — so two readers can never disagree about what a
+  conversation’s identifier is. It imports that module and never the sibling
+  reader adapter, and carries no second copy of the construction. The input is
+  `MessageRecord.session_id`, the source’s already-resolved string conversation
+  key: the supplied username when `session_names` had one, otherwise the
+  parser’s own stable `msg_<digest>` fallback. Each conversion has one owner:
+  full `Msg_<digest>` table name → `parse_conversation` →
+  `MessageRecord.session_id` → `conversation_identifier` →
+  `NormalizedMessage.conversation_id`. The identifier is never computed from
+  the table name, a bare digest or a display name, and is never supplied from
+  outside the projection.
 - **Pessimistically collapses provider-local evidence into exactly one
   `ReadCoverage`:**
   - any **unknown or unavailable required shard** ⟹ `observed_partial` with
@@ -978,6 +988,13 @@ the source's own tables.
   - **a contribution cut short by a provider-internal bound is `source_limit`**
     (T-11): `source_limit_hit = any(c.truncated for c in contributions)`. It is
     never called `caller_limit`;
+  - **a safe stop without a measured sentinel is not a lawful state.** A safe
+    stop is by definition an early stop taken after `limit + 1` candidates were
+    collected, so `stop == safe` with `caller_limit_hit` false is contradictory
+    provider evidence. It is refused with a fixed `ValueError` *before* any
+    reason is chosen — never converted into complete, partial, a source limit
+    or an unsafe stop. The precedence below is unchanged by this: every lawful
+    safe stop has `caller_limit_hit` true and so reaches rule 2 or rule 3;
   - **one reason, by fixed precedence.** (1) `unsafe` stop ⟹
     `observed_partial` + `unsafe_early_stop` + `truncated`, `observed_through =
     None`, `complete_through = None` — outranks everything, because the
@@ -1014,8 +1031,9 @@ the source's own tables.
     cast. `Contribution` moments, `MessageRecord.timestamp` and shard bounds
     remain integer provider evidence.
 - **The message projection is exact, and guesses nothing.** `id` and
-  `sequence` are the parser’s `local_id`; `conversation_id` is the supplied
-  generic identifier; `sender` is `sender_name`, which the parser has already
+  `sequence` are the parser’s `local_id`; `conversation_id` is
+  `conversation_identifier(record.session_id)`, through the canonical owner
+  and with no argument supplied from outside; `sender` is `sender_name`, which the parser has already
   fallen back to the identifier for; `visible_time` is `None`; `text` is
   `content`; `kind` is `message_type`; `confidence` is `1.0`;
   `first_observed_at` is `timestamp`; `source` is the database source name.
@@ -1049,6 +1067,21 @@ cannot be one field. `Contribution.truncated` had no reason assigned, and
 the message mapping and `unknown` ownership are written down rather than left
 to be inferred. No generic type, status or reason changes; `window_bound` is
 untouched.
+
+**Correction, 2026-09-19 — the identity handoff, and the unlawful safe stop.**
+P0 settled one canonical owner for conversation identity and named
+`wechatdb/provider/result.py` as its second consumer. The previous correction
+gave `ProviderResult.message` a caller-supplied `conversation_id`, which made
+that owner bypassable — an arbitrary integer could disagree with it, and the
+module would have had no reason to import it at all. The parameter is removed:
+the projection derives the identifier from `record.session_id` through the
+canonical owner. Message `id` and `sequence` remain `local_id`; no historical
+hash is restored. Separately, amendment 6 already makes every lawful safe stop
+a measured caller-limited stop, so a safe stop without the sentinel is
+rejected as contradictory evidence rather than falling through to complete.
+Where a source cut and an inventory gap coexist the reason is `source_limit`
+by the unchanged precedence, and the gap remains visible in the provider’s
+diagnostic counts, which are never passed into the collapse.
 
 ### 8.6 Deferred: FTS, cache, search optimisation
 
