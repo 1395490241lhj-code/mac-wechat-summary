@@ -40,6 +40,27 @@ def provider_over(parts, *, conversations=(ROOM,), candidates=(), source_newest=
         identities=identities, source_newest=source_newest)
 
 
+def inject_partial_read(monkeypatch, part_name, *, keep, observed_through,
+                        complete_through):
+    """Synthetic evidence at the provider-local read boundary, test-only.
+
+    The real part read runs; for the chosen part its answer is replaced by a
+    real ``_PartRead`` that says it was cut short. Everything downstream --
+    the real Contribution, the real collapse -- is production.
+    """
+    real = ShardedMessageProvider._read_part
+
+    def patched(self, part_entry, *args, **kwargs):
+        whole = real(self, part_entry, *args, **kwargs)
+        if part_entry.name != part_name:
+            return whole
+        return provider_module._PartRead(
+            records=whole.records[:keep], observed_through=observed_through,
+            truncated=True, complete_through=complete_through)
+
+    monkeypatch.setattr(ShardedMessageProvider, "_read_part", patched)
+
+
 def six():
     return [M(i, 100 * i, ALPHA if i % 2 else BETA, f"fixture text {i}")
             for i in range(1, 7)]
@@ -167,7 +188,8 @@ def test_a_conversation_spanning_parts_caps_at_the_weakest_complete_point(tmp_pa
     capped = fixtures.readable_part(tmp_path, "message_1.db", ROOM, [
         M(11, 100, ALPHA, "c"), M(12, 200, BETA, "d"), M(13, 300, ALPHA, "e"),
         M(14, 350, BETA, "f")])
-    monkeypatch.setattr(provider_module, "_PART_RECORD_BOUND", 2)
+    inject_partial_read(monkeypatch, "message_1.db", keep=2,
+                        observed_through=350, complete_through=200)
     got = provider_over([whole, capped]).get_messages(conversation_identifier(ROOM), 50)
     c = got.coverage
     assert (c.status, c.reason) == (ms.COVERAGE_PARTIAL, ms.REASON_SOURCE_LIMIT)
@@ -218,3 +240,45 @@ def test_list_conversations_answers_from_the_same_orchestration(tmp_path):
     cut = p.list_conversations(1)
     assert len(cut.items) == cut.coverage.item_count == 1
     assert cut.coverage.reason == ms.REASON_CALLER_LIMIT
+
+
+# -- sealing regressions -----------------------------------------------------------
+
+def test_one_read_takes_the_locator_exactly_once(tmp_path):
+    parts = fixtures.split_conversation(tmp_path, ROOM, six(), stem="message")
+
+    class OnceOnly:
+        calls = 0
+
+        def entries(self):
+            OnceOnly.calls += 1
+            if OnceOnly.calls > 1:
+                raise AssertionError("a read took the locator twice")
+            return tuple(entry(x) for x in parts)
+
+    p = ShardedMessageProvider(OnceOnly(), identities=IdentityResolver(
+        (), session_names={digest_of(ROOM): ROOM}))
+    opened = []
+    real = p._opener
+
+    class Recording:
+        def open(self, e):
+            opened.append(e)
+            return real.open(e)
+
+    p._opener = Recording()
+    got = p.get_messages(conversation_identifier(ROOM), 50)
+    assert OnceOnly.calls == 1
+    assert [m.id for m in got.items] == [1, 2, 3, 4, 5, 6]
+    # Probing and reading opened the very entries of that one snapshot.
+    assert {e.name for e in opened} == {x.name for x in parts} and len(opened) == 4
+
+
+def test_a_limited_read_returns_the_newest_window(tmp_path, monkeypatch):
+    # No provider post-read record cap exists that could turn [5, 6] into [2, 3].
+    monkeypatch.setattr(provider_module, "_PART_RECORD_BOUND", 3, raising=False)
+    part = fixtures.readable_part(tmp_path, "message_0.db", ROOM, six())
+    got = provider_over([part]).get_messages(conversation_identifier(ROOM), 2)
+    assert [m.id for m in got.items] == [5, 6]
+    assert got.coverage.reason == ms.REASON_CALLER_LIMIT
+    assert "_PART_RECORD" not in inspect.getsource(provider_module)

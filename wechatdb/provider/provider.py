@@ -28,6 +28,7 @@ import wechatdb
 from wechatdb.parser import MessageRecord
 
 from .discovery import (
+    ExplicitShardLocator,
     ReadOnlySqliteOpener,
     ShardDiscovery,
     ShardEntry,
@@ -49,10 +50,6 @@ from message_source import (
     NormalizedMessage,
     ReadResult,
 )
-
-#: The most records one conversation table of one part contributes to a read.
-#: An internal bound of this source: a table holding more is cut, and says so.
-_PART_RECORD_BOUND = 10_000
 
 #: The most parts one read visits. Reaching it with planned parts left over is
 #: an early stop, and is classified like any other.
@@ -189,12 +186,15 @@ class ShardedMessageProvider:
         what the collapse is told. A listing counts conversations, not
         records, so it has no measured limit to stop on and passes none.
         """
-        discovery = ShardDiscovery(self._locator, self._opener)
+        # One snapshot per read: the locator promises a tuple, not the same
+        # tuple twice, so discovery and the reads share this one.
+        snapshot = tuple(self._locator.entries())
+        discovery = ShardDiscovery(ExplicitShardLocator(snapshot), self._opener)
         inventory = discovery.probe(discovery.catalogue())
-        entries = {shard_key(entry.name): entry for entry in self._locator.entries()}
+        entries = {shard_key(entry.name): entry for entry in snapshot}
         plan = self._router.plan(inventory, requested_start=start, requested_end=end)
         states = [facts.state for facts in inventory.values()]
-        events: dict[str, int] = {}
+        events: list[int] = []
         reads: dict[str, _PartRead] = {}
         stop = STOP_EXHAUSTED
         for key in plan.visit:
@@ -212,7 +212,7 @@ class ShardedMessageProvider:
             readable=states.count(SHARD_READABLE),
             unknown=states.count(SHARD_UNKNOWN),
             unavailable=states.count(SHARD_UNAVAILABLE),
-            unresolved_identities=sum(events.values()))
+            unresolved_identities=sum(events))
         # Parts that could never be visited were not skipped by the traversal;
         # they are a gap in the inventory, always, and separately from any stop.
         gap = SHARD_UNKNOWN in states or SHARD_UNAVAILABLE in states
@@ -242,14 +242,12 @@ class ShardedMessageProvider:
         end: float | None,
         conversation_id: int | None,
         before_sequence: int | None,
-        events: dict[str, int],
+        events: list[int],
     ) -> _PartRead:
         # Taken for the parser-shaped mapping alone: no name from this call
         # reaches any message, so it is not a resolution event of the read.
         session_names = self._names().session_names
         kept: list[MessageRecord] = []
-        observed: list[int] = []
-        points: list[int | None] = []
         connection = self._opener.open(entry)
         try:
             name2id = wechatdb.load_name2id(connection)
@@ -265,9 +263,9 @@ class ShardedMessageProvider:
                         and conversation_identifier(session_id) != conversation_id):
                     continue
                 resolved = self._names(room=session_id)
-                # One event per conversation a read resolves, however many
-                # parts hold it; events are summed and identifiers never kept.
-                events[session_id] = resolved.unresolved
+                # Every room-scoped resolution is an event and is summed as
+                # one; no identifier is kept to deduplicate the number.
+                events.append(resolved.unresolved)
                 if resolved.display_names:
                     records = list(wechatdb.parse_conversation(
                         connection, table, name2id=name2id,
@@ -277,23 +275,18 @@ class ShardedMessageProvider:
                            if (start is None or r.timestamp >= start)
                            and (end is None or r.timestamp <= end)
                            and (before_sequence is None or r.local_id < before_sequence)]
-                observed.extend(r.timestamp for r in records)
-                if len(records) > _PART_RECORD_BOUND:
-                    # Oldest first, as the parser yields: what is kept is
-                    # accountable only up to the last moment wholly kept.
-                    cut_at = records[_PART_RECORD_BOUND].timestamp
-                    records = records[:_PART_RECORD_BOUND]
-                    points.append(max((r.timestamp for r in records
-                                       if r.timestamp < cut_at), default=None))
                 kept.extend(records)
         finally:
             connection.close()
         kept.sort(key=_order)
+        # The leaf parser hands over every record of the scope, so this read
+        # is whole: nothing here cuts it, and a cut is never invented. A part
+        # read that *was* cut short says so through these same fields.
         return _PartRead(
             records=tuple(kept),
-            observed_through=max(observed, default=None),
-            truncated=bool(points),
-            complete_through=(None if not points or None in points else min(points)))
+            observed_through=max((r.timestamp for r in kept), default=None),
+            truncated=False,
+            complete_through=None)
 
     def _contributions(self, reads: dict[str, _PartRead]) -> tuple[Contribution, ...]:
         built = []

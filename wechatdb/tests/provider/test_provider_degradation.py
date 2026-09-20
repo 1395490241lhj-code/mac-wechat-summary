@@ -15,16 +15,18 @@ from wechatdb.provider import result as result_module
 
 from . import fixtures
 from .fixtures import ALPHA, BETA, ROOM, SyntheticMessage as M
-from .test_provider_reads import empty_window_source, provider_over, six
+from .test_provider_reads import (
+    empty_window_source,
+    inject_partial_read,
+    provider_over,
+    six,
+)
 
 CID = conversation_identifier(ROOM)
-EMITTED: set[str] = set()
 
 
 def read(provider, *args, **kwargs):
-    got = provider.get_messages(*args, **kwargs)
-    EMITTED.add(got.coverage.reason)
-    return got
+    return provider.get_messages(*args, **kwargs)
 
 
 def count_opens(provider):
@@ -190,7 +192,8 @@ def test_zero_messages_with_an_unavailable_part_is_not_trustworthy(tmp_path):
 # -- T-11 ------------------------------------------------------------------------
 
 def test_the_provider_truncating_internally_is_never_complete(tmp_path, monkeypatch):
-    monkeypatch.setattr(provider_module, "_PART_RECORD_BOUND", 3)
+    inject_partial_read(monkeypatch, "message_0.db", keep=3,
+                        observed_through=600, complete_through=300)
     part = fixtures.readable_part(tmp_path, "message_0.db", ROOM, six())
     p = provider_over([part, fixtures.unopenable_part("message_9.db")])
     got = read(p, CID, 200)
@@ -221,16 +224,50 @@ def test_ambiguity_events_are_summed_across_the_rooms_a_read_resolves(tmp_path):
     assert p.diagnostics.unresolved_identities == 1      # per read, never carried
 
 
-# -- T-18 (runs last in this module) ---------------------------------------------
+def test_one_ambiguous_room_in_two_parts_is_two_events(tmp_path):
+    # Events, not distinct identifiers: the room is resolved once per part read.
+    parts = two_parts(tmp_path)
+    candidates = [NameCandidate(ALPHA, NAME_ROOM_MEMBER, name, room=ROOM)
+                  for name in ("One", "Another")]
+    p = provider_over(parts, candidates=candidates)
+    calls = []
+    real = p._names
+
+    def spy(**kwargs):
+        resolved = real(**kwargs)
+        if kwargs.get("room") is not None:
+            calls.append(resolved.unresolved)
+        return resolved
+
+    p._names = spy
+    p.get_messages(CID, 50)
+    assert calls == [1, 1]
+    assert p.diagnostics.unresolved_identities == 2
+
+
+# -- T-18 (standalone: builds every scenario itself) ------------------------------
 
 def test_every_reason_token_this_provider_emits_is_in_the_closed_set(tmp_path, monkeypatch):
     parts, window = empty_window_source(tmp_path)
-    read(provider_over(parts), CID, 50)
-    read(provider_over(parts), CID, 50, **window)
-    assert EMITTED <= ms.COVERAGE_REASONS
-    assert EMITTED == {
+    gap = parts + [fixtures.unopenable_part("message_9.db")]
+    emitted = {
+        read(provider_over(parts), CID, 50).coverage.reason,
+        read(provider_over(parts), CID, 50, **window).coverage.reason,
+        read(provider_over(parts), CID, 2).coverage.reason,
+        read(provider_over(gap), CID, 50).coverage.reason,
+        read(provider_over(parts, source_newest=650.5), CID, 50).coverage.reason,
+    }
+    with monkeypatch.context() as cut:
+        inject_partial_read(cut, "message_0.db", keep=1,
+                            observed_through=500, complete_through=100)
+        emitted.add(read(provider_over(parts), CID, 50).coverage.reason)
+    with monkeypatch.context() as bound:
+        bound.setattr(provider_module, "_PART_VISIT_BOUND", 1)
+        emitted.add(read(provider_over(parts), CID, 50).coverage.reason)
+    assert emitted <= ms.COVERAGE_REASONS
+    assert emitted == {
         ms.REASON_FULL_WINDOW_OBSERVED, ms.REASON_EMPTY_WINDOW, ms.REASON_CALLER_LIMIT,
         ms.REASON_SOURCE_LIMIT, ms.REASON_PARTIAL_INVENTORY,
         ms.REASON_UNSAFE_EARLY_STOP, ms.REASON_TIMESTAMP_MISMATCH}
-    for reason in EMITTED:
+    for reason in emitted:
         assert ms.REASON_STATUSES[reason]
