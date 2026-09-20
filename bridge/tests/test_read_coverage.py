@@ -173,10 +173,13 @@ def test_a_complete_read_can_never_be_truncated():
     object refuses to exist. The reason here is one that *is* valid for
     ``observed_complete``, so nothing but invariant 3 can be what fires.
     """
-    with pytest.raises(ValueError):
+    # Matched on invariant 3's own refusal. A bare ValueError is also what the
+    # cut-short-reason invariant raises for this input, so without the match
+    # this test stayed green with invariant 3 deleted (found by the G1 gate).
+    with pytest.raises(ValueError, match="^a complete read cannot be truncated$"):
         complete(truncated=True)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^a complete read cannot be truncated$"):
         complete(reason=WINDOW_BOUND, truncated=True)
 
 
