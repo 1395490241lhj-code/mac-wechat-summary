@@ -22,6 +22,26 @@ HMAC_SIZE = 64
 RESERVE_SIZE = 80
 SQLITE_HEADER = b"SQLite format 3\x00"
 
+#: The key-derivation parameters, named so the profile identifier below cannot
+#: drift from the profile it describes.
+KDF_ITERATIONS = 2
+KDF_XOR = 0x3A
+
+
+def sqlcipher_profile_id() -> str:
+    """The one canonical name for the decryption profile above.
+
+    Key addressing needs to know *which* contract a stored key was proven
+    against, and that name must not be a second, hand-maintained copy of the
+    parameters -- so it is derived from them. A parameter change therefore
+    renames the profile, which is exactly what should invalidate addressing.
+    """
+    return (
+        f"sqlcipher-4/aes-{KEY_SIZE * 8}-cbc/hmac-sha512/"
+        f"pbkdf2-sha512-{KDF_ITERATIONS}/xor-{KDF_XOR:02x}/"
+        f"page-{PAGE_SIZE}/salt-{SALT_SIZE}/reserve-{RESERVE_SIZE}"
+    )
+
 
 class _FixedDecryptError(Exception):
     expected = ""
@@ -46,7 +66,8 @@ class DatabaseDecryptError(_FixedDecryptError):
 
 def _mac_key(key: bytes, salt: bytes) -> bytes:
     return hashlib.pbkdf2_hmac(
-        "sha512", key, bytes(value ^ 0x3A for value in salt), 2, dklen=KEY_SIZE
+        "sha512", key, bytes(value ^ KDF_XOR for value in salt), KDF_ITERATIONS,
+        dklen=KEY_SIZE,
     )
 
 
