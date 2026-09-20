@@ -263,3 +263,97 @@ def test_malformed_or_unsupported_wal_fails_closed(tmp_path, wal_bytes):
     wal.write_bytes(wal_bytes)
     with pytest.raises(SnapshotFormatError, match="^snapshot format unsupported$"):
         replay_committed_wal(main, wal)
+
+
+def _shm_for_wal(wal_bytes: bytes, *, mx_frame: int, database_size: int) -> bytes:
+    import sys
+
+    order = "<" if sys.byteorder == "little" else ">"
+    magic = struct.unpack(">I", wal_bytes[:4])[0]
+    big_end = 1 if magic == 0x377F0683 else 0
+    page_size = PAGE if mx_frame else 0
+    if mx_frame:
+        frame_offset = 32 + (mx_frame - 1) * (24 + PAGE)
+        frame_checksum = struct.unpack(">2I", wal_bytes[frame_offset + 16:frame_offset + 24])
+    else:
+        frame_checksum = (0, 0)
+    prefix = struct.pack(
+        order + "III BB H IIII",
+        3007000, 0, 1, 1, big_end, page_size,
+        mx_frame, database_size, frame_checksum[0], frame_checksum[1],
+    ) + wal_bytes[16:24]
+    checksum = _checksum(prefix, byte_order=sys.byteorder)
+    header = prefix + struct.pack(order + "2I", *checksum)
+    assert len(header) == 48
+    return header + header + bytes(32768 - 96)
+
+
+def test_shm_mxframe_hides_stale_physical_wal_tail(tmp_path):
+    from acquisition.snapshot import replay_committed_wal
+
+    main = tmp_path / "main"
+    wal = tmp_path / "wal"
+    shm = tmp_path / "shm"
+    main.write_bytes(b"A" * PAGE * 2)
+    valid = _wal([
+        (1, 0, b"B" * PAGE, SALT),
+        (1, 2, b"C" * PAGE, SALT),
+    ])
+    # A physical stale tail that is not part of the current wal-index generation.
+    stale = bytearray(_wal([(2, 2, b"Z" * PAGE, (99, 98))]))[32:]
+    wal.write_bytes(valid + stale)
+    shm.write_bytes(_shm_for_wal(valid, mx_frame=2, database_size=2))
+
+    assert replay_committed_wal(main, wal, shm) == 2
+    assert main.read_bytes() == b"C" * PAGE + b"A" * PAGE
+
+
+def test_shm_zero_mxframe_treats_physical_wal_as_inactive_residue(tmp_path):
+    from acquisition.snapshot import replay_committed_wal
+
+    main = tmp_path / "main"
+    wal = tmp_path / "wal"
+    shm = tmp_path / "shm"
+    before = b"A" * PAGE
+    main.write_bytes(before)
+    physical = _wal([(1, 1, b"Z" * PAGE, SALT)])
+    wal.write_bytes(physical)
+    shm.write_bytes(_shm_for_wal(physical, mx_frame=0, database_size=0))
+
+    assert replay_committed_wal(main, wal, shm) == 0
+    assert main.read_bytes() == before
+
+
+@pytest.mark.parametrize("mutation", ["copy-mismatch", "checksum", "salt", "not-commit"])
+def test_shm_active_boundary_must_be_self_consistent(tmp_path, mutation):
+    from acquisition.snapshot import SnapshotFormatError, replay_committed_wal
+
+    main = tmp_path / "main"
+    wal = tmp_path / "wal"
+    shm = tmp_path / "shm"
+    main.write_bytes(b"A" * PAGE)
+    wal_bytes = _wal([(1, 1, b"B" * PAGE, SALT)])
+    wal.write_bytes(wal_bytes)
+    shm_bytes = bytearray(_shm_for_wal(wal_bytes, mx_frame=1, database_size=1))
+    if mutation == "copy-mismatch":
+        shm_bytes[48] ^= 1
+    elif mutation == "checksum":
+        shm_bytes[40] ^= 1
+        shm_bytes[88] ^= 1
+    elif mutation == "salt":
+        shm_bytes[32] ^= 1
+        shm_bytes[80] ^= 1
+        # restore each header checksum after forging the salt so the salt check owns refusal
+        import sys
+        order = "<" if sys.byteorder == "little" else ">"
+        for offset in (0, 48):
+            ck = _checksum(bytes(shm_bytes[offset:offset + 40]), byte_order=sys.byteorder)
+            shm_bytes[offset + 40:offset + 48] = struct.pack(order + "2I", *ck)
+    else:
+        uncommitted = _wal([(1, 0, b"B" * PAGE, SALT)])
+        wal.write_bytes(uncommitted)
+        shm_bytes = bytearray(_shm_for_wal(uncommitted, mx_frame=1, database_size=1))
+    shm.write_bytes(shm_bytes)
+
+    with pytest.raises(SnapshotFormatError, match="^snapshot format unsupported$"):
+        replay_committed_wal(main, wal, shm)

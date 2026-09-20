@@ -164,7 +164,7 @@ class AcquisitionCoordinator:
             plaintext_dir.mkdir(mode=0o700)
             plaintext_paths = []
             for snapshot in snapshots:
-                replay_committed_wal(snapshot.main, snapshot.wal)
+                replay_committed_wal(snapshot.main, snapshot.wal, snapshot.shm)
                 plaintext = plaintext_dir / secrets.token_hex(16)
                 self._decryptor.decrypt(
                     snapshot.main,

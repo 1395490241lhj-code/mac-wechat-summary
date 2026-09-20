@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import shutil
 import struct
+import sys
 from typing import Callable
 
 from .keystore import KeyDescriptor
@@ -16,6 +17,8 @@ from .keystore import KeyDescriptor
 PAGE_SIZE = 4096
 WAL_HEADER_SIZE = 32
 WAL_FRAME_HEADER_SIZE = 24
+SHM_INDEX_HEADER_SIZE = 48
+SHM_INDEX_HEADER_COPIES = 2
 _WAL_MAGIC = {0x377F0682, 0x377F0683}
 _WAL_VERSION = 3007000
 
@@ -164,7 +167,59 @@ def _read_exact(stream, size: int) -> bytes:
     return data
 
 
-def replay_committed_wal(main: Path, wal: Path | None) -> int:
+@dataclass(frozen=True, slots=True)
+class _WalIndexBoundary:
+    frame_limit: int
+    database_size: int
+    frame_checksum: tuple[int, int]
+
+
+def _wal_index_boundary(
+    shm: Path | None, wal_header: bytes, wal_magic: int
+) -> _WalIndexBoundary | None:
+    if shm is None:
+        return None
+    try:
+        with shm.open("rb") as stream:
+            block = _read_exact(
+                stream, SHM_INDEX_HEADER_SIZE * SHM_INDEX_HEADER_COPIES
+            )
+        first = block[:SHM_INDEX_HEADER_SIZE]
+        second = block[SHM_INDEX_HEADER_SIZE:]
+        if first != second:
+            raise SnapshotFormatError()
+        byte_order = "<" if sys.byteorder == "little" else ">"
+        values = struct.unpack(byte_order + "III BB H IIII IIII", first)
+        (
+            version, _unused, _change, is_init, big_end_checksum, page_size,
+            max_frame, database_size, frame_sum1, frame_sum2,
+            _salt1, _salt2, header_sum1, header_sum2,
+        ) = values
+        header_checksum = _checksum(first[:40], (0, 0), sys.byteorder)
+        if (version != _WAL_VERSION or is_init != 1
+                or big_end_checksum not in (0, 1)
+                or header_checksum != (header_sum1, header_sum2)):
+            raise SnapshotFormatError()
+        if max_frame == 0:
+            if page_size not in (0, PAGE_SIZE):
+                raise SnapshotFormatError()
+            return _WalIndexBoundary(0, database_size, (frame_sum1, frame_sum2))
+        if (page_size != PAGE_SIZE or database_size == 0
+                or bool(big_end_checksum) != (wal_magic == 0x377F0683)
+                or first[32:40] != wal_header[16:24]):
+            raise SnapshotFormatError()
+        return _WalIndexBoundary(
+            max_frame, database_size, (frame_sum1, frame_sum2)
+        )
+    except SnapshotFormatError:
+        raise
+    except (OSError, struct.error):
+        raise SnapshotFormatError() from None
+
+
+def replay_committed_wal(
+    main: Path, wal: Path | None, shm: Path | None = None
+) -> int:
     if wal is None:
         return 0
     try:
@@ -179,13 +234,16 @@ def replay_committed_wal(main: Path, wal: Path | None) -> int:
             checksum = _checksum(header[:24], (0, 0), byte_order)
             if checksum != (sum1, sum2):
                 raise SnapshotFormatError()
+            boundary = _wal_index_boundary(shm, header, magic)
+            if boundary is not None and boundary.frame_limit == 0:
+                return 0
             frame_count = 0
             last_commit = 0
             committed_size = 0
             transaction_max_page = 0
-            while True:
+            while boundary is None or frame_count < boundary.frame_limit:
                 frame_header = stream.read(WAL_FRAME_HEADER_SIZE)
-                if not frame_header:
+                if boundary is None and not frame_header:
                     break
                 if len(frame_header) != WAL_FRAME_HEADER_SIZE:
                     raise SnapshotFormatError()
@@ -205,6 +263,13 @@ def replay_committed_wal(main: Path, wal: Path | None) -> int:
                     last_commit = frame_count
                     committed_size = database_size
                     transaction_max_page = 0
+            if boundary is not None and (
+                frame_count != boundary.frame_limit
+                or last_commit != boundary.frame_limit
+                or committed_size != boundary.database_size
+                or checksum != boundary.frame_checksum
+            ):
+                raise SnapshotFormatError()
         if not last_commit:
             return 0
         with wal.open("rb") as stream, main.open("r+b") as database:
