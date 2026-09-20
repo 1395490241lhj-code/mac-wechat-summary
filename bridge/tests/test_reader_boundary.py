@@ -1873,8 +1873,15 @@ PRODUCT_TREES = ("bridge", "memory", "shadow", "ai", "core")
 CANDIDATE_PROVIDER = "wechatdb"
 
 
-def test_only_the_owned_adapter_imports_the_schema_provider():
-    """P4/P5 wires one bridge adapter; generic/product peers stay isolated."""
+def test_only_the_two_owned_composition_roots_import_the_schema_provider():
+    """Two bridge modules may cross; generic/product peers stay isolated.
+
+    The ordinary adapter composes acquisition for reads. The Bootstrap
+    composition root composes it for the explicit lifecycle action, which has
+    to prove a candidate schema as well as a candidate key. Nothing else gains
+    the crossing, and the assertion names both files so a third cannot appear
+    quietly.
+    """
     import ast
 
     root = Path(__file__).resolve().parents[2]
@@ -1897,7 +1904,10 @@ def test_only_the_owned_adapter_imports_the_schema_provider():
             if any(name.split(".")[0] == CANDIDATE_PROVIDER for name in names):
                 offenders.append(str(path.relative_to(root)))
 
-    assert offenders == ["bridge/acquired_database_source.py"], offenders
+    assert sorted(offenders) == [
+        "bridge/acquired_database_source.py",
+        "bridge/database_bootstrap.py",
+    ], offenders
 
 
 # --- P0: one canonical conversation identity ---------------------------------

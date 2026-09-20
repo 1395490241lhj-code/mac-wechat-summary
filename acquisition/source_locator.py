@@ -92,6 +92,45 @@ class LocatedSource:
             raise ValueError("located source contradiction")
 
 
+def _entry_document(source: EncryptedSource) -> dict[str, object]:
+    descriptor = source.key_descriptor
+    return {
+        "main": str(source.main),
+        "wal": str(source.wal) if source.wal is not None else None,
+        "shm": str(source.shm) if source.shm is not None else None,
+        "key_descriptor": {
+            "source_fingerprint": descriptor.source_fingerprint,
+            "role_token": descriptor.role_token,
+            "record_format_version": descriptor.record_format_version,
+            "compatibility_token": descriptor.compatibility_token,
+        },
+    }
+
+
+def record_document(source_set: AcquisitionSourceSet) -> dict[str, object]:
+    """The record this reader consumes, written from a validated source set.
+
+    Provenance only: paths and descriptors. It carries no key bytes and nothing
+    derived from decrypted content, so writing and reading it never discloses a
+    secret. Its shape is exactly the one SourceLocator validates.
+    """
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "selected_source": SELECTED_SOURCE_DATABASE,
+        ROLE_MESSAGES: [
+            _entry_document(source) for source in source_set.message_sources
+        ],
+        ROLE_CONVERSATION_IDENTITY: (
+            _entry_document(source_set.conversation_identity_source)
+            if source_set.conversation_identity_source is not None else None
+        ),
+        ROLE_DISPLAY_IDENTITY: (
+            _entry_document(source_set.display_identity_source)
+            if source_set.display_identity_source is not None else None
+        ),
+    }
+
+
 def _optional_path(value: object) -> Path | None:
     """An absolute path, or `None` when the field is absent or null."""
     if value is None:
@@ -193,4 +232,3 @@ class SourceLocator:
         if value is None:
             return None
         return _entry(value)
-

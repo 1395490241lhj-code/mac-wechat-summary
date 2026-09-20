@@ -318,7 +318,10 @@ def test_product_selection_stays_visual_and_only_owned_adapter_imports_acquisiti
         path.name for path in (ROOT / "bridge").glob("*.py")
         if "acquisition" in _imported_roots(path)
     ]
-    assert importers == ["acquired_database_source.py"]
+    assert sorted(importers) == [
+        "acquired_database_source.py",
+        "database_bootstrap.py",
+    ]
 
 
 def test_provider_stays_unwired_from_acquisition():

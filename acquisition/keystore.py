@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
+from typing import Protocol
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -54,7 +55,23 @@ class KeyStoreError(Exception):
         super().__init__(reason)
 
 
+class KeyLookup(Protocol):
+    """The read side of key storage, and the whole of what acquisition consumes.
+
+    The coordinator never writes, lists or deletes keys; it looks one descriptor
+    up. Stating that here is what lets a caller validate a *candidate* secret
+    against a source without first making it durable: an in-memory lookup that
+    answers from the candidate satisfies this protocol exactly as the KeyStore
+    does, and nothing else about acquisition changes.
+    """
+
+    def load(self, descriptor: KeyDescriptor) -> SecretBytes | None:
+        ...
+
+
 class KeyStore:
+    """Durable key storage; the production implementation of KeyLookup."""
+
     def __init__(self, backend: object | None = None) -> None:
         if backend is None:
             from .macos_keychain import MacOSKeychain
