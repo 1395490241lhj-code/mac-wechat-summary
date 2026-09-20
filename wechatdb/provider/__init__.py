@@ -69,6 +69,7 @@ from .identity import (
     NameCandidate,
     ResolvedIdentities,
 )
+from .identity_catalog import IdentityCatalog
 from .provider import ShardedMessageProvider
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 
@@ -82,6 +83,7 @@ __all__ = [
     "NAME_PRECEDENCE",
     "NAME_ROOM_MEMBER",
     "IdentityResolver",
+    "IdentityCatalog",
     "NameCandidate",
     "ResolvedIdentities",
     "EXCLUDED_CONVERSATION_ABSENT",
