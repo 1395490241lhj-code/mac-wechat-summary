@@ -166,6 +166,28 @@ def test_paging_uses_public_sequence_when_local_ids_restart_in_each_part(tmp_pat
     assert all(message.sequence < cursor for message in second.items)
 
 
+def test_equal_sequences_in_different_conversations_are_legal_and_stably_ordered(tmp_path):
+    other = "fixture_room_0002@chatroom"
+    first = fixtures.readable_part(tmp_path, "message_0.db", ROOM, [
+        M(1, 100, ALPHA, "conversation a", server_id=101),
+    ])
+    second = fixtures.readable_part(tmp_path, "message_1.db", other, [
+        M(1, 100, BETA, "conversation b", server_id=202),
+    ])
+
+    answers = [
+        provider_over(parts, conversations=(ROOM, other)).get_recent_messages(0, 10).items
+        for parts in ([first, second], [second, first])
+    ]
+
+    assert [[message.id for message in answer] for answer in answers] == [
+        [101, 202], [101, 202]]
+    assert all(len({message.id for message in answer}) == 2 for answer in answers)
+    assert all(len({message.sequence for message in answer}) == 1 for answer in answers)
+    assert all(len({message.conversation_id for message in answer}) == 2
+               for answer in answers)
+
+
 @pytest.mark.parametrize("parts", [
     lambda tmp_path: [
         fixtures.readable_part(tmp_path, "message_0.db", ROOM,

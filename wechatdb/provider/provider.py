@@ -76,8 +76,8 @@ class _Traversal:
     inventory_gap: bool
 
 
-def _order(record: MessageRecord) -> int:
-    return message_sequence(record)
+def _order(record: MessageRecord) -> tuple[int, str]:
+    return (message_sequence(record), record.session_id)
 
 
 def _positive(limit: int) -> int:
@@ -311,7 +311,7 @@ class ShardedMessageProvider:
         coverage = self._collapse(trail, self._contributions(reads), start, end, limit)
         projected = tuple(ProviderResult.message(record) for record in merged)
         ids = {message.id for message in projected}
-        sequences = {message.sequence for message in projected}
+        sequences = {(message.conversation_id, message.sequence) for message in projected}
         if len(ids) != len(projected) or len(sequences) != len(projected):
             raise ValueError("message identity collision")
         items = projected[-limit:]
