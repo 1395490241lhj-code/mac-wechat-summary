@@ -93,7 +93,7 @@ def _check_inventory(inventory: Mapping[str, ShardFacts]) -> None:
             raise ValueError("inventory key does not match its facts")
 
 
-def _disjoint(facts: ShardFacts, start: int | None, end: int | None) -> bool:
+def _disjoint(facts: ShardFacts, start: float | None, end: float | None) -> bool:
     """An established, inclusive interval that cannot meet the inclusive request.
 
     Equality at either edge overlaps. Only a bound that is present constrains.
@@ -112,11 +112,15 @@ class ShardRouter:
         self,
         inventory: Mapping[str, ShardFacts],
         *,
-        requested_start: int | None,
-        requested_end: int | None,
+        requested_start: float | None,
+        requested_end: float | None,
         conversation_table: str | None = None,
     ) -> RoutePlan:
         """Visit or exclude every part, by fixed precedence.
+
+        The requested bounds are the caller's, in the generic contract's float
+        seconds, and are compared exactly as given: never rounded, floored or
+        cast. A part's own bounds stay integer provider evidence.
 
         Not readable; else the requested conversation table is absent; else
         established bounds are disjoint from the window; else visit. A readable

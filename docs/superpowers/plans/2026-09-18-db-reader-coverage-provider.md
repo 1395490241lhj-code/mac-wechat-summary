@@ -157,13 +157,15 @@ on the evaluated annotations and one on a fractional value surviving
 construction unchanged.
 
 **This is not a global retype.** Provider-internal integer timestamps in Stage 6
-stay integers: `ShardFacts.min_timestamp` / `.max_timestamp`, `ShardRouter`'s
-`requested_start` / `requested_end` parameters, `Contribution.observed_through`
-/ `.complete_through`, `ProviderResult.collapse`'s parameters and
-`ShardedMessageProvider`'s keyword bounds are all fed by `wechatdb`'s
+stay integers: `ShardFacts.min_timestamp` / `.max_timestamp` and
+`Contribution.observed_through` / `.complete_through` are fed by `wechatdb`'s
 `normalise_timestamp() -> int` and `MessageRecord.timestamp: int`. A value
 widening as it crosses into the generic contract is not a reason to widen the
-type it came from. `before_sequence: int | None` is a sequence, not a moment,
+type it came from. *(Corrected by §0.10: an earlier wording of this paragraph
+also listed `ShardRouter`'s and `ProviderResult.collapse`'s `requested_start` /
+`requested_end`, `source_newest`, and `ShardedMessageProvider`'s keyword bounds
+as staying `int`. Those are not database evidence — they are the caller's and
+the source's generic moments — and are `float | None`.)* `before_sequence: int | None` is a sequence, not a moment,
 and is untouched everywhere.
 
 ### 0.6 What P9's second preflight changed — Rion pagination is per-command
@@ -291,6 +293,41 @@ P15’s preflight found two stale sentences and one integration hazard.
 The stale data-flow stop line (“remainder provably outside window”) is
 also brought to amendment 6’s semantics. No Python changed; P15 remains
 unstarted. Recorded as D-031 amendment 7.
+
+### 0.10 What P16 preflight changed — the collapse contract, sealed before it is written
+
+P16’s preflight found four incomplete or stale contracts. All are corrected
+before `result.py` exists.
+
+1. **Float moment precision was settled before P9** (§0.5, D-031 amendment 3),
+   yet P16’s `collapse` and P17a’s keyword bounds still carried `int | None` for
+   `requested_start`, `requested_end` and `source_newest`, and §0.5 itself listed
+   them as staying `int`. Those values are the caller’s and the source’s, not
+   database evidence; they are `float | None` and are never cast.
+   `ShardRouter.plan`’s two annotations (and the private overlap helper they
+   feed) were widened in the same commit, with a regression proving
+   `requested_start=100.25` excludes a shard ending at `100`. Routing logic is
+   unchanged. `Contribution` moments, `MessageRecord.timestamp` and shard
+   bounds stay integers.
+2. **Sentinel evidence exists before the public trim**, so the internal
+   candidate count and the public `item_count` cannot be one field.
+   `caller_limit_hit` is measured from `candidate_count > caller_limit`;
+   `ReadCoverage.item_count` is `min(candidate_count, caller_limit)`.
+3. **`Contribution.truncated` had no reason.** `truncated=True` requires a
+   truncating reason, and a provider-internal cut is the existing
+   `source_limit` (T-11). The full single-reason precedence is now written
+   down: unsafe › source-limit › caller-limit › inventory-gap ›
+   timestamp-mismatch › complete, with freshness computed independently.
+4. **P16 is the single provider→generic projection point**, so the message
+   mapping is pinned field by field and `ownership` is `"unknown"` — no
+   self-identity evidence exists and none is inferred.
+5. **P15’s unresolved count is per call.** Provider diagnostics aggregate
+   ambiguity *events*, not distinct identifiers, and retain no identifier to
+   deduplicate them.
+
+No generic type, status or reason changes; `REASON_WINDOW_BOUND` is untouched;
+no deduplication contract is invented. Recorded as D-031 amendment 8. P16
+remains unstarted.
 
 ---
 
@@ -2005,8 +2042,8 @@ class ShardRouter:
         self,
         inventory: Mapping[str, ShardFacts],
         *,
-        requested_start: int | None,
-        requested_end: int | None,
+        requested_start: float | None,   # the caller's generic moment; exact, never cast
+        requested_end: float | None,
         conversation_table: str | None = None,   # exact Msg_<32 hex>, or no filter
     ) -> RoutePlan: ...
 
@@ -2295,80 +2332,147 @@ and therefore that the parser was not edited.
 - modify `wechatdb/provider/__init__.py`
 
 **Interface produced** — the **only** place in the provider that constructs a
-generic type (spec §8.5).
+generic type (spec §8.5, as sealed — see §0.10).
 
 ```python
 @dataclass(frozen=True, slots=True)
 class Contribution:
-    # What one planned part contributed to one read.
+    # What one planned part contributed to one read. Integer provider evidence.
+    # Sealed: records is a tuple; truncated is a bool; a complete point needs an
+    # observed point and may not exceed it. Fixed, content-free ValueError.
     records: tuple[MessageRecord, ...]
     observed_through: int | None
     complete_through: int | None
-    truncated: bool
+    truncated: bool            # cut short by a provider-internal bound
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderDiagnostics:
-    # Aggregate counts and category tallies only. Never an identifier, a name,
-    # a path or message content. Not part of ReadResult.
+    # Aggregate counts only. Never an identifier, a name, a path or content.
+    # Not part of ReadResult. Sealed: every field an int, not a bool, >= 0.
     readable: int
     unknown: int
     unavailable: int
-    unresolved_identities: int
+    unresolved_identities: int   # ambiguity EVENTS this read, not distinct identifiers
 
 
 class ProviderResult:
     @staticmethod
-    def message(record: MessageRecord, *, conversation_id: int) -> NormalizedMessage:
-        # One record in the shape the contract already documents: the message's
-        # own creation time in first_observed_at, visible_time None because no
-        # rendered time was ever seen, confidence 1.0 because a decoded row is
-        # exact and there is no estimator on this path.
+    def message(
+        record: MessageRecord,
+        *,
+        conversation_id: int,
+    ) -> NormalizedMessage: ...
 
     @staticmethod
     def collapse(
         contributions: Sequence[Contribution],
         *,
-        requested_start: int | None,
-        requested_end: int | None,
-        caller_limit: int,
-        stop: str,                     # one of routing.STOP_KINDS
-        inventory_gap: bool,           # any required part unknown or unavailable
-        source_newest: int | None,     # the source's own newest declared moment
+        requested_start: float | None,   # the caller's, exact; never cast
+        requested_end: float | None,
+        caller_limit: int,               # positive int, not bool
+        stop: str,                       # one of routing.STOP_KINDS
+        inventory_gap: bool,             # any required part unknown or unavailable
+        source_newest: float | None,     # the source's own newest declared moment
     ) -> ReadCoverage: ...
 ```
 
-Collapse rules, per spec §8.5 and §7.2–§7.3:
+Provider-local inputs are validated, never coerced: `caller_limit` a positive
+`int` and not a `bool`; `stop in STOP_KINDS`; `inventory_gap` a `bool`. Fixed,
+content-free `ValueError`.
 
-- any unknown or unavailable **required** part ⟹ `COVERAGE_PARTIAL` with
-  `REASON_PARTIAL_INVENTORY`;
-- `complete_through` = the **minimum** complete point across required
-  contributions; when none is capped, it equals `observed_through`, which is
-  what invariant 9 requires of a complete read;
-- `observed_through` = the **maximum** observed point across contributing reads;
-- `truncated` = `True` if **any** contributing read was cut short or the
-  caller's limit was hit;
-- **caller truncation is measured, not inferred.** P17 collects
-  `caller_limit + 1` and does not trim before collapse, so
-  `caller_limit_hit = sum(len(c.records) for c in contributions) > caller_limit`
-  is evidence; a total merely equal to the limit proves nothing;
-- **stop and limit, in precedence** (spec §8.5, as corrected):
-  `STOP_UNSAFE` ⟹ `COVERAGE_PARTIAL`, `REASON_UNSAFE_EARLY_STOP`,
-  `truncated=True`, `observed_through=None`, outranking the caller-limit
-  explanation; `STOP_SAFE` and `caller_limit_hit` ⟹ `COVERAGE_PARTIAL`,
-  `REASON_CALLER_LIMIT`, `truncated=True`, `observed_through` may be stated —
-  safety prevents `unsafe_early_stop` and does **not** upgrade to complete;
-  `STOP_EXHAUSTED` and `caller_limit_hit` ⟹ likewise `COVERAGE_PARTIAL`,
-  `REASON_CALLER_LIMIT`, `truncated=True`; `COVERAGE_COMPLETE` only with no
-  required inventory gap, no unsafe stop, no measured caller cut, and
-  contributions that otherwise account for the scope. **This provider never
-  emits `REASON_WINDOW_BOUND`**; the token stays in the generic vocabulary
-  untouched;
-- `source_newest` later than the newest item read ⟹ freshness
-  `POTENTIALLY_STALE`; when that newer material falls **inside** the requested
-  window, also `COVERAGE_PARTIAL` with `REASON_TIMESTAMP_MISMATCH`; when either
-  moment is absent, freshness `UNKNOWN` and **no** structural downgrade from
-  freshness alone. A mismatch never alters, filters or re-orders data.
+**Sentinel evidence and the public count are different facts.** P17 collects
+`limit + 1`, collapses, and only then trims, so at collapse time there may be
+`caller_limit + 1` records while the public result will hold `caller_limit`.
+Invariant 11 is `coverage.item_count == len(items)`, so:
+
+```python
+candidate_count   = sum(len(c.records) for c in contributions)
+caller_limit_hit  = candidate_count > caller_limit      # strictly; == proves nothing
+source_limit_hit  = any(c.truncated for c in contributions)
+public_item_count = min(candidate_count, caller_limit)  # ReadCoverage.item_count
+```
+
+The sentinel participates in `caller_limit_hit` and **never** in
+`item_count`. No provider-internal deduplication is specified or invented
+here: no content, fingerprint or name-based dedup. If overlapping physical
+duplicates are ever evidenced, that needs its own identity contract.
+
+**One reason, by fixed precedence** — `ReadCoverage` has one reason field:
+
+1. `stop == STOP_UNSAFE` ⟹ `observed_partial`, `unsafe_early_stop`,
+   `truncated=True`, `observed_through=None`, `complete_through=None`. Outranks
+   everything: the top-N cannot be proven correct against what was skipped.
+2. else `source_limit_hit` ⟹ `observed_partial`, `source_limit`,
+   `truncated=True`. T-11. Outranks the caller cut and the inventory gap:
+   `truncated` needs a truncating reason, and the provider’s own hidden cut
+   is what the caller cannot otherwise see. Gap counts stay in diagnostics.
+3. else `caller_limit_hit` ⟹ `observed_partial`, `caller_limit`,
+   `truncated=True` — for `STOP_SAFE` and `STOP_EXHAUSTED` alike. Safe
+   prevents `unsafe_early_stop`; it does not upgrade completeness.
+4. else `inventory_gap` ⟹ `observed_partial`, `partial_inventory`,
+   `truncated=False`, `complete_through=None`. Structural uncertainty, not
+   truncation.
+5. else `source_newest > observed_through` with the newer moment inside the
+   requested upper bound (`requested_end is None or source_newest <=
+   requested_end`) ⟹ `observed_partial`, `timestamp_mismatch`,
+   `truncated=False`.
+6. else `observed_complete`, `truncated=False`; reason `empty_window` when
+   `public_item_count == 0`, `full_window_observed` otherwise.
+
+**This provider never emits `REASON_WINDOW_BOUND`**; the generic token is
+untouched.
+
+**Freshness is orthogonal** and computed independently of the reason:
+`source_newest is None` or aggregate `observed_through is None` ⟹ `UNKNOWN`;
+`source_newest <= observed_through` ⟹ `EVIDENCE_CONSISTENT`; `source_newest >
+observed_through` ⟹ `POTENTIALLY_STALE` — including past a bounded
+`requested_end`, where the read is stale and still structurally complete. No
+clock, no tolerance, no age constant. A mismatch never alters, filters or
+re-orders data.
+
+**Boundaries.** `observed_through` = the maximum non-`None`
+`Contribution.observed_through`, or `None`; an unsafe stop overrides it to
+`None`. On a partial read `complete_through` = the **minimum** non-`None`
+`Contribution.complete_through`, or `None`; it is `None` outright for
+`inventory_gap` (rule 4) and for `STOP_UNSAFE`. On `observed_complete`,
+`complete_through = observed_through`, as invariant 9 requires — a minimum of
+provider-local values must never yield a complete coverage whose two points
+differ. Requested bounds and `source_newest` pass through exactly; nothing is
+rounded, floored or cast. `Contribution` moments stay integers.
+
+**The message projection, field by field.** P16 is the single
+provider→generic projection point:
+
+| `NormalizedMessage` | from |
+|---|---|
+| `id` | `record.local_id` |
+| `conversation_id` | the supplied canonical generic `conversation_id` |
+| `sequence` | `record.local_id` |
+| `sender` | `record.sender_name` (the parser already fell back to `sender_id`) |
+| `ownership` | **`"unknown"`** |
+| `visible_time` | `None` |
+| `text` | `record.content` |
+| `kind` | `record.message_type` |
+| `confidence` | `1.0` |
+| `first_observed_at` | `record.timestamp` (whole seconds are valid float-contract evidence; not cast for policy) |
+| `source` | `SOURCE_DATABASE` |
+
+`ownership` is `"unknown"` because the provider has no source-authored
+self-identity evidence; P15 resolves display names, not “is this me”. It is
+never inferred from a sender name, an identifier’s shape, room membership or
+conversation identity. `id` and `sequence` both use `local_id`, matching the
+existing database adapter’s fallback convention; no new hash or
+message-identity algorithm is invented, no claim is made that `local_id` is
+globally unique, and `conversation_id` already travels separately.
+
+**`unresolved_identities` counts ambiguity events.** P15’s
+`ResolvedIdentities.unresolved` is per `resolve()` call. A read that performs
+several room-scoped resolutions aggregates `sum(result.unresolved ...)`, so
+the same identifier ambiguous in two rooms contributes `2`. It does **not**
+mean the number of globally distinct ambiguous identifiers, and no identifier
+is retained merely to deduplicate the diagnostic — that is what keeps the
+count-only privacy contract. Diagnostics remain outside `ReadResult`.
 
 **Identity and coverage stay apart.** `ProviderDiagnostics.unresolved_identities`
 is diagnostic-only. `ProviderResult.collapse` takes no unresolved count, never
@@ -2421,14 +2525,52 @@ escapes this module.** The provider's vocabulary ends here.
   for `time.`, `datetime`, `now`, and any numeric literal used as a threshold.
 - `test_no_provider_vocabulary_reaches_the_envelope` — every `ReadCoverage`
   field value is a token from `COVERAGE_STATUSES` / `COVERAGE_REASONS`, a
-  `ReadFreshness` member, a bool, an int or `None`; and no field value contains
-  a table name, a shard key, a path separator or any fixture name.
+  `ReadFreshness` member, a bool, an int, a **float** (the generic moment
+  fields) or `None`; and no field value contains a shard key, a table name, a
+  digest, a path, a fixture identifier or a schema name.
 - `test_the_provider_derives_identity_from_the_generic_owner` — asserts, by
   `ast`, that `result.py` imports `conversation_identifier` from
   `conversation_identity`, that it defines no function of that name and calls no
   `blake2b`, and that no module under `wechatdb/` imports `rion_reader_adapter`
   or `message_source`'s absent equivalent.
-- `test_diagnostics_carry_counts_only`
+- `test_diagnostics_carry_counts_only` — and every field refuses a `bool`, a
+  negative and a non-`int`.
+- `test_fractional_requested_bounds_survive_collapse_exactly` —
+  `requested_start=100.25`, `requested_end=200.75`, `source_newest=150.5` come
+  back on the coverage bit-for-bit, as floats, uncast.
+- `test_a_sentinel_measures_caller_truncation_but_is_not_counted_publicly` —
+  `caller_limit=2`, three candidate records ⟹ `caller_limit`,
+  `truncated=True`, `item_count == 2`; and `ReadResult(items=(two public
+  items), coverage=coverage)` **constructs**, with no repair of the coverage
+  afterwards.
+- `test_a_truncated_contribution_is_source_limit_even_below_the_caller_limit`
+  (T-11) — three candidate records, `caller_limit=200`,
+  `Contribution.truncated=True` ⟹ `observed_partial` / `source_limit` /
+  `truncated=True`.
+- `test_reason_precedence_is_fixed_under_mixed_evidence` — pairwise, not a
+  score: unsafe beats source-limit; source-limit beats caller-limit;
+  caller-limit beats inventory-gap; inventory-gap beats timestamp-mismatch;
+  each pair constructed with both conditions true.
+- `test_a_complete_empty_uses_empty_window_and_zero_public_count`
+- `test_freshness_is_computed_independently_of_the_reason` — a caller-limited
+  read can still be `evidence_consistent`; a complete read past a bounded
+  `requested_end` is `potentially_stale` and still complete.
+- `test_a_complete_read_never_has_differing_through_points` — contributions
+  with different complete points under a complete verdict still yield
+  `complete_through == observed_through`.
+- `test_contributions_are_sealed_at_construction` — a list for `records`, a
+  non-`bool` `truncated`, a complete point without an observed point, and a
+  complete point beyond the observed point each raise.
+- `test_collapse_refuses_malformed_provider_inputs` — `caller_limit` of `0`,
+  negative, `True` or a float; a `stop` outside `STOP_KINDS`; a non-`bool`
+  `inventory_gap`.
+- `test_message_projection_uses_unknown_ownership_without_guessing_self` —
+  pins every field in the projection table above, and that `ownership` is
+  `"unknown"` even when `sender_name` equals a name that looks like the
+  account’s own.
+- `test_diagnostics_count_ambiguity_events_not_unique_identifiers` — the type
+  documents and accepts a sum across resolution calls; P17 owes the
+  aggregation itself.
 
 **Prove RED**
 
@@ -2472,7 +2614,7 @@ class ShardedMessageProvider:
         locator: ShardLocator,
         *,
         identities: IdentityResolver,
-        source_newest: int | None = None,
+        source_newest: float | None = None,
     ) -> None: ...
 
     def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]: ...
@@ -2483,8 +2625,8 @@ class ShardedMessageProvider:
         limit: int,
         before_sequence: int | None = None,
         *,
-        requested_start: int | None = None,
-        requested_end: int | None = None,
+        requested_start: float | None = None,   # the caller's, exact; never cast
+        requested_end: float | None = None,
     ) -> ReadResult[NormalizedMessage]: ...
 
     def get_recent_messages(
@@ -2499,10 +2641,20 @@ read. Every part in every fixture here is **readable**, every stop is
 `STOP_EXHAUSTED` or a plain full traversal, and no freshness mismatch is
 introduced. The traversal collects `limit + 1` matching records so that
 truncation is **measured** rather than inferred (spec §8.2), and the order is
-load-bearing: **collect `limit + 1` ⟹ build contributions and collapse
-coverage ⟹ only then trim the public items to `limit`.** The sentinel must
-reach `ProviderResult.collapse`; trimming first would turn measured truncation
-back into a count. P17b is what exercises the measurement.
+load-bearing: **collect provider candidates including the sentinel ⟹ merge
+and sort the candidate population ⟹ collapse while the sentinel evidence
+still exists ⟹ `coverage.item_count` is already the eventual public count ⟹
+trim the public tuple to `limit` ⟹ construct `ReadResult`.** The sentinel
+must reach `ProviderResult.collapse`; trimming first would turn measured
+truncation back into a count. `ReadResult` must construct **without repairing
+the coverage afterwards**: `ReadCoverage.item_count` is never mutated or
+rebuilt after collapse, and the public items are sorted and trimmed from the
+same candidate population to the same limit, so the counts agree by
+construction. No content, fingerprint or name-based deduplication is
+performed. When a read resolves several rooms,
+`ProviderDiagnostics.unresolved_identities` is the **sum** of the per-call
+`ResolvedIdentities.unresolved` — ambiguity events, not distinct identifiers.
+P17b is what exercises the measurement.
 
 **One integration rule, load-bearing.** The router yields the full parser
 table name, `Msg_<32 hex>`. P17 passes that table name **unchanged** to
@@ -2673,6 +2825,8 @@ Every suite passes, including P17a's, unchanged.
    | make `ShardRouter.classify_stop` always return `STOP_SAFE` | T-6 |
    | make `ShardRouter.classify_stop` always return `STOP_UNSAFE` | T-5 |
    | trim to `limit` before `collapse` (drop the sentinel) | T-5, T-11 |
+   | count the sentinel in `ReadCoverage.item_count` | T-5 (`ReadResult` refuses to construct) |
+   | report a truncated contribution as `caller_limit` | T-11 |
    | make `ShardDiscovery.probe` drop unreadable keys | T-2, T-3, T-10 |
    | make `collapse` take the maximum complete point instead of the minimum | T-4b |
    | make `IdentityResolver` pick the first of two conflicting names | T-8 |

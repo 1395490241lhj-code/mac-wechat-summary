@@ -964,27 +964,91 @@ the source's own tables.
     contributing reads;
   - `truncated` = `True` if **any** contributing read was cut short or the
     caller's limit was hit;
-  - **stop and limit, in precedence.** The traversal collects `limit + 1`, and
-    that sentinel survives until collapse so `caller_limit_hit` is **measured**
-    as more matching records in hand than the caller asked for — never
-    inferred from a count equal to the limit. Then: `unsafe` stop `⟹`
+  - **the sentinel is evidence, never a public count.** The traversal
+    collects `limit + 1` and the sentinel survives until collapse, so
+    `candidate_count = sum(len(c.records) for c in contributions)` and
+    `caller_limit_hit = candidate_count > caller_limit` — strictly, never
+    inferred from a count equal to the limit. But invariant 11 requires
+    `coverage.item_count == len(items)` and the public items are trimmed to the
+    limit *after* collapse, so `ReadCoverage.item_count` is
+    `min(candidate_count, caller_limit)` — the eventual public count. The
+    sentinel decides truncation and is never counted. No provider-internal
+    deduplication is specified or invented: the public candidates are the
+    records actually collected and merged;
+  - **a contribution cut short by a provider-internal bound is `source_limit`**
+    (T-11): `source_limit_hit = any(c.truncated for c in contributions)`. It is
+    never called `caller_limit`;
+  - **one reason, by fixed precedence.** (1) `unsafe` stop ⟹
     `observed_partial` + `unsafe_early_stop` + `truncated`, `observed_through =
-    None`, outranking every other explanation; `safe` stop with
-    `caller_limit_hit` `⟹` `observed_partial` + `caller_limit` + `truncated`,
-    `observed_through` may be stated — safety prevents `unsafe_early_stop`, it
-    does not grant completeness; `exhausted` with `caller_limit_hit` `⟹`
-    likewise `observed_partial` + `caller_limit` + `truncated`, because visiting
-    every part does not undo the cut; `observed_complete` only when there is no
-    required inventory gap, no unsafe stop, the caller’s limit cut no measured
-    matching record, and the contributions otherwise account for the scope —
-    which keeps `complete ⟹ not truncated`. This provider’s path emits no
-    `window_bound`.
+    None`, `complete_through = None` — outranks everything, because the
+    returned top-N cannot be proven against what was skipped. (2)
+    `source_limit_hit` ⟹ `observed_partial` + `source_limit` + `truncated` —
+    the provider’s own hidden cut is the evidence a caller cannot otherwise
+    see, and `truncated` needs a truncating reason. (3) `caller_limit_hit` ⟹
+    `observed_partial` + `caller_limit` + `truncated`, for a `safe` and an
+    `exhausted` stop alike; safety prevents `unsafe_early_stop`, it does not
+    grant completeness. (4) a required inventory gap ⟹ `observed_partial` +
+    `partial_inventory`, `truncated = False`, `complete_through = None` —
+    structural uncertainty, not truncation. (5) the source declares a moment
+    newer than `observed_through` that lies inside the requested upper bound
+    (`requested_end is None or source_newest <= requested_end`) ⟹
+    `observed_partial` + `timestamp_mismatch`, `truncated = False`. (6)
+    otherwise `observed_complete`, `truncated = False`, reason `empty_window`
+    when the public count is zero and `full_window_observed` when it is not —
+    the trustworthy-empty distinction. This path emits no `window_bound`;
+  - **freshness is computed independently of the reason.** Either moment
+    absent ⟹ `unknown`; `source_newest <= observed_through` ⟹
+    `evidence_consistent`; `source_newest > observed_through` ⟹
+    `potentially_stale` — including when the newer moment lies past a bounded
+    `requested_end`, where it is stale and still structurally complete. No
+    clock, no tolerance, no age constant;
+  - **boundaries.** `observed_through` is the maximum non-`None` contribution
+    point, or `None`; an unsafe stop overrides it to `None`. On a partial read
+    `complete_through` is the minimum non-`None` contribution complete point,
+    or `None`, and is `None` outright for an inventory gap or an unsafe stop.
+    On a complete read `complete_through = observed_through`, as invariant 9
+    requires; a minimum of provider-local values may never produce a complete
+    coverage whose two points differ;
+  - **requested bounds and `source_newest` are the caller’s and the source’s
+    generic float moments** and are carried exactly — never rounded, floored or
+    cast. `Contribution` moments, `MessageRecord.timestamp` and shard bounds
+    remain integer provider evidence.
+- **The message projection is exact, and guesses nothing.** `id` and
+  `sequence` are the parser’s `local_id`; `conversation_id` is the supplied
+  generic identifier; `sender` is `sender_name`, which the parser has already
+  fallen back to the identifier for; `visible_time` is `None`; `text` is
+  `content`; `kind` is `message_type`; `confidence` is `1.0`;
+  `first_observed_at` is `timestamp`; `source` is the database source name.
+  **`ownership` is `"unknown"`**: the provider holds no source-authored self
+  identity, and ownership is never inferred from a name, an identifier’s
+  shape, room membership or conversation identity. No new hash or
+  message-identity construction is introduced; `local_id` is not claimed
+  globally unique, and `conversation_id` already travels separately.
 - **No shard name, path, table name, column name, digest or schema identifier
   escapes.** The provider's vocabulary ends at this boundary.
+- **`unresolved_identities` counts ambiguity events, not distinct
+  identifiers.** Identity resolution is per call; a read that resolves several
+  rooms sums the per-call counts, so one identifier ambiguous in two rooms
+  contributes two. No identifier is retained merely to deduplicate a
+  diagnostic, which is what keeps the count-only privacy contract. Every
+  diagnostic field is a non-negative `int`.
 - **Diagnostics carry aggregate counts and category tallies only** — how many
   parts were readable, unknown, unavailable; how many identities went unresolved
   — and never a raw identifier, a name, a path, or message content. Diagnostics
   are a provider-side surface and are not part of `ReadResult`.
+
+**Correction, 2026-09-19 — the collapse contract, sealed before it is
+written.** Four things were incomplete or stale. Requested bounds and
+`source_newest` still carried integer annotations although the generic moment
+fields have been `float | None` since before P9; they are the caller’s, not the
+database’s, and keep their precision. Sentinel evidence exists before the
+public trim, so the internal candidate count and the public `item_count`
+cannot be one field. `Contribution.truncated` had no reason assigned, and
+`truncated = True` requires a truncating one: it is the existing
+`source_limit`. And this is the single provider→generic projection point, so
+the message mapping and `unknown` ownership are written down rather than left
+to be inferred. No generic type, status or reason changes; `window_bound` is
+untouched.
 
 ### 8.6 Deferred: FTS, cache, search optimisation
 
@@ -1141,7 +1205,8 @@ exception message.
    `local_type`, a shard name, a table name, a column name or a file name. T-15
    asserts this by scan.
 2. **No content-bearing coverage fields.** Every `ReadCoverage` field is a token,
-   a count, a boolean or a Unix-seconds integer. There is no field into which a
+   a count, a boolean or a Unix-seconds number — a float, which a whole-second
+   source satisfies without conversion. There is no field into which a
    name, a path or a message body could be placed.
 3. **No acquisition, cryptography or key material.** No key, salt, passphrase,
    cipher parameter, `PRAGMA key`, SQLCipher call, decryption, process-memory

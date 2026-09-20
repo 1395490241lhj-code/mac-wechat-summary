@@ -168,6 +168,36 @@ def test_window_overlap_is_inclusive_at_both_edges():
         {"starts_at_end", "just_after"}
 
 
+
+def test_a_fractional_requested_bound_is_compared_exactly_never_rounded():
+    """Requested bounds come from the caller, not the database.
+
+    Shard bounds are integer provider evidence; the request is the generic
+    float moment and keeps its precision. A floor to 100 would visit the
+    first shard, and a ceiling to 100 on the upper side would visit the last.
+    """
+    inv = inventory(readable("at_100", lo=100, hi=100), readable("to_101", lo=100, hi=101))
+    plan = ROUTER.plan(inv, requested_start=100.25, requested_end=None)
+    assert plan.visit == ("to_101",)
+    assert causes(plan) == {"at_100": EXCLUDED_OUT_OF_WINDOW}     # 100 < 100.25
+
+    inv = inventory(readable("at_99", lo=99, hi=99), readable("from_100", lo=100, hi=101))
+    plan = ROUTER.plan(inv, requested_start=None, requested_end=99.75)
+    assert plan.visit == ("at_99",)
+    assert causes(plan) == {"from_100": EXCLUDED_OUT_OF_WINDOW}   # 100 > 99.75
+
+    with pytest.raises(ValueError):
+        ROUTER.plan(inv, requested_start=100.5, requested_end=100.25)
+    ROUTER.plan(inv, requested_start=100.25, requested_end=100.25)
+
+
+def test_the_requested_bounds_are_declared_as_the_generic_float_moments():
+    import typing
+    hints = typing.get_type_hints(ShardRouter.plan)
+    assert hints["requested_start"] == (float | None)
+    assert hints["requested_end"] == (float | None)
+
+
 def test_unestablished_bounds_are_visited_first():
     inv = inventory(readable("bounded", lo=1, hi=10**9), readable("open_b"), readable("open_a"))
     plan = ROUTER.plan(inv, requested_start=None, requested_end=None)
