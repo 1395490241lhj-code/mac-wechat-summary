@@ -579,6 +579,52 @@ def test_a_fallback_answer_carries_the_visual_coverage_verbatim(tmp_path):
     assert result.coverage == _Visual.empty_coverage()
 
 
+def test_the_adapter_preserves_the_real_needs_bootstrap_classification(tmp_path):
+    """The real coordinator's classification survives the adapter (no catch-all).
+
+    A recorded decision whose key material is absent is needs_bootstrap, not a
+    generic database failure, and the distinction must reach the caller.
+    """
+    home = tmp_path / "home"
+    message = tmp_path / "prepared.sqlite"
+    _message_database(message)
+    _write_manifest(home, message)
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(None), decryptor=_Decryptor())
+
+    report = source.status()
+    assert report.state == "needs_bootstrap"
+    assert report.ready is False
+
+
+def test_the_adapter_preserves_needs_bootstrap_from_rejected_key_material(tmp_path):
+    """Rejected key material is also needs_bootstrap, not a generic failure.
+
+    The key is present and wrong, so the classification comes from the decrypt
+    stage rather than from the key lookup; both must reach the caller intact.
+    """
+    home = tmp_path / "home"
+    message = tmp_path / "prepared.sqlite"
+    _message_database(message)
+    _write_manifest(home, message)
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_RejectingDecryptor())
+
+    report = source.status()
+    assert report.state == "needs_bootstrap"
+    assert report.ready is False
+
+
+def test_the_adapter_preserves_another_real_non_ready_classification(tmp_path):
+    """A recorded source that vanished is source_busy, not database_unavailable."""
+    home = tmp_path / "home"
+    _write_manifest(home, tmp_path / "missing.sqlite")
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    assert source.status().state == "source_busy"
+
+
 # --- lifetime -----------------------------------------------------------------
 
 

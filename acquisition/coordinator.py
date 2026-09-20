@@ -135,19 +135,30 @@ class AcquisitionCoordinator:
             yield _outcome(AcquisitionState.DISABLED)
             return
         sources = source_set.ordered_sources()
+        secrets_by_descriptor: dict = {}
+        missing = False
+        failure = None
         try:
-            secrets_by_descriptor = {}
-            missing = False
             for source in sources:
                 if source.key_descriptor not in secrets_by_descriptor:
                     secret = self._key_store.load(source.key_descriptor)
                     secrets_by_descriptor[source.key_descriptor] = secret
                     missing = missing or secret is None
-            if missing:
-                yield _outcome(AcquisitionState.NEEDS_BOOTSTRAP)
-                return
         except Exception:
-            yield _outcome(AcquisitionState.INTERNAL_ERROR)
+            failure = AcquisitionState.INTERNAL_ERROR
+        # The classification is decided before anything is yielded. Yielding
+        # from inside the except block above is what made a consumer exception
+        # thrown back into the generator look like a second acquisition outcome:
+        # it was caught as an acquisition failure, the generator yielded again,
+        # and Python raised RuntimeError("generator didn't stop after throw()"),
+        # destroying the real classification. An exception raised by the
+        # consumer once control has crossed the yield is the consumer's and
+        # propagates untouched.
+        if failure is not None:
+            yield _outcome(failure)
+            return
+        if missing:
+            yield _outcome(AcquisitionState.NEEDS_BOOTSTRAP)
             return
 
         lease = None
