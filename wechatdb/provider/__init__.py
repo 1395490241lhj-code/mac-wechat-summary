@@ -69,8 +69,12 @@ from .identity import (
     NameCandidate,
     ResolvedIdentities,
 )
+from .result import Contribution, ProviderDiagnostics, ProviderResult
 
 __all__ = [
+    "Contribution",
+    "ProviderDiagnostics",
+    "ProviderResult",
     "NAME_CONTACT_NICKNAME",
     "NAME_CONTACT_REMARK",
     "NAME_PRECEDENCE",
