@@ -284,10 +284,15 @@ def test_package_initializer_only_reexports_the_contract_api():
     tree = ast.parse(PACKAGE.read_text(encoding="utf-8"))
     imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
 
-    assert len(imports) == 1 and imports[0].level == 1 and imports[0].module == "contracts"
+    assert len(imports) == 2
+    assert [(node.level, node.module) for node in imports] == [
+        (1, "contracts"), (1, "keystore")]
     assert {alias.name for alias in imports[0].names} == {
         "AcquisitionOutcome", "AcquisitionReadiness", "AcquisitionState",
         "OpaqueHandle", "PreparedSource",
+    }
+    assert {alias.name for alias in imports[1].names} == {
+        "KeyDescriptor", "KeyStore", "KeyStoreError", "SecretBytes",
     }
 
 

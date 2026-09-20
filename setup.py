@@ -34,6 +34,7 @@ setup(
         "pycryptodome>=3.20.0",
         "zstandard>=0.22.0",
         "pyobjc-framework-Cocoa>=10.0",
+        "pyobjc-framework-Security>=10.0",
         "anthropic>=0.40.0",
         "openai>=1.50.0",
         "requests>=2.31.0",

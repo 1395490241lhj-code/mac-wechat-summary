@@ -7,6 +7,7 @@ from .contracts import (
     OpaqueHandle,
     PreparedSource,
 )
+from .keystore import KeyDescriptor, KeyStore, KeyStoreError, SecretBytes
 
 __all__ = [
     "AcquisitionOutcome",
@@ -14,4 +15,8 @@ __all__ = [
     "AcquisitionState",
     "OpaqueHandle",
     "PreparedSource",
+    "KeyDescriptor",
+    "KeyStore",
+    "KeyStoreError",
+    "SecretBytes",
 ]
