@@ -107,12 +107,19 @@ class _Decryptor:
 class _ChangedSurface:
     """Synthetic: decrypts fine, but the conversation table is a changed generation."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, only: str | None = None) -> None:
         self._roles = _roles_by_salt(root)
+        self._names = {
+            path.read_bytes()[:16]: path.name for path in sorted(root.rglob("*.db"))
+        }
+        self._only = only
 
     def decrypt(self, source: Path, output: Path, secret: SecretBytes) -> None:
-        role = self._roles.get(source.read_bytes()[:16], "message")
-        if role != "message":
+        salt = source.read_bytes()[:16]
+        role = self._roles.get(salt, "message")
+        changed = role == "message" and (
+            self._only is None or self._names.get(salt) == self._only)
+        if not changed:
             _plaintext(output, role)
             return
         digest = hashlib.md5(CONVERSATION.encode("utf-8")).hexdigest()
@@ -128,11 +135,14 @@ class _ChangedSurface:
 class _Store:
     """An in-memory stand-in for the durable KeyStore."""
 
-    def __init__(self, *, fail_put: bool = False) -> None:
+    def __init__(self, *, fail_put: bool = False, fail_load: bool = False) -> None:
         self.items: dict[str, SecretBytes] = {}
         self._fail_put = fail_put
+        self._fail_load = fail_load
 
     def load(self, descriptor: KeyDescriptor) -> SecretBytes | None:
+        if self._fail_load:
+            raise OSError("synthetic durable read failure")
         return self.items.get(descriptor.account_id)
 
     def put(self, descriptor: KeyDescriptor, secret: SecretBytes) -> None:
@@ -315,8 +325,51 @@ def test_a_publication_failure_compensates_the_key_entries(tmp_path):
 
     result, store, _ = _bootstrap(tmp_path, root, manifest=manifest)
 
-    assert result.state == boot.BOOTSTRAP_DURABLE_WRITE_FAILED
+    # The record could not be restored (a directory cannot be replaced or
+    # removed), so the rollback is reported as incomplete rather than as a
+    # clean refusal. The key entries are still compensated.
+    assert result.state == boot.BOOTSTRAP_ROLLBACK_INCOMPLETE
     assert store.items == {}
+
+
+def test_an_identity_surface_the_catalog_refuses_is_classified(tmp_path):
+    """A session database without SessionTable is a fixed state, not a ValueError."""
+    root = _source_root(tmp_path / "root")
+
+    class _NoSessionTable(_Decryptor):
+        def decrypt(self, source, output, secret):
+            if self._roles.get(source.read_bytes()[:16]) == "session":
+                connection = sqlite3.connect(output)
+                connection.execute("CREATE TABLE unrelated (value INTEGER)")
+                connection.commit()
+                connection.close()
+                return
+            super().decrypt(source, output, secret)
+
+    result, store, manifest = _bootstrap(
+        tmp_path, root, decryptor=_NoSessionTable(root))
+
+    assert result.state == boot.BOOTSTRAP_UNSUPPORTED_GENERATION
+    assert store.items == {} and not manifest.exists()
+
+
+def test_a_durable_read_failure_before_publication_is_classified(tmp_path):
+    """A key store that cannot be read is a fixed state, not a KeyStoreError."""
+    result, store, manifest = _bootstrap(
+        tmp_path, _source_root(tmp_path / "root"), store=_Store(fail_load=True))
+
+    assert result.state == boot.BOOTSTRAP_DURABLE_WRITE_FAILED
+    assert not manifest.exists()
+
+
+def test_one_changed_message_part_is_enough_to_refuse_the_generation(tmp_path):
+    """The envelope is applied per part, not only to the first one visited."""
+    root = _source_root(tmp_path / "root", parts=3)
+    result, store, manifest = _bootstrap(
+        tmp_path, root, decryptor=_ChangedSurface(root, only="message_1.db"))
+
+    assert result.state == boot.BOOTSTRAP_UNSUPPORTED_GENERATION
+    assert store.items == {} and not manifest.exists()
 
 
 def test_a_failed_post_publication_verification_restores_the_previous_state(tmp_path):
@@ -401,16 +454,22 @@ def test_visual_is_unaffected_by_a_failed_bootstrap(tmp_path, monkeypatch):
 
 def test_the_cross_layer_exception_is_exactly_two_files():
     offenders = []
-    for path in (ROOT / "bridge").glob("*.py"):
-        roots = {
-            (node.module or "").split(".")[0]
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
-            if isinstance(node, ast.ImportFrom)
-        }
+    for path in (ROOT / "bridge").rglob("*.py"):
+        if "__pycache__" in path.parts or "tests" in path.parts:
+            continue
+        roots = set()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                roots.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                roots.add(node.module.split(".")[0])
         if "wechatdb" in roots or "acquisition" in roots:
-            offenders.append(path.name)
+            offenders.append(path.relative_to(ROOT / "bridge").as_posix())
 
-    assert sorted(offenders) == ["acquired_database_source.py", "database_bootstrap.py"]
+    assert sorted(offenders) == [
+        "acquired_database_source.py",
+        "database_bootstrap.py",
+    ]
 
 
 def test_bootstrap_never_uses_v1_discovery_or_extraction():

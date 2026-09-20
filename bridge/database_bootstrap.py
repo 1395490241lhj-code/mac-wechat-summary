@@ -99,6 +99,11 @@ BOOTSTRAP_UNSUPPORTED_GENERATION: str = "unsupported_generation"
 BOOTSTRAP_DURABLE_WRITE_FAILED: str = "durable_write_failed"
 BOOTSTRAP_VERIFICATION_FAILED: str = "verification_failed"
 
+#: The candidate was refused and the previous durable state could not be fully
+#: restored. Distinct from the refusal itself because the operator has to know
+#: the difference between "nothing changed" and "something must be re-run".
+BOOTSTRAP_ROLLBACK_INCOMPLETE: str = "rollback_incomplete"
+
 BOOTSTRAP_STATES: frozenset[str] = frozenset({
     BOOTSTRAP_READY,
     BOOTSTRAP_SOURCE_MISSING,
@@ -109,6 +114,7 @@ BOOTSTRAP_STATES: frozenset[str] = frozenset({
     BOOTSTRAP_UNSUPPORTED_GENERATION,
     BOOTSTRAP_DURABLE_WRITE_FAILED,
     BOOTSTRAP_VERIFICATION_FAILED,
+    BOOTSTRAP_ROLLBACK_INCOMPLETE,
 })
 
 #: How an acquisition outcome becomes a Bootstrap state. Every acquisition state
@@ -270,29 +276,38 @@ def _validate(
             return _ACQUISITION_STATES[outcome.readiness.state]
         prepared = outcome.prepared_source
         assert prepared is not None
-        entries = tuple(
-            ShardEntry("message_{}.db".format(index), handle.value)
-            for index, handle in enumerate(prepared.message_handles)
-        )
-        opener = ReadOnlySqliteOpener()
-        catalog = IdentityCatalog.build(
-            opener=opener,
-            session=(
-                ShardEntry("session.db", prepared.conversation_identity_handle.value)
-                if prepared.conversation_identity_handle else None
-            ),
-            contact=(
-                ShardEntry("contact.db", prepared.display_identity_handle.value)
-                if prepared.display_identity_handle else None
-            ),
-            message_parts=entries,
-        )
-        provider = ShardedMessageProvider(
-            ExplicitShardLocator(entries), identities=catalog.resolver()
-        )
+        # Both the message surface and the identity surface are part of what
+        # ordinary runtime requires, so both are exercised here -- and every
+        # refusal is classified. Letting a raw ValueError reach the operator
+        # would be neither a fixed state nor content-free: the provider and the
+        # identity catalog refuse a malformed surface with ValueError by
+        # design, so that class of refusal is the source's generation, not an
+        # internal fault.
         try:
+            entries = tuple(
+                ShardEntry("message_{}.db".format(index), handle.value)
+                for index, handle in enumerate(prepared.message_handles)
+            )
+            opener = ReadOnlySqliteOpener()
+            catalog = IdentityCatalog.build(
+                opener=opener,
+                session=(
+                    ShardEntry("session.db", prepared.conversation_identity_handle.value)
+                    if prepared.conversation_identity_handle else None
+                ),
+                contact=(
+                    ShardEntry("contact.db", prepared.display_identity_handle.value)
+                    if prepared.display_identity_handle else None
+                ),
+                message_parts=entries,
+            )
+            provider = ShardedMessageProvider(
+                ExplicitShardLocator(entries), identities=catalog.resolver()
+            )
             provider.list_conversations(1)
         except UnsupportedGeneration:
+            return BOOTSTRAP_UNSUPPORTED_GENERATION
+        except ValueError:
             return BOOTSTRAP_UNSUPPORTED_GENERATION
         except Exception:
             return BOOTSTRAP_VERIFICATION_FAILED
@@ -343,8 +358,15 @@ def _publish(
     descriptors = tuple(
         source.key_descriptor for source in source_set.ordered_sources()
     )
-    previous = {descriptor: key_store.load(descriptor) for descriptor in descriptors}
-    existing_record = manifest_path.read_bytes() if manifest_path.is_file() else None
+    try:
+        previous = {descriptor: key_store.load(descriptor) for descriptor in descriptors}
+        existing_record = manifest_path.read_bytes() if manifest_path.is_file() else None
+    except Exception:
+        # Nothing has been written yet, so there is nothing to compensate. The
+        # durable stores could not be read, and that is a fixed state rather
+        # than an exception whose text carries a key-store or filesystem
+        # message.
+        return BOOTSTRAP_DURABLE_WRITE_FAILED
     written: list[KeyDescriptor] = []
     failure: str | None = None
     try:
@@ -358,6 +380,20 @@ def _publish(
         failure = BOOTSTRAP_DURABLE_WRITE_FAILED
     if failure is None:
         return None
+    # Restore the activation pointer before the key entries it points at. If
+    # the record cannot be restored, the candidate record and the candidate
+    # keys are still a consistent pair, so the failure is reported rather than
+    # hidden; and if any part of the rollback fails, the operator is told the
+    # rollback is incomplete instead of being told the previous state came
+    # back.
+    incomplete = False
+    try:
+        if existing_record is None:
+            manifest_path.unlink(missing_ok=True)
+        else:
+            _write_record(manifest_path, json.loads(existing_record.decode("utf-8")))
+    except Exception:
+        incomplete = True
     for descriptor in written:
         prior = previous[descriptor]
         try:
@@ -366,15 +402,8 @@ def _publish(
             else:
                 key_store.put(descriptor, prior)
         except Exception:
-            continue
-    try:
-        if existing_record is None:
-            manifest_path.unlink(missing_ok=True)
-        else:
-            _write_record(manifest_path, json.loads(existing_record.decode("utf-8")))
-    except Exception:
-        pass
-    return failure
+            incomplete = True
+    return BOOTSTRAP_ROLLBACK_INCOMPLETE if incomplete else failure
 
 
 def bootstrap(

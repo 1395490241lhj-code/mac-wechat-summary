@@ -314,11 +314,14 @@ def test_product_selection_stays_visual_and_only_owned_adapter_imports_acquisiti
     monkeypatch.delenv(store_access.MESSAGE_SOURCE_ENV, raising=False)
 
     assert store_access.selected_source_name() == message_source.SOURCE_VISUAL
-    importers = [
-        path.name for path in (ROOT / "bridge").glob("*.py")
-        if "acquisition" in _imported_roots(path)
-    ]
-    assert sorted(importers) == [
+    importers = sorted(
+        path.relative_to(ROOT / "bridge").as_posix()
+        for path in (ROOT / "bridge").rglob("*.py")
+        if "__pycache__" not in path.parts
+        and "tests" not in path.parts
+        and "acquisition" in _imported_roots(path)
+    )
+    assert importers == [
         "acquired_database_source.py",
         "database_bootstrap.py",
     ]
