@@ -882,3 +882,101 @@ tooling and the raw evidence JSONs remain outside the repository under
 `/tmp/mws-d005-5b1-retry`: the enumerator, the per-object verifier, the transform
 manifest, the signing log and the Phase 1 diagnostics. The only repository change
 is this document.
+
+---
+
+# Capsule 5B.2 — File Provider document-group neutralisation (2026-09-20)
+
+**Result: CLONE PRE-LAUNCH METADATA VERIFIED.**
+
+Starting checkpoint `25b99ec`, pushed to `origin/feature/hermes-validation-isolation`
+before this work (0/0). The Capsule 5B.1 signing architecture and the approved
+13-component identity design are unchanged. Nothing was launched; no Frida was
+installed or run; no process was attached; no DB or key material was touched; no
+Bootstrap production code changed.
+
+## The one runtime reference, and its treatment
+
+`WeChatFileProviderExtension.appex` declared
+`NSExtension.NSExtensionFileProviderDocumentGroup = 5A4RE8SF68.com.tencent.xinWeChat`.
+The value is now:
+
+    org.mac-wechat-summary.bootstrap-clone.5b1retry.main.wechatfileproviderextension.docgroup
+
+The rest of the `NSExtension` block is unchanged:
+`NSExtensionPointIdentifier = com.apple.fileprovider-nonui`,
+`NSExtensionPrincipalClass = FileProviderExtension`,
+`NSExtensionFileProviderSupportsEnumeration = true`. No `application-groups`
+entitlement was added; the extension's entitlements remain exactly
+`com.apple.security.app-sandbox` and
+`com.apple.security.files.user-selected.read-write`.
+
+## Classification of the three `TeamIdentifier` values
+
+| file | value | classification | treatment |
+|---|---|---|---|
+| outer app | `5A4RE8SF68.` | informational / application-owned metadata | unchanged |
+| `WeChatMacShare.appex` | `5A4RE8SF68.` | informational / application-owned metadata | unchanged |
+| `WeChatFileProviderExtension.appex` | `5A4RE8SF68.` | informational / application-owned metadata | unchanged |
+
+`TeamIdentifier` is not an Apple `Info.plist` key: team identity is read from the
+code signature, or from `com.apple.developer.team-identifier` in signed
+entitlements. Nothing in container, app-group, keychain-group or sandbox resolution
+consults an `Info.plist` key of that name, and all three values are identical to the
+installed app, so there is no evidence any of them grants or selects production
+access. Left unchanged, as directed; no broad string replacement was performed.
+
+## Scope of the transform
+
+Every `Info.plist` in the clone was compared against its installed counterpart: 35
+of 48 are byte-identical, and the 13 that differ contain exactly **14** changed
+keys — the 13 approved `CFBundleIdentifier` values plus the single document-group
+value above. Nothing else moved.
+
+## Rebuild and seal
+
+The disposable clone was recreated from `/Applications/WeChat.app`; the approved
+identity map and entitlement reduction were applied unchanged, plus the single
+metadata edit. The no-pruning enumeration still resolves to **132** signable
+objects (48 bundles — root app plus 47 nested — and 85 raw Mach-O), so the metadata
+edit does not change the object graph. The proven deepest-first containment closure
+re-signed the same **15** objects, all `exit 0`.
+
+## Gates
+
+| # | Gate | Result |
+|---|---|---|
+| 1 | 132-object enumeration complete | PASS (132: 47 nested bundles + 85 raw Mach-O) |
+| 2 | every signable object strict | PASS 132/132 |
+| 3 | Chromium framework deep+strict | PASS exit 0 |
+| 4 | `WeChatAppEx.app` deep+strict | PASS exit 0 |
+| 5 | outer clone deep+strict | PASS exit 0 |
+| 6 | zero production application identifiers | PASS (0 `application-identifier` entitlements; 0 production ids on identity-graph components) |
+| 7 | zero app-group / keychain-group entitlements | PASS (0) |
+| 8 | zero production File Provider document-group references | PASS (0) |
+| 9 | production app unchanged | PASS |
+| 10 | nothing launched | PASS |
+
+## Independent residual search
+
+Re-run after signing, independently of the transform manifest. The production group
+string `5A4RE8SF68.com.tencent.xinWeChat` now appears in **0 files** anywhere in the
+clone. In the installed app it appeared in four places — three binaries, inside
+their code-signature entitlement blobs, and the extension `Info.plist` — and all
+four are gone: re-signing with the reduced entitlement set removes the
+signature-blob occurrences, and the metadata edit removes the plist occurrence.
+
+## Production app
+
+`Contents/MacOS/WeChat` sha256 `b21aeae5c3e4d570…` and
+`Contents/Resources/wechat.dylib` sha256 `2af9442379888ee4…` are byte-identical
+before and after; `codesign --verify --deep --strict /Applications/WeChat.app` is
+still exit 0. The operator's ordinary WeChat session remained the only WeChat
+process set running, all of it launched from `/Applications/WeChat.app`; no clone
+or component process exists.
+
+## Disposable artifacts
+
+Clone trees removed after evidence collection; the tooling and evidence JSONs remain
+under `/tmp/mws-d005-5b1-retry` outside the repository. The only repository change
+is this document.
