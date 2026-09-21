@@ -524,3 +524,90 @@ or, where an identifier is structurally required, records that explicitly and
 scopes the clone to a subset that can be isolated. Only then is a transform and a
 network-isolation probe meaningful.
 
+---
+
+# Capsule 5A — minimal executable identity graph (2026-09-20)
+
+**Result: MINIMAL CLONE GRAPH ISOLATABLE.**
+
+Static analysis only. No clone was created, copied, signed or launched; no Frida,
+no attach, no memory, DB or key access; no Bootstrap production code changed.
+
+## Observed fact — the identity surface is much smaller than 41
+
+Of **48 nested bundles**, only **14 are launchable**; the other **34 are
+resource-only** and grant nothing, so a `com.tencent.*` identifier on one of them is
+not an isolation boundary.
+
+Of the 14 launchable: **13 carry production Tencent identities**, **11 are
+sandboxed**, **only 1 carries `com.apple.application-identifier`** (the main app),
+**3 carry `application-groups`**, and **3 carry `network.client`**.
+
+| Launchable component | Identity bits |
+|---|---|
+| `com.tencent.xinWeChat` (main) | sandbox, appid, groups, net, mach |
+| `com.tencent.flue.WeChatAppEx` (Chromium shell) | sandbox |
+| `com.tencent.flue.WeApp`, `.helper` x2, `.helper.plugin`, `.helper.renderer` | sandbox |
+| `com.tencent.xinWeChat.WeChatHelper` | sandbox |
+| `com.tencent.xinWeChat.xplayer` | sandbox |
+| `com.tencent.xinWeChat.WeChatMacShare` | sandbox, groups, net |
+| `com.tencent.xinWeChat.WeChatFileProviderExtension` | sandbox, groups, net |
+| `com.tencent.xWechat.DebugHelper` (XPC) | none |
+| `com.tencent.xinWeChat.InstallerLauncher` (XPC) | none |
+| `org.sparkle-project.Sparkle.Updater` | none -- third party, not Tencent |
+
+## Observed fact — which components can actually reach production containers
+
+Production containers exist for **three** of these identities:
+
+- `~/Library/Containers/com.tencent.xinWeChat`
+- `~/Library/Containers/com.tencent.xinWeChat.WeChatMacShare`
+- `~/Library/Containers/com.tencent.xinWeChat.WeChatFileProviderExtension`
+
+plus **one** production group container under `5A4RE8SF68.*`. The other ten
+launchable components have no existing container, so keeping their identifiers
+would create clone-owned containers rather than reach production ones.
+
+## Inference — answers to the critical questions
+
+1. **How many of the 41 are launchable?** 13 of 14 launchable bundles; 34 of the
+   41 are resource-only.
+2. **How many possess sandbox/container entitlements?** 11 are sandboxed; only the
+   main app holds `application-identifier`; 3 hold `application-groups`.
+3. **Which identities are runtime-addressed by another executable?** The Chromium
+   helper identifiers are addressed by the Chromium framework, and the two XPC
+   service identifiers by their parent; both need their references carried in the
+   transform. Resource-bundle identifiers are not runtime-addressed.
+4. **Mach services:** the installed app carries
+   `temporary-exception.mach-lookup.global-name` (lookup, not registration) on the main
+   executable only. It must be dropped, and any lookup the clone performs will
+   then fail closed, which is the desired direction.
+5. **Is any production identity inherently required?** Not for container
+   isolation. The three container-bearing components plus the group entitlement
+   are the whole production-access surface; nothing in the graph requires
+   reaching the installed WeChat environment to launch.
+6. **Can the minimal graph be isolated by coordinated renaming?** Yes, without
+   touching the 34 resource-only identifiers.
+
+## Minimal transform set
+
+| Component | Old identity | Proposed new identity | References to change | Entitlements |
+|---|---|---|---|---|
+| main app | com.tencent.xinWeChat | org.mac-wechat-summary.bootstrap-clone.NONCE | Info.plist only | drop appid, groups, mach, net; keep sandbox |
+| Chromium shell | com.tencent.flue.WeChatAppEx | clone.NONCE.appex | Chromium framework helper ids | keep sandbox; drop net |
+| Chromium helpers x5 | com.tencent.flue.* | clone.NONCE.helper* | referenced by the shell | keep sandbox |
+| WeChatHelper | com.tencent.xinWeChat.WeChatHelper | clone.NONCE.helper | main app launch reference | keep sandbox |
+| xplayer | com.tencent.xinWeChat.xplayer | clone.NONCE.xplayer | main app launch reference | keep sandbox |
+| WeChatMacShare | com.tencent.xinWeChat.WeChatMacShare | clone.NONCE.share | extension registration | drop groups, net |
+| FileProviderExtension | com.tencent.xinWeChat.WeChatFileProviderExtension | clone.NONCE.fileprovider | extension registration | drop groups, net |
+| DebugHelper XPC | com.tencent.xWechat.DebugHelper | clone.NONCE.debughelper | parent XPC reference | none |
+| InstallerLauncher XPC | com.tencent.xinWeChat.InstallerLauncher | clone.NONCE.installer | parent XPC reference | none |
+| Sparkle Updater | org.sparkle-project.Sparkle.Updater | unchanged | -- | third party; not production WeChat |
+
+## Unresolved question
+
+Whether the Chromium framework tolerates renamed helper bundle identifiers is not
+provable by inspection at this level; it is the one reference in the set that
+needs the transform to carry it, and the first launch is what confirms it. The
+network gate from Capsule 4 still applies to that launch.
+
