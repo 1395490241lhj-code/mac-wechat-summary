@@ -2,6 +2,12 @@
 
 **Status: design pass only. Nothing was run, captured or published.**
 
+**Superseded 2026-09-21 — see Capsule 5C–5C.4 at the end of this document.** The
+designed Frida route was not adopted, and the clone-launch path it depended on is
+`REJECTED FOR PRODUCTION ACQUISITION`. The "Decision: B. FEASIBLE WITH CHANGES"
+and "Smallest next implementation capsule" sections below are historical design
+records, not live plans.
+
 This records a **newly designed route**, not a recovered one. No previously
 proven project Frida path exists: the only real acquisition in this project's
 history was an operator-run third-party tool under D-030, which lapsed and is
@@ -980,3 +986,84 @@ or component process exists.
 Clone trees removed after evidence collection; the tooling and evidence JSONs remain
 under `/tmp/mws-d005-5b1-retry` outside the repository. The only repository change
 is this document.
+
+---
+
+# Capsule 5C–5C.4 — root cause sealed; clone-launch route rejected (2026-09-21)
+
+**Result: the clone-launch path is `REJECTED FOR PRODUCTION ACQUISITION`.**
+
+Read-only attribution only. No entitlement, TeamIdentifier, plist, binary or
+signature was changed; no memory was patched; no debugger altered execution; no
+code was injected; no database, Keychain, message or credential material was read.
+
+## Why the route is closed
+
+Capsule 5 (below) transformed an isolated clone, launched it, and the clone
+aborted at dyld. Capsules 5A–5B.2 sealed the transform statically. 5C–5C.4 then
+replaced the signing model (5C.2A/5C.2B: one shared real TeamIdentifier, proven
+independently of WeChat), launched the clone repeatedly, recovered the crashing
+thread, and attributed the surviving abort. The route is closed on measured
+evidence: an isolated clone cannot be launched without either weakening a
+security boundary or depending on a capability the sandbox denies.
+
+## Sealed chain
+
+| step | evidence |
+|---|---|
+| direct sandbox denial | `Sandbox: WeChat(<pid>) deny(1) mach-register <prefix>.MachPortRendezvousServer.<pid>` on every clone cold start |
+| exact failed predicate | `kr == KERN_SUCCESS`, where `kr = bootstrap_check_in(bootstrap_port, "<prefix>.MachPortRendezvousServer.<pid>", &port)` |
+| exact static call chain | CHECK site `0x2bc79b8 bl 0x634d68c` (function `0x2bc75a0..0x2bc79bc`; message strings `"Check failed: kr == KERN_SUCCESS"` + `"bootstrap_check_in "`; TU `base/apple/mach_port_rendezvous_mac.cc` by string-pool adjacency) → thunk `0x634d68c` → abort wrapper `0x634d664`/`0x634d4f8` → `logging::LogMessage` at `0x23d6d94` (`bl 0x631b9ac` at `0x23d7258`) → `0x631b9ac` → guard `0x631ba20` → `brk #0` at `0x631badc` |
+| severity | `LOG_FATAL` — the fatal-check path, not ordinary `ERROR` logging |
+| determinism | identical trap PC, LR and full crashing-thread stack in **4/4 clone cold starts**; absent in **2/2 untouched production cold starts** |
+| module | WeChatAppEx Framework, arm64 UUID `4C4C4407-5555-3144-A163-A79BCC6C2ACA`, byte-identical to untouched production build 270100 |
+
+## Why the logging BSS state was not the root cause
+
+`0xb744098`/`0xb7440a0` belong to the logging singleton's own BSS. The image only
+zero-initialises them (`0x631b818 stp q0,q0,[0x88]` inside the lazy-init helper
+`0x631b7e0`), no direct or alias writer for those bytes exists in the image, and
+`0x631badc` is a shared fatal-termination sink whose equality branch jumps
+straight into the trap stub. The trap is the fatal path being taken, not a
+subsystem that failed to initialise; no "failed logging initialisation" claim is
+made.
+
+## Unresolved but non-blocking: the service-name prefix
+
+The runtime prefix carried the production team string `5A4RE8SF68` while the
+clone's `codeSigningTeamID` is `5M5KT5ZG74`, and the framework contains no such
+literal. Its accessor (`0x1ff5d5c`, twin `0x20d8b8c`; string at `0xb807de0`,
+state byte `0xb807df8`, default literal `"org.chromium.Chromium"`) and a
+setter-shaped store (`0x316e054`, state byte set at `0x316e064`) were located, but
+the value's origin — Info.plist `TeamIdentifier` metadata versus
+`libwxld.dylib`'s in-code literal — is **not established**. This is deliberately
+not load-bearing: the failed predicate is the registration call itself, whatever
+the name's origin.
+
+## Architectural consequence
+
+Accepted boundary for acquisition:
+
+    untouched production WeChat
+      → user-authorized local filesystem access
+      → read-only acquisition/snapshot
+      → Reader contract
+      → parser
+      → higher-level summary pipeline
+
+New standing invariant: **acquisition must not require a modified, re-signed,
+re-identified or second-instance WeChat process to launch successfully.**
+The project must therefore not depend on launching a modified WeChat, preserving
+production WeChat sandbox identity in a clone, patching WeChat binaries, adding
+private Mach-service capabilities, bypassing Chromium fatal checks, or runtime
+injection / process-memory extraction. The already-supported mechanism for the
+key remains the explicit operator-supplied secret at a Bootstrap lifecycle event;
+no automatic acquisition route is reopened here.
+
+## Evidence retained
+
+The clone, its preserved copy and the analysis artifacts remain outside the
+repository under `/tmp/mws-d005-5b1-retry`, `/tmp/mws-d005-5c1`,
+`/tmp/mws-d005-5c3-evidence` and `/tmp/mws-d005-5c4` (four cold-start log windows,
+seven crash reports, enumeration/signing/verification artifacts). Nothing was
+deleted, and nothing was committed with them.
