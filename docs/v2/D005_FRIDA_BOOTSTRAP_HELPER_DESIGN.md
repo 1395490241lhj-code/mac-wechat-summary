@@ -611,3 +611,93 @@ provable by inspection at this level; it is the one reference in the set that
 needs the transform to carry it, and the first launch is what confirms it. The
 network gate from Capsule 4 still applies to that launch.
 
+---
+
+# Capsule 5B — minimal-graph transform, no launch (2026-09-20)
+
+**Result: gate 11 FAILS. TRANSFORMED CLONE STATICALLY VERIFIED is not claimed.**
+
+Nothing was launched, and the disposable clone was removed after evidence
+collection, as the capsule requires on failure. No Frida, no attach, no memory,
+DB or key access, no Bootstrap production code changed.
+
+## Observed fact — what the transform achieved
+
+The clone was copied into a disposable workspace and the 13 launchable Tencent
+identities were rewritten under `org.mac-wechat-summary.bootstrap-clone.*`:
+
+| Old identity | New identity |
+|---|---|
+| com.tencent.xinWeChat | …clone.main |
+| com.tencent.flue.WeChatAppEx | …clone.shell |
+| com.tencent.flue.WeApp | …clone.shell.WeApp |
+| com.tencent.flue.helper (x2) | …clone.shell.helper |
+| com.tencent.flue.helper.plugin | …clone.shell.helper.plugin |
+| com.tencent.flue.helper.renderer | …clone.shell.helper.renderer |
+| com.tencent.xinWeChat.WeChatHelper | …clone.main.wechathelper |
+| com.tencent.xinWeChat.xplayer | …clone.main.xplayer |
+| com.tencent.xinWeChat.WeChatMacShare | …clone.main.wechatmacshare |
+| com.tencent.xinWeChat.WeChatFileProviderExtension | …clone.main.wechatfileproviderextension |
+| com.tencent.xWechat.DebugHelper | …clone.main.debughelper |
+| com.tencent.xinWeChat.InstallerLauncher | …clone.main.installerlauncher |
+
+Entitlements were reduced per component by dropping
+`com.apple.application-identifier`, `application-groups`, `keychain-access-groups`,
+`network.client`, `network.server` and both `temporary-exception.*` entries, keeping
+`app-sandbox` and the non-container entitlements.
+
+The 34 resource-only bundle identifiers were left untouched, as Capsule 5A
+directed.
+
+## Observed fact — the independent residual search is clean
+
+Re-searching the transformed bundle after signing, independently of the transform
+manifest: **0 residual findings**. No launchable component retains a
+`com.tencent.*` or `5A4RE8SF68.*` identifier, and none retains any dropped
+entitlement.
+
+## Observed fact — recursive verification fails
+
+`codesign --verify --deep --strict` on the transformed clone returns **exit 1**:
+
+    WeChat.app: nested code is modified or invalid
+    In subcomponent: …/WeChat.app/Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework
+
+The whole executable graph was re-signed deepest-first (15 nested code objects,
+all successful) and then the outer bundle (exit 0), so the failing object is the
+Chromium framework's own seal over the helper applications it contains.
+
+## Inference — why, and what it means
+
+Renaming the Chromium helpers necessarily changes their code hashes, so the
+enclosing framework's seal must be recomputed after them; that ordering was
+applied and the framework re-signed successfully, yet the deep verification still
+rejects it. The likely cause is that the Chromium framework seals its nested
+`Frameworks` directory in a way this signing pass does not reproduce exactly —
+for example additional nested code beneath the helper applications that was not
+enumerated as a bundle, or `codesign`'s seal semantics for a framework that
+contains applications.
+
+This is the transform step the capsule anticipated as the risky one. It is a
+signing-mechanics problem, not an isolation problem: the identity and entitlement
+work is complete and the residual search confirms it.
+
+## Stop
+
+Per the capsule: the failing gate is **11 — recursive code-sign verification**,
+at subcomponent `Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework`.
+Isolation was not weakened to make it pass, and the clone was removed.
+
+## Installed app
+
+`Contents/MacOS/WeChat` and `Contents/Resources/wechat.dylib` were hashed before and
+after and are byte-identical.
+
+## Smallest next step
+
+Enumerate *every* nested Mach-O under the Chromium framework — including code
+that carries no bundle identifier — and re-sign in strict depth order, or accept
+that the Chromium shell cannot be re-sealed in place and scope the clone to the
+non-Chromium components, which Capsule 5A showed carry none of the three
+production containers.
+
