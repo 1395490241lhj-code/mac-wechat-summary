@@ -357,3 +357,96 @@ account's *network* session regardless of local container isolation, so local
 container isolation addresses data mutation but not session interaction. That is
 a product decision, not a signing one.
 
+---
+
+# Capsule 4 — clone isolation probe (2026-09-20)
+
+**Result: CLONE ISOLATION PROVEN.**
+
+The WeChat clone was **not** launched, and was not even copied. A minimal probe
+was built first, signed with the proposed identity model, and used to establish
+what macOS actually does. No Frida, no attach, no process memory, no PBKDF
+traffic, no database access.
+
+## Proposed clone identity
+
+- Bundle identifier: a unique non-production value of the form
+  `org.mac-wechat-summary.bootstrap-clone.<nonce>` (the probe used
+  `org.mac-wechat-summary.bootstrap-probe.v1`).
+- Entitlements: `com.apple.security.app-sandbox = true`, plus the two debug keys
+  from Capsule 2 (`get-task-allow`, `disable-library-validation`) when the clone is
+  eventually instrumented. Sandbox retained.
+
+## Entitlement diff (production → clone)
+
+| Entitlement | Installed app | Clone |
+|---|---|---|
+| `com.apple.application-identifier` | 5A4RE8SF68.com.tencent.xinWeChat | **removed** |
+| `com.apple.security.application-groups` | 5A4RE8SF68.com.tencent.xinWeChat | **removed** |
+| `com.apple.security.app-sandbox` | true | **kept** |
+| `temporary-exception.sbpl`, `…mach-lookup.global-name` | present | **removed** |
+| keychain-access-groups | none present | none |
+| debug keys | absent | added only when instrumenting |
+
+Production identities are removed rather than replaced with production-like
+guesses.
+
+## Observed fact — probe evidence
+
+Build, ad-hoc sign and verify:
+
+- `clang` build exit 0; `codesign --force --sign - --options runtime` exit 0;
+  `codesign --verify --strict` exit 0
+- signed entitlements after signing: `['com.apple.security.app-sandbox']` only
+
+Probe output, launched directly as its own helper-owned process:
+
+    bundle_id=org.mac-wechat-summary.bootstrap-probe.v1
+    home=/Users/…/Library/Containers/org.mac-wechat-summary.bootstrap-probe.v1/Data
+    prod_app_access=0
+    prod_group_access=0
+    own_container_writable=1
+
+Production-container access booleans: `~/Library/Containers/com.tencent.xinWeChat` →
+**0 (denied)**; `~/Library/Group Containers/5A4RE8SF68.com.tencent.xinWeChat` →
+**0 (denied)**.
+
+## Inference
+
+The sandbox **does** engage for an ad-hoc signed bundle, and the container is
+keyed by the bundle identifier, so a non-production identifier resolves a fresh
+container. This also retires the Capsule 3 uncertainty in the safe direction: an
+ad-hoc signature does not have to be trusted with a production identity, because
+the identity can simply be replaced. Removing the Tencent application-identifier
+and application-groups entitlements is what denies access to the production
+containers.
+
+## PASS criteria
+
+| # | Criterion | Result |
+|---|---|---|
+| 1 | unique non-production bundle identifier | PASS |
+| 2 | no Tencent production application identifier | PASS |
+| 3 | no Tencent production app-group entitlement | PASS |
+| 4 | no production keychain-access-group entitlement | PASS (none present) |
+| 5 | resolves to a fresh non-production container | PASS |
+| 6 | cannot access either production container | PASS (both denied) |
+| 7 | installed app untouched | PASS (never copied or modified) |
+| 8 | no production WeChat process attached | PASS (none touched) |
+
+## Unresolved question
+
+The probe proves the **identity model**, not the WeChat clone itself. Applying
+the same transformation to the clone — rewriting `CFBundleIdentifier` and dropping
+the Tencent entitlements — still needs its own verification before any launch,
+because the clone carries far more nested code and its own startup behaviour.
+
+## Network gate for the first clone launch
+
+The first WeChat-clone launch must be offline until local-container behaviour is
+independently confirmed: the clone must not be assumed to lack a valid account
+session. The smallest mechanism is to launch it with no outbound path — a
+sandbox profile denying network, or an equivalent per-process restriction —
+rather than relying on the entitlement set alone. Not implemented here; it is a
+prerequisite of the launch capsule.
+
