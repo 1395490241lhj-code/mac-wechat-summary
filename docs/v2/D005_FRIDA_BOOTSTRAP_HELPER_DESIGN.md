@@ -450,3 +450,77 @@ sandbox profile denying network, or an equivalent per-process restriction —
 rather than relying on the entitlement set alone. Not implemented here; it is a
 prerequisite of the launch capsule.
 
+---
+
+# Capsule 5 — clone transform and first launch (2026-09-20)
+
+**Result: CLONE COMPONENT ISOLATION UNPROVEN. The clone was not built, signed or
+launched.**
+
+The capsule's component gate must be cleared before any transform or launch, and
+it cannot be. No clone was created, nothing was launched, no Frida, no attach, no
+memory read, no PBKDF traffic, no database access, and no Bootstrap production
+code changed.
+
+## Observed fact — nested identity audit
+
+The installed bundle contains **48 nested bundles** carrying a `CFBundleIdentifier`.
+**41 of them carry a production Tencent identity**, including:
+
+| Component | Bundle identifier |
+|---|---|
+| main app | `com.tencent.xinWeChat` |
+| Chromium helper app | `com.tencent.flue.WeChatAppEx` |
+| Sparkle XPC service | `com.tencent.xinWeChat.InstallerLauncher` |
+| framework resource bundles | `com.tencent.ConfSDK`, `com.tencent.MultiMedia`, `com.tencent.ProtobufLite`, `com.tencent.wc.mp.andromeda-dylib`, `com.tencent.ilink2`, `com.tencent.ilinkstream`, `com.tencent.xwechat.wcdywrapper`, `com.tencent.owl`, `com.tencent.wechat.roam.migration`, `com.tencent.wechat.roam.server`, `com.tencent.usb` |
+
+`Contents/XPCServices` also exists and holds one entry. The launcher loads
+`libwxld.dylib` through `rpath`, so the clone's own dependency graph is internal to
+the bundle rather than system-provided.
+
+## Inference — why the gate fails
+
+Capsule 4 proved the identity model on a probe with **one** identity. The real
+clone has **41**, and several are not decorative:
+
+- the XPC service identifier is how the parent addresses that service, so
+  rewriting it requires rewriting the parent's reference too;
+- the Chromium helper's identifier is how the Chromium framework launches and
+  addresses its child processes;
+- the framework resource-bundle identifiers are referenced from the frameworks'
+  own code.
+
+The capsule explicitly forbids rewriting nested identifiers blindly when doing so
+could break internal XPC addressing. Proving that all 41 can be rewritten safely,
+and rewriting their cross-references, is a design task in its own right — not a
+mechanical transform — and it cannot be shown correct by inspection at this
+level.
+
+A second, separate concern: the installed app carries
+`temporary-exception.mach-lookup.global-name`, which names global Mach services. If any
+launchable component registers or looks those up, container isolation alone would
+not isolate it. That was not established either.
+
+## Unresolved question
+
+Whether the 41 nested identities can be rewritten while preserving XPC and
+Chromium child-process addressing — and whether any component structurally
+requires its production identity. Both need a dedicated component-graph design.
+
+## Stop
+
+Per the capsule: **CLONE COMPONENT ISOLATION UNPROVEN**, failing component set
+= the 41 nested bundles above, with the exact dependencies named for the XPC
+service and the Chromium helper. Isolation was not weakened to force progress,
+and no transform was attempted.
+
+## Smallest possible design change
+
+A component-graph capsule that, for each of the 41: records its identifier,
+entitlements and designated requirement; classifies it launchable or resource;
+identifies every cross-reference to its identifier from other components; and
+proposes a unique non-production replacement plus the matching reference edits —
+or, where an identifier is structurally required, records that explicitly and
+scopes the clone to a subset that can be isolated. Only then is a transform and a
+network-isolation probe meaningful.
+
