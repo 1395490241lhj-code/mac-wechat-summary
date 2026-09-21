@@ -296,3 +296,64 @@ success is not launch success.
 - Cleanup: the workspace was removed and verified absent; the installed bundle's
   two critical hashes were re-checked and are byte-identical.
 
+---
+
+# Capsule 3 — launch isolation gate (2026-09-20)
+
+**Result: LAUNCH ISOLATION UNPROVEN. Nothing was launched.**
+
+The capsule's hard gate asks whether the re-signed temporary copy could reach the
+user's live production WeChat data. Static evidence says it could, so the launch
+was refused rather than attempted.
+
+## Observed fact
+
+- `CFBundleIdentifier` is `com.tencent.xinWeChat`. The copy keeps it: nothing
+  in the proven re-sign path changes the bundle identity.
+- The signature carries `com.apple.application-identifier` =
+  `5A4RE8SF68.com.tencent.xinWeChat`, `com.apple.security.application-groups` for the
+  same production group, `com.apple.security.app-sandbox = true`, and broad
+  exceptions (`temporary-exception.sbpl`, `temporary-exception.mach-lookup.global-name`).
+  The Capsule 2 strategy preserves all of them.
+- The production containers exist: `~/Library/Containers/com.tencent.xinWeChat` and
+  `~/Library/Group Containers/5A4RE8SF68.com.tencent.xinWeChat`. Three containers
+  resolve to this bundle identifier.
+
+## Inference — why the gate fails
+
+A sandboxed app's container is resolved from its bundle identifier, and its group
+container from the application-group entitlement. The copy would carry both
+unchanged, so the ordinary resolution is the **production** containers -- the
+live session and its data.
+
+It is plausible that an ad-hoc signature (no TeamIdentifier) causes macOS to
+reject or ignore `com.apple.application-identifier`, which could deny the launch or
+redirect the container. That is precisely the kind of guess this gate forbids:
+the failure modes span "refused" and "reached the real container", and only the
+second is catastrophic.
+
+## Unresolved question
+
+Which of those outcomes actually occurs is a runtime fact that cannot be settled
+without launching -- and launching is the action the gate exists to prevent.
+
+## Smallest next design for an isolated runtime target
+
+Give the copy a **distinct identity** so macOS resolves a different container,
+and make the entitlement set consistent with that identity:
+
+1. Rewrite `CFBundleIdentifier` in the copy to a unique per-attempt value.
+2. Remove `com.apple.application-identifier` and
+   `com.apple.security.application-groups` from the copy, so it cannot claim the
+   production container or group.
+3. Decide explicitly whether the copy runs sandboxed under its new identifier or
+   unsandboxed. This is a real entitlement change beyond Capsule 2's two debug
+   keys and needs its own evidence; it is not implemented here.
+4. Re-sign with that reduced set plus the two debug entitlements, then verify the
+   copy resolves a fresh container and cannot see the production one.
+
+Separately worth settling before any launch: a second WeChat process shares the
+account's *network* session regardless of local container isolation, so local
+container isolation addresses data mutation but not session interaction. That is
+a product decision, not a signing one.
+
