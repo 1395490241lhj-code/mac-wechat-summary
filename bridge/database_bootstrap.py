@@ -104,6 +104,7 @@ BOOTSTRAP_VERIFICATION_FAILED: str = "verification_failed"
 #: the difference between "nothing changed" and "something must be re-run".
 BOOTSTRAP_ROLLBACK_INCOMPLETE: str = "rollback_incomplete"
 
+
 BOOTSTRAP_STATES: frozenset[str] = frozenset({
     BOOTSTRAP_READY,
     BOOTSTRAP_SOURCE_MISSING,
@@ -131,6 +132,15 @@ _ACQUISITION_STATES: dict[AcquisitionState, str] = {
 }
 
 #: The source layout inside one explicitly selected root.
+#: The fixed refusal copy the provider and the identity catalog use when a
+#: surface is malformed. A ValueError carrying anything else is an internal
+#: fault, not a generation this product declines to support.
+_SURFACE_REFUSALS: frozenset[str] = frozenset({
+    "identity catalog schema unsupported",
+    "session identity collision",
+    "message identity collision",
+})
+
 MESSAGE_DIRECTORY: str = "message"
 SESSION_DIRECTORY: str = "session"
 CONTACT_DIRECTORY: str = "contact"
@@ -273,7 +283,8 @@ def _validate(
     )
     with coordinator.prepare(source_set, database_mode_enabled=True) as outcome:
         if outcome.readiness.state is not AcquisitionState.READY:
-            return _ACQUISITION_STATES[outcome.readiness.state]
+            return _ACQUISITION_STATES.get(
+                outcome.readiness.state, BOOTSTRAP_VERIFICATION_FAILED)
         prepared = outcome.prepared_source
         assert prepared is not None
         # Both the message surface and the identity surface are part of what
@@ -307,8 +318,14 @@ def _validate(
             provider.list_conversations(1)
         except UnsupportedGeneration:
             return BOOTSTRAP_UNSUPPORTED_GENERATION
-        except ValueError:
-            return BOOTSTRAP_UNSUPPORTED_GENERATION
+        except ValueError as error:
+            # The provider and the identity catalog refuse a malformed surface
+            # with ValueError, and both use fixed copy. Anything else is an
+            # internal fault and must not be reported as a generation the
+            # product does not support.
+            if str(error) in _SURFACE_REFUSALS:
+                return BOOTSTRAP_UNSUPPORTED_GENERATION
+            return BOOTSTRAP_VERIFICATION_FAILED
         except Exception:
             return BOOTSTRAP_VERIFICATION_FAILED
         if provider.diagnostics.unknown or provider.diagnostics.unavailable:
@@ -387,22 +404,30 @@ def _publish(
     # rollback is incomplete instead of being told the previous state came
     # back.
     incomplete = False
+    pointer_restored = False
     try:
         if existing_record is None:
             manifest_path.unlink(missing_ok=True)
         else:
             _write_record(manifest_path, json.loads(existing_record.decode("utf-8")))
+        pointer_restored = True
     except Exception:
         incomplete = True
-    for descriptor in written:
-        prior = previous[descriptor]
-        try:
-            if prior is None:
-                key_store.delete(descriptor)
-            else:
-                key_store.put(descriptor, prior)
-        except Exception:
-            incomplete = True
+    # Revert the key entries only once the activation pointer is back. Reverting
+    # them while the candidate record is still active would leave that record
+    # pointing at key entries it no longer has -- a broken active configuration.
+    # When the pointer cannot be restored the candidate pair is left intact and
+    # consistent instead, and the incomplete rollback is reported.
+    if pointer_restored:
+        for descriptor in written:
+            prior = previous[descriptor]
+            try:
+                if prior is None:
+                    key_store.delete(descriptor)
+                else:
+                    key_store.put(descriptor, prior)
+            except Exception:
+                incomplete = True
     return BOOTSTRAP_ROLLBACK_INCOMPLETE if incomplete else failure
 
 

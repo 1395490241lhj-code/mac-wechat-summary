@@ -325,11 +325,14 @@ def test_a_publication_failure_compensates_the_key_entries(tmp_path):
 
     result, store, _ = _bootstrap(tmp_path, root, manifest=manifest)
 
-    # The record could not be restored (a directory cannot be replaced or
-    # removed), so the rollback is reported as incomplete rather than as a
-    # clean refusal. The key entries are still compensated.
+    # The activation pointer could not be restored (a directory cannot be
+    # replaced or removed), so the rollback is reported as incomplete and the
+    # key entries are deliberately left alone: reverting them under a record
+    # that still names them would be the broken state this ordering exists to
+    # avoid. Nothing is falsely active -- the path is still not a record.
     assert result.state == boot.BOOTSTRAP_ROLLBACK_INCOMPLETE
-    assert store.items == {}
+    assert not manifest.is_file()
+    assert store.items
 
 
 def test_an_identity_surface_the_catalog_refuses_is_classified(tmp_path):
@@ -370,6 +373,50 @@ def test_one_changed_message_part_is_enough_to_refuse_the_generation(tmp_path):
 
     assert result.state == boot.BOOTSTRAP_UNSUPPORTED_GENERATION
     assert store.items == {} and not manifest.exists()
+
+
+def test_a_same_source_refresh_with_another_secret_changes_nothing(tmp_path):
+    """The identical-descriptor refresh cannot mix keys: such a candidate never
+    validates.
+
+    A fixed source is authenticated by exactly one secret, so a candidate that
+    names the same descriptors must carry the same secret. Anything else is
+    refused by validation before publication, which is what makes the
+    identical-descriptor case safe without any atomic batch write.
+    """
+    root = _source_root(tmp_path / "root")
+    result, store, manifest = _bootstrap(tmp_path, root)
+    assert result.state == boot.BOOTSTRAP_READY
+    known_good_keys = dict(store.items)
+    known_good_record = manifest.read_text(encoding="utf-8")
+
+    # Same encrypted anchors, so the descriptors are identical; the roles still
+    # accept only the secret they were provisioned with.
+    result, store, _ = _bootstrap(
+        tmp_path, root, store=store, provider=_Provider(OTHER))
+
+    assert result.state == boot.BOOTSTRAP_SECRET_REJECTED
+    assert store.items == known_good_keys
+    assert manifest.read_text(encoding="utf-8") == known_good_record
+
+
+def test_a_new_message_part_is_recorded_on_a_same_secret_refresh(tmp_path):
+    """A refresh that adds a shard must still update the activation record.
+
+    The fingerprint deliberately ignores message-part salts, so a new shard
+    leaves the descriptors identical -- and the record must still be rewritten
+    to name it, or an ordinary read would silently miss that part.
+    """
+    root = _source_root(tmp_path / "root", parts=1)
+    result, store, manifest = _bootstrap(tmp_path, root)
+    assert result.state == boot.BOOTSTRAP_READY
+    assert len(json.loads(manifest.read_text(encoding="utf-8"))["messages"]) == 1
+
+    _encrypted(root / "message" / "message_1.db", bytes([1]) * 16)
+    result, store, _ = _bootstrap(tmp_path, root, store=store)
+
+    assert result.state == boot.BOOTSTRAP_READY
+    assert len(json.loads(manifest.read_text(encoding="utf-8"))["messages"]) == 2
 
 
 def test_a_failed_post_publication_verification_restores_the_previous_state(tmp_path):
