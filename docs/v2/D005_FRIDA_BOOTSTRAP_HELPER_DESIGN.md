@@ -701,3 +701,184 @@ that the Chromium shell cannot be re-sealed in place and scope the clone to the
 non-Chromium components, which Capsule 5A showed carry none of the three
 production containers.
 
+---
+
+# Capsule 5B.1 — recursive code-sign seal, retry (2026-09-20)
+
+**Result: TRANSFORMED CLONE STATICALLY VERIFIED.**
+
+The earlier 5B.1 attempt was invalid and is discarded, not repaired: its
+enumerator pruned traversal at the first bundle it met and reported
+`signable_bundles 1`. The code-signing graph was rebuilt independently of the
+bundle-identity graph.
+
+Nothing was launched. No clone, helper, XPC service or extension was started; no
+Frida was installed, run or attached; no process was attached; no process memory,
+key material or database was read; no Bootstrap production code changed. The
+approved 13-component identity mapping and the approved entitlement reduction are
+the Capsule 5B design, unchanged.
+
+## Enumeration — the code-signing graph, built independently of the identity graph
+
+The whole clone tree was walked with nested bundle subtrees never pruned.
+
+| | Count |
+|---|---|
+| signable objects | **132** |
+| bundles (root app + 47 nested) | **48** |
+| raw Mach-O (executables, dylibs, versioned framework binaries, `.node`) | **85** |
+| bundle types | 34 framework, 9 app, 2 xpc, 2 appex, plus the root app |
+| maximum object depth | 12 |
+
+- Symlinks are canonicalised, so each physical object is signed once: 168 alias
+  paths collapse onto 132 objects, and 36 objects are reachable by more than one
+  path (`Versions/Current`, and framework-root binary aliases such as
+  `…/ConfSDKdyn.framework/ConfSDKdyn` → `…/Versions/A/ConfSDKdyn`).
+- The nested objects beneath the two named subtrees are explicitly included.
+  `WeChatAppEx.app` contributes **43** objects (16 bundles, 27 Mach-O);
+  `WeChatAppEx Framework.framework` contributes **41** objects (15 bundles,
+  26 Mach-O), to depth 12.
+
+Two independent completeness checks:
+
+1. `codesign --verify --deep --strict --verbose=4` on the installed app walks 55
+   distinct paths. Every one is either an enumerated object or the same framework
+   seen through its `Versions/Current` versioned-directory alias. The single
+   exception is `XPlayer.app/Contents/Frameworks/vk_swiftshader_icd.json`, a JSON
+   file that `codesign` classifies as nested code by directory rule but which
+   carries no code and no signature.
+2. `file(1)` over all 406 real files reports exactly **85** Mach-O, with a
+   symmetric difference of **0** against the enumeration and no `file` errors.
+
+## Phase 1 — diagnosis before repair
+
+On the installed app all 132 objects pass `codesign --verify --strict`
+individually, so the enumeration contains no unsigned object.
+
+After the identity and entitlement transform and **before** any re-sign, 29 of
+132 objects fail. The deepest initial failures are at **depth 12**:
+
+| object | depth | type | result | diagnostic |
+|---|---|---|---|---|
+| `…/WeChatAppEx Framework.framework/Versions/C/Helpers/WeChatAppEx Helper.app/Contents/MacOS/WeChatAppEx Helper` | 12 | Mach-O | FAIL | `invalid Info.plist (plist or signature have been modified)` |
+| the same for `WeChatAppEx Helper (GPU)`, `(Plugin)`, `(Renderer)` and `WeApp` | 12 | Mach-O | FAIL | same |
+| `…/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer` | 9 | Mach-O | FAIL | same |
+
+The Chromium framework's own failure at that moment is a **consequence** of those
+children, not an independent fault, so diagnosis did not stop at the framework.
+
+## Proven root cause of the Capsule 5B failure
+
+Reproduced exactly. Signing the transform's own object set — the 13
+identity-rewritten bundles plus the outer app — **without re-sealing the enclosing
+bundles that contain them** reproduces Capsule 5B's error byte for byte:
+
+```
+WeChat.app: nested code is modified or invalid
+In subcomponent: …/WeChat.app/Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework
+exit 1
+```
+
+The signing set came from the **bundle-identity** graph. That graph contains the
+five Chromium helper apps but not `WeChatAppEx Framework.framework`, which is a
+framework and not a launchable bundle, so the framework's seal over its children
+was never recomputed after they changed. `Sparkle.framework` and its
+`Installer.xpc` fail the same way. The correction is not a different signing
+recipe but deriving the order from **containment**.
+
+## Corrected signing order — containment, deepest first
+
+Sign set = every changed object plus every ancestor of it. 15 objects, all
+`exit 0`:
+
+1. the five Chromium helper apps (`Helpers/*.app`, depth 9)
+2. `Sparkle.framework/…/Installer.xpc` (depth 6)
+3. `WeChatAppEx Framework.framework` (depth 5)
+4. `WeChatAppEx.app`, `WeChatHelper.app`, `XPlayer.app`, `WeChatMacShare.appex`,
+   `DebugHelper.xpc` (depth 2)
+5. `Sparkle.framework` (depth 2)
+6. `WeChatFileProviderExtension.appex` (depth 2)
+7. outer `WeChat.app`
+
+No object inside an already-signed parent was mutated afterwards.
+
+The nine nested frameworks under the Chromium framework's `Frameworks/` and the
+dylibs under its `Libraries/` were not modified by the transform and needed no
+re-sign: the nested frameworks are sealed by the framework as nested code, and the
+`Libraries/` dylibs are sealed by **content hash** — `codesign`'s own `rules2` for
+this framework does not classify `Libraries/` as nested (`Frameworks/`, `Helpers/`,
+`MacOS/`, `XPCServices/` and `PlugIns/` are; `Libraries/` is not). They were
+enumerated and verified regardless.
+
+## Phase 3 — verification
+
+| # | Check | Result |
+|---|---|---|
+| 1 | every discovered signable object, `codesign --verify --strict` | **132 / 132 PASS** |
+| 2 | `WeChatAppEx Framework.framework` strict | exit 0 |
+| 3 | `WeChatAppEx Framework.framework` deep+strict | exit 0 |
+| 4 | `WeChatAppEx.app` strict and deep+strict | exit 0 |
+| 5 | outer clone strict | exit 0 |
+| 6 | outer clone deep+strict | exit 0 |
+| 7 | residual production identities on clone-owned components | **0** |
+| 8 | residual dropped entitlements on clone-owned components | **0** |
+| 9 | installed production app | unchanged (below) |
+
+The framework's seal shape is preserved: `Sealed Resources version=2 rules=13
+files=45`, identical to the installed framework, with the same 45 sealed entries
+and the same rule set.
+
+## Residual isolation
+
+The residual search was re-run independently of the transform manifest, over all
+48 bundles. No clone-owned component retains a `com.tencent.*` or `5A4RE8SF68.*`
+identifier, and none retains `application-identifier`, `application-groups`,
+`keychain-access-groups`, `network.client`, `network.server` or either
+`temporary-exception.*` entitlement. The 34 resource-only identifiers are
+untouched, as Capsule 5A directed.
+
+**New observation, reported not changed.** Three `Info.plist` files still carry
+the literal production team id, and one names the production app group:
+
+| file | key | value |
+|---|---|---|
+| outer app, `WeChatMacShare.appex`, `WeChatFileProviderExtension.appex` | `TeamIdentifier` | `5A4RE8SF68.` |
+| `WeChatFileProviderExtension.appex` | `NSExtension.NSExtensionFileProviderDocumentGroup` | `5A4RE8SF68.com.tencent.xinWeChat` |
+
+Both are present identically in the installed app, so neither is a transform
+regression; neither is an identifier or an entitlement, so both are outside the
+approved 13-component transform. The extension no longer carries
+`application-groups`, so the group binding cannot resolve — Capsule 4's probe
+established that removing that entitlement is what denies the production group
+container. Flagged for the launch capsule: whether
+`NSExtensionFileProviderDocumentGroup` should be neutralised before any launch.
+
+## Signature fidelity — for the launch capsule
+
+Local ad-hoc signing differs from Tencent's Developer ID signature in ways that do
+not affect verification: ad-hoc with `TeamIdentifier=not set`, no CMS blob and no
+timestamp, a sha256-only CodeDirectory where the original carries sha1 and sha256,
+and `codesign` chose a 16 KB hash page size for the x86_64 slice where the original
+used 4 KB (the arm64 slice is 4 KB in both). Hardened runtime is preserved:
+`flags=0x10002(adhoc,runtime)`.
+
+## Installed app
+
+`Contents/MacOS/WeChat` sha256 `b21aeae5c3e4d570…` and
+`Contents/Resources/wechat.dylib` sha256 `2af9442379888ee4…` are byte-identical
+before and after, and `codesign --verify --deep --strict /Applications/WeChat.app`
+is still exit 0.
+
+Two live-environment notes: the operator's ordinary WeChat session was already
+running for the whole pass and was never touched, and WeChat's own Sparkle updater
+was running concurrently (not ours). Both production hashes were re-checked after
+all work, and the app bundle's mtime is still `Sep 15 04:24:37`.
+
+## Disposable artifacts
+
+The clone trees — the transformed working clone and the reproduction copy — were
+removed after evidence collection; nothing from them was committed. The disposable
+tooling and the raw evidence JSONs remain outside the repository under
+`/tmp/mws-d005-5b1-retry`: the enumerator, the per-object verifier, the transform
+manifest, the signing log and the Phase 1 diagnostics. The only repository change
+is this document.
