@@ -150,3 +150,84 @@ incurred for a design pass.
 Until (1)–(3) are done, no production helper is written and the sealed
 OperatorSuppliedSecret path remains the only supported mechanism.
 
+---
+
+# Capsule 1 — static boundary analysis (2026-09-20)
+
+Static inspection only: no launch, no copy, no re-sign, no Frida, no attach, no
+process memory, no key. Nothing was mutated.
+
+## Observed fact — bundle layout
+
+The bundle is 1.4 GB. `Contents/Frameworks/` holds **thin shims** (83 KB–301 KB)
+and imports no crypto and no `sqlite3_*` at all. The real implementation is under
+`Contents/Resources/`:
+
+| Binary | Size |
+|---|---|
+| `Contents/Resources/wechat.dylib` | **337 MB** |
+| `Contents/MacOS/WeChatAppEx.app/.../WeChatAppEx Framework` | 391 MB (Chromium shell) |
+| `Contents/Resources/MultiMediaDyn.framework/...` | 52 MB |
+| `Contents/Resources/ilink2.framework/...` | 17 MB |
+| `Contents/Resources/andromeda.framework/...` | 8.7 MB |
+
+## Observed fact — the crypto boundary
+
+`Contents/Resources/wechat.dylib` reports **compatibility version 4.1.15**
+(current 4.31.14) and imports from CommonCrypto:
+
+- **`CCKeyDerivationPBKDF`** — the proposed hook, present;
+- `CCCrypt`, `CCCryptorCreate`, `CCCryptorUpdate`, `CCCryptorFinal`,
+  `CCCryptorRelease` — AES-CBC, matching the sealed profile;
+- `CCHmacInit`, `CCHmacUpdate`, `CCHmacFinal` — HMAC, matching the sealed
+  profile's page authentication.
+
+`CCKeyDerivationPBKDF` also appears among the dylib's own defined symbols, which
+is consistent with an internal alias or PLT stub. **No `sqlite3_*` symbol is
+imported by any image**, so SQLite/SQLCipher is statically linked — consistent
+with the 337 MB size. Other frameworks import only `CC_SHA1`/`CC_SHA256`
+(`WCDYWrapper`) and `CCCrypt` (`libwxld`), and the Sparkle updater uses
+`CC_SHA1` for its own signatures; none of those is the database path.
+
+## Why the earlier assumption was wrong
+
+The symbol was right; the **binary** was wrong. The earlier pass inspected
+`Contents/MacOS/WeChat`, a 182 KB launcher, and concluded the hook was absent.
+The implementation lives in `Contents/Resources/wechat.dylib`, which the launcher
+loads at runtime.
+
+## Inference — which invocation matters
+
+The sealed profile derives a 32-byte key and then a MAC key with
+PBKDF2-HMAC-SHA512, 2 iterations, `salt ^ 0x3a`. A `CCKeyDerivationPBKDF` call
+with **2 iterations** is therefore the HMAC-subkey derivation, which yields the
+MAC key and *not* the database secret. The database secret must come from the
+differently-parameterised invocation (the account KDF). Which call carries which
+value cannot be settled from symbols alone.
+
+## Unresolved question
+
+The exact call-site discrimination — algorithm, iteration count and derived
+length that identify the account-secret derivation — needs bounded runtime
+observation. The symbol is identified; the filter parameters are not.
+
+## Conclusion
+
+**STATIC BOUNDARY FOUND.**
+
+- Framework/binary: `Contents/Resources/wechat.dylib`
+- Symbol: `CCKeyDerivationPBKDF` (imported from CommonCrypto; the AES and HMAC
+  primitives alongside it confirm the SQLCipher-shaped path)
+- Why preferred: it is the key-derivation boundary itself, so a hook there sees
+  derived key material rather than bulk ciphertext, and it is far narrower than
+  `CCCrypt`/`CCHmac`, which carry unrelated traffic.
+- Expected semantics: `CCKeyDerivationPBKDF(algorithm, password, passwordLen,
+  salt, saltLen, prf, rounds, derivedKey, derivedKeyLen)`; the candidate is the
+  output buffer.
+- Remaining dynamic proof: which invocation carries the account secret, and
+  therefore the filter (algorithm, rounds, derived length), plus confirmation
+  that the boundary is stable across the startup path.
+- Capsule 2 (re-signing) is now meaningful, because there is something to
+  instrument: the temporary copy must allow a hook on `wechat.dylib`'s
+  CommonCrypto imports.
+
