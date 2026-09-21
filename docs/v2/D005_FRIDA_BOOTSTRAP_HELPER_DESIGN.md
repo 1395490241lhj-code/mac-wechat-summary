@@ -231,3 +231,68 @@ observation. The symbol is identified; the filter parameters are not.
   instrument: the temporary copy must allow a hook on `wechat.dylib`'s
   CommonCrypto imports.
 
+---
+
+# Capsule 2 — throwaway-copy re-sign feasibility (2026-09-20)
+
+A private temporary copy was made outside the installed app and re-signed. The
+installed app was never modified, nothing was launched, no Frida was installed,
+no process was attached, and no cryptographic material was observed.
+
+## Observed fact — installed baseline
+
+- `Contents/MacOS/WeChat` sha256 `b21aeae5c3e4d570…`
+- `Contents/Resources/wechat.dylib` sha256 `2af9442379888ee4…`
+- Identifier `com.tencent.xinWeChat`, Team `5A4RE8SF68`, Developer ID signed,
+  CodeDirectory `flags=0x10000(runtime)`
+- 17 entitlements, including `app-sandbox`; **no** `get-task-allow` and **no**
+  `disable-library-validation`
+- 46 nested bundles/frameworks and 32 dylibs participate in the seal
+
+## Observed fact — minimum re-sign
+
+One strategy was sufficient, and no deeper one was needed:
+
+    ditto /Applications/WeChat.app <workspace>/WeChat.app
+    codesign --force --sign - --options runtime \
+        --entitlements <original + 2 debug keys> <workspace>/WeChat.app
+
+- `codesign --verify --strict` → exit 0
+- `codesign --verify --deep --strict` → exit 0, so **no nested component
+  required re-signing**; the outer re-sign re-sealed the existing nested
+  signatures, which stayed valid
+- resulting CodeDirectory `flags=0x10002(adhoc,runtime)` — ad-hoc **and** hardened
+  runtime preserved
+- `TeamIdentifier=not set`, which is what ad-hoc signing implies
+- the two added entitlements were present afterwards, and `app-sandbox` was
+  **preserved**, not removed
+
+## Inference
+
+The minimal transformation is therefore a single outer-bundle ad-hoc re-sign
+with a two-key entitlement delta: `get-task-allow` (so the helper-owned
+process can be attached to) and `disable-library-validation` (so a Frida
+dylib signed by a different identity is not rejected by hardened runtime).
+Keeping the sandbox costs nothing at signing time and was not shown to be an
+obstacle.
+
+## Unresolved question
+
+Whether the copy actually launches, whether the sandbox permits it with those
+entitlements, and whether the injected dylib loads — all runtime facts. Signing
+success is not launch success.
+
+## Conclusion
+
+**RE-SIGN PATH ESTABLISHED.**
+
+- Components requiring signing: the outer bundle only.
+- Order: copy, then one outer re-sign; no nested pass.
+- Entitlement delta: `get-task-allow` and `disable-library-validation`, on top of the
+  original 17, sandbox retained.
+- Hardened runtime: preserved (`0x10002(adhoc,runtime)`).
+- Sandbox: can remain intact.
+- Unproven until Capsule 3: launch under the sandbox, and dylib injection.
+- Cleanup: the workspace was removed and verified absent; the installed bundle's
+  two critical hashes were re-checked and are byte-identical.
+
