@@ -42,6 +42,7 @@ try:
         KeyStore,
         SourceLocator,
     )
+    from acquisition.source_refresher import BoundedSourceRefresher
     from acquisition.coordinator import AcquisitionCleanupError
 except ImportError:  # pragma: no cover - bridge launched from another cwd
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - bridge launched from another cwd
         KeyStore,
         SourceLocator,
     )
+    from acquisition.source_refresher import BoundedSourceRefresher
     from acquisition.coordinator import AcquisitionCleanupError
 from message_source import (
     SOURCE_DATABASE,
@@ -127,6 +129,8 @@ def open_database_source(
     home: str | os.PathLike[str] | None = None,
     key_store: object | None = None,
     decryptor: object | None = None,
+    deriver: object | None = None,
+    refresher: object | None = None,
 ) -> MessageSource | None:
     """The production composition root for the database source.
 
@@ -138,17 +142,20 @@ def open_database_source(
     located = SourceLocator(recorded_manifest_path(home)).resolve()
     if located.source_set is None:
         return None
+    source_refresher = refresher if refresher is not None else BoundedSourceRefresher()
+    active_source_set = source_refresher.refresh(located.source_set)
     try:
         coordinator = AcquisitionCoordinator(
             key_store if key_store is not None else KeyStore(),
             acquisition_workspace_root(home),
             decryptor=decryptor,
+            deriver=deriver,
         )
     except Exception:
         # No usable key store or workspace: database mode is simply not
         # available here. A fixed outcome, never the failure's text.
         return None
-    return AcquiredDatabaseSource(coordinator, located.source_set, visual_factory)
+    return AcquiredDatabaseSource(coordinator, active_source_set, visual_factory, refresher=source_refresher)
 
 
 def _tagged_conversations(result: ReadResult) -> ReadResult:
@@ -184,16 +191,19 @@ class AcquiredDatabaseSource:
         coordinator: AcquisitionCoordinator,
         source_set: object,
         visual_factory: Callable[[], MessageSource],
+        refresher: object | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._source_set = source_set
         self._visual_factory = visual_factory
+        self._refresher = refresher
 
     # -- one acquisition, one operation --------------------------------------
 
     def _database(self, consume: Callable[[object], object]) -> object:
+        active_set = self._refresher.refresh(self._source_set) if self._refresher else self._source_set
         with self._coordinator.prepare(
-            self._source_set, database_mode_enabled=True
+            active_set, database_mode_enabled=True
         ) as outcome:
             if outcome.readiness.state is not AcquisitionState.READY:
                 raise _DatabaseUnavailable(outcome.readiness.state.value)

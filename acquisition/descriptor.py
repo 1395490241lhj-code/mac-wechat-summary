@@ -23,6 +23,7 @@ import hashlib
 from pathlib import Path
 
 from .decryptor import SALT_SIZE, SQLITE_HEADER, sqlcipher_profile_id
+from .deriver import ACCOUNT_PASSPHRASE_PROFILE
 from .keystore import KeyDescriptor
 from .source_locator import (
     ROLE_CONVERSATION_IDENTITY,
@@ -35,10 +36,8 @@ from .source_locator import (
 SOURCE_FINGERPRINT_DOMAIN: str = "mac-wechat-summary/source-fingerprint/v1"
 COMPATIBILITY_DOMAIN: str = "mac-wechat-summary/key-compatibility/v1"
 
-#: The secret semantics this token was derived under: one account-level secret
-#: addresses every required role. A future per-role model is a different
-#: contract and must not reuse this token.
-ACCOUNT_SHARED_SECRET: str = "account-shared-secret/v1"
+#: Legacy v1 secret semantics (raw database key).
+ACCOUNT_SHARED_SECRET_V1: str = "account-shared-secret/v1"
 
 #: The descriptor addressing/serialization contract, versioned independently of
 #: the WeChat schema generation.
@@ -130,40 +129,39 @@ def source_fingerprint(session_main: Path, contact_main: Path) -> str:
     return digest.hexdigest()
 
 
-def compatibility_token(role_token: str) -> str:
+def compatibility_token(role_token: str, profile: str = ACCOUNT_PASSPHRASE_PROFILE) -> str:
     """Which key/decryption contract a stored key was proven against.
 
     Stable across source growth, and derivable without decrypted data. It names
     the decryption profile by its one canonical identifier rather than restating
-    the profile's parameters, and it records the account-shared-secret
-    semantics, so a change to either invalidates addressing deliberately.
+    the profile's parameters, and it records the account secret semantics,
+    so a change to either invalidates addressing deliberately.
     """
     digest = hashlib.sha256()
     digest.update(_canonical(
         COMPATIBILITY_DOMAIN.encode("utf-8"),
         role_token.encode("utf-8"),
         sqlcipher_profile_id().encode("utf-8"),
-        ACCOUNT_SHARED_SECRET.encode("utf-8"),
+        profile.encode("utf-8"),
     ))
     return digest.hexdigest()
 
 
-def descriptor_for(fingerprint: str, role_token: str) -> KeyDescriptor:
+def descriptor_for(fingerprint: str, role_token: str, profile: str = ACCOUNT_PASSPHRASE_PROFILE) -> KeyDescriptor:
     """The descriptor addressing one role of one source instance."""
     return KeyDescriptor(
         fingerprint, role_token, RECORD_FORMAT_VERSION,
-        compatibility_token(role_token),
+        compatibility_token(role_token, profile),
     )
 
 
-def descriptors_for(fingerprint: str) -> dict[str, KeyDescriptor]:
+def descriptors_for(fingerprint: str, profile: str = ACCOUNT_PASSPHRASE_PROFILE) -> dict[str, KeyDescriptor]:
     """Every required role's descriptor, sharing one source fingerprint.
 
     Message parts share the message role's descriptor; they are not given
     identities based on how many shards happen to exist today.
     """
     return {
-        role_token: descriptor_for(fingerprint, role_token)
+        role_token: descriptor_for(fingerprint, role_token, profile)
         for role_token in REQUIRED_ROLE_TOKENS
     }
-

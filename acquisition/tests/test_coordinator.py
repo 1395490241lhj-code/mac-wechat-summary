@@ -58,13 +58,14 @@ def _source(tmp_path, name="one", descriptor=None):
 
 def _coordinator(tmp_path, sources, *, keys=None, decryptor=None):
     from acquisition import AcquisitionCoordinator, AcquisitionSourceSet, SecretBytes
+    from acquisition.deriver import PassthroughDeriver
 
     source_set = AcquisitionSourceSet(tuple(sources))
     store = FakeKeyStore(keys if keys is not None else {
         source.key_descriptor: SecretBytes(b"k" * 32) for source in sources
     })
     coordinator = AcquisitionCoordinator(
-        store, tmp_path / "workspaces", decryptor=decryptor or FakeDecryptor()
+        store, tmp_path / "workspaces", decryptor=decryptor or FakeDecryptor(), deriver=PassthroughDeriver()
     )
     return coordinator, source_set, store
 
@@ -88,6 +89,7 @@ def test_source_contract_is_immutable_explicit_and_requires_messages(tmp_path):
 
 def test_mode_off_touches_nothing(tmp_path):
     from acquisition import AcquisitionCoordinator, AcquisitionSourceSet, AcquisitionState
+    from acquisition.deriver import PassthroughDeriver
 
     class BombStore:
         def load(self, descriptor):
@@ -95,7 +97,7 @@ def test_mode_off_touches_nothing(tmp_path):
 
     root = tmp_path / "workspaces"
     source_set = AcquisitionSourceSet((_source(tmp_path),))
-    coordinator = AcquisitionCoordinator(BombStore(), root, decryptor=FakeDecryptor())
+    coordinator = AcquisitionCoordinator(BombStore(), root, decryptor=FakeDecryptor(), deriver=PassthroughDeriver())
     with coordinator.prepare(source_set, database_mode_enabled=False) as outcome:
         assert outcome.readiness.state is AcquisitionState.DISABLED
         assert outcome.prepared_source is None
@@ -276,6 +278,7 @@ def test_snapshot_failures_map_to_closed_readiness_without_decrypting(
 def test_snapshot_destination_failure_maps_to_internal_error(tmp_path):
     from acquisition import AcquisitionCoordinator, AcquisitionState
     from acquisition.snapshot import Snapshotter
+    from acquisition.deriver import PassthroughDeriver
 
     source = _source(tmp_path)
     _, source_set, store = _coordinator(tmp_path, (source,))
@@ -287,6 +290,7 @@ def test_snapshot_destination_failure_maps_to_internal_error(tmp_path):
         store, tmp_path / "workspaces",
         snapshotter=Snapshotter(attempts=1, copy_file=destination_full),
         decryptor=FakeDecryptor(),
+        deriver=PassthroughDeriver(),
     )
     with coordinator.prepare(source_set, database_mode_enabled=True) as outcome:
         assert outcome.readiness.state is AcquisitionState.INTERNAL_ERROR
@@ -296,6 +300,7 @@ def test_snapshot_destination_failure_maps_to_internal_error(tmp_path):
 def test_private_wal_io_failure_maps_to_internal_error(tmp_path):
     from acquisition import AcquisitionCoordinator, AcquisitionState
     from acquisition.snapshot import EncryptedSnapshot
+    from acquisition.deriver import PassthroughDeriver
 
     source = _source(tmp_path)
     _, source_set, store = _coordinator(tmp_path, (source,))
@@ -310,7 +315,7 @@ def test_private_wal_io_failure_maps_to_internal_error(tmp_path):
 
     coordinator = AcquisitionCoordinator(
         store, tmp_path / "workspaces",
-        snapshotter=SnapshotWithUnreadableWal(), decryptor=FakeDecryptor(),
+        snapshotter=SnapshotWithUnreadableWal(), decryptor=FakeDecryptor(), deriver=PassthroughDeriver(),
     )
     with coordinator.prepare(source_set, database_mode_enabled=True) as outcome:
         assert outcome.readiness.state is AcquisitionState.INTERNAL_ERROR

@@ -58,6 +58,18 @@ from acquired_database_source import (  # noqa: E402
     open_database_source,
     recorded_manifest_path,
 )
+from acquisition.deriver import PassthroughDeriver  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _default_passthrough_deriver(monkeypatch):
+    orig = acquired_database_source.open_database_source
+    def wrapped(*args, **kwargs):
+        if "deriver" not in kwargs:
+            kwargs["deriver"] = PassthroughDeriver()
+        return orig(*args, **kwargs)
+    monkeypatch.setattr(acquired_database_source, "open_database_source", wrapped)
+    monkeypatch.setattr("test_acquired_database_source.open_database_source", wrapped)
 
 FINGERPRINT = "a" * 64
 COMPATIBILITY = "b" * 64

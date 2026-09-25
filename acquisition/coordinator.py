@@ -25,7 +25,9 @@ from .decryptor import (
     DatabaseDecryptor,
     DatabaseFormatError,
     DatabaseKeyError,
+    SQLITE_HEADER,
 )
+from .deriver import DatabaseKeyDeriver, PassthroughDeriver
 from .snapshot import (
     EncryptedSource,
     SnapshotError,
@@ -114,13 +116,22 @@ def _valid_sqlite(path: Path) -> bool:
 
 
 class AcquisitionCoordinator:
-    def __init__(self, key_store, workspace_root: Path, *, snapshotter=None, decryptor=None):
+    def __init__(
+        self,
+        key_store,
+        workspace_root: Path,
+        *,
+        snapshotter=None,
+        decryptor=None,
+        deriver=None,
+    ):
         if not isinstance(workspace_root, Path):
             raise ValueError("acquisition workspace invalid")
         self._key_store = key_store
         self._root = workspace_root
         self._snapshotter = snapshotter or Snapshotter()
         self._decryptor = decryptor or DatabaseDecryptor()
+        self._deriver = deriver if deriver is not None else DatabaseKeyDeriver()
 
     @contextmanager
     def prepare(
@@ -177,10 +188,24 @@ class AcquisitionCoordinator:
             for snapshot in snapshots:
                 replay_committed_wal(snapshot.main, snapshot.wal, snapshot.shm)
                 plaintext = plaintext_dir / secrets.token_hex(16)
+                stored_secret = secrets_by_descriptor[snapshot.key_descriptor]
+                if isinstance(self._deriver, PassthroughDeriver):
+                    raw_key = stored_secret
+                elif self._deriver is not None:
+                    try:
+                        with snapshot.main.open("rb") as stream:
+                            salt = stream.read(16)
+                    except OSError:
+                        raise SnapshotFormatError("snapshot format invalid") from None
+                    if len(salt) != 16 or salt.startswith(SQLITE_HEADER):
+                        raise DatabaseFormatError("database format unsupported")
+                    raw_key = self._deriver.derive(stored_secret, salt)
+                else:
+                    raw_key = stored_secret
                 self._decryptor.decrypt(
                     snapshot.main,
                     plaintext,
-                    secrets_by_descriptor[snapshot.key_descriptor],
+                    raw_key,
                 )
                 os.chmod(plaintext, 0o600)
                 if not _valid_sqlite(plaintext):

@@ -18,6 +18,7 @@ for path in (ROOT, ROOT / "bridge"):
 from acquisition import KeyDescriptor, KeyStore, SecretBytes  # noqa: E402
 from acquisition.decryptor import DatabaseKeyError  # noqa: E402
 from acquisition.descriptor import descriptors_for, source_fingerprint  # noqa: E402
+from acquisition.deriver import PassthroughDeriver  # noqa: E402
 from acquisition.source_locator import record_document  # noqa: E402
 import acquired_database_source  # noqa: E402
 import database_bootstrap as boot  # noqa: E402
@@ -168,6 +169,7 @@ def _bootstrap(tmp_path, root, *, store=None, provider=None, manifest=None,
                decryptor=None, **kwargs):
     store = store if store is not None else _Store()
     manifest = manifest if manifest is not None else tmp_path / "database_source.json"
+    deriver = kwargs.pop("deriver", PassthroughDeriver())
     result = boot.bootstrap(
         root,
         secret_provider=provider if provider is not None else _Provider(),
@@ -175,6 +177,7 @@ def _bootstrap(tmp_path, root, *, store=None, provider=None, manifest=None,
         manifest_path=manifest,
         workspace_root=tmp_path / "leases",
         decryptor=decryptor if decryptor is not None else _Decryptor(root),
+        deriver=deriver,
         **kwargs,
     )
     return result, store, manifest
@@ -476,7 +479,7 @@ def test_ordinary_runtime_reads_the_published_pair_without_bootstrap(tmp_path):
 
     spy = _Provider()
     source = acquired_database_source.open_database_source(
-        lambda: None, home=tmp_path, key_store=store, decryptor=_Decryptor(root))
+        lambda: None, home=tmp_path, key_store=store, decryptor=_Decryptor(root), deriver=PassthroughDeriver())
 
     assert source is not None
     assert source.status().ready is True

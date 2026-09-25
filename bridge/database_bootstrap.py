@@ -163,6 +163,20 @@ class BootstrapResult:
         return self.state == BOOTSTRAP_READY
 
 
+def parse_account_secret(raw: str | None) -> bytes | None:
+    """Parse and strictly validate a 64-hex character operator passphrase."""
+    if not raw:
+        return None
+    cleaned = raw.strip()
+    if len(cleaned) != 64:
+        return None
+    try:
+        val = bytes.fromhex(cleaned)
+        return val if len(val) == 32 else None
+    except ValueError:
+        return None
+
+
 class BootstrapSourceError(Exception):
     """The explicitly supplied source root is missing or structurally invalid."""
 
@@ -265,6 +279,7 @@ def _validate(
     workspace_root: Path,
     snapshotter: object | None,
     decryptor: object | None,
+    deriver: object | None = None,
 ) -> str:
     """Prove the candidate against every required role, then the provider gate.
 
@@ -280,6 +295,7 @@ def _validate(
         workspace_root,
         snapshotter=snapshotter,
         decryptor=decryptor,
+        deriver=deriver,
     )
     with coordinator.prepare(source_set, database_mode_enabled=True) as outcome:
         if outcome.readiness.state is not AcquisitionState.READY:
@@ -440,6 +456,7 @@ def bootstrap(
     workspace_root: Path,
     snapshotter: object | None = None,
     decryptor: object | None = None,
+    deriver: object | None = None,
     verify: Callable[[], bool] | None = None,
 ) -> BootstrapResult:
     """Establish, or explicitly refresh, the durable source/key pair.
@@ -463,6 +480,7 @@ def bootstrap(
         workspace_root=workspace_root,
         snapshotter=snapshotter,
         decryptor=decryptor,
+        deriver=deriver,
     )
     if state != BOOTSTRAP_READY:
         return BootstrapResult(state)
@@ -504,8 +522,8 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     def read() -> bytes | None:
-        entered = getpass.getpass("database key (input hidden): ")
-        return entered.encode("utf-8") if entered else None
+        entered = getpass.getpass("account secret (64 hex characters, input hidden): ")
+        return parse_account_secret(entered)
 
     result = bootstrap(
         arguments.source_root,

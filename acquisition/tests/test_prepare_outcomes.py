@@ -79,10 +79,12 @@ def _source_set(tmp_path: Path) -> AcquisitionSourceSet:
 
 
 def _coordinator(tmp_path: Path, *, store=None) -> AcquisitionCoordinator:
+    from acquisition.deriver import PassthroughDeriver
     return AcquisitionCoordinator(
         store if store is not None else _Store(b"synthetic-secret"),
         tmp_path / "leases",
         decryptor=_Decryptor(),
+        deriver=PassthroughDeriver(),
     )
 
 
@@ -167,4 +169,3 @@ def test_cleanup_still_runs_when_the_consumer_completes(tmp_path):
         assert outcome.readiness.state is AcquisitionState.READY
 
     assert root.exists() and list(root.iterdir()) == []
-

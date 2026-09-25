@@ -124,6 +124,18 @@ product's perspective.
 Key bytes, salts, PBKDF material and derived candidates are never logged.
 Operational logs may record only fixed state/reason tokens.
 
+### 4.4 WeChat 4.1.15+ credential reconciliation
+
+WeChat 4.1.15+ changes the relationship between operator credentials and database keys:
+
+* **Account passphrase != raw database key.** The stored secret is the 32-byte account passphrase.
+* **Per-database KDF.** Each database derives its raw 32-byte AES key on demand via `PBKDF2-HMAC-SHA512` (256,000 iterations) using its unique 16-byte SQLCipher salt from page 1.
+* **HMAC subkey derivation distinction.** The `DatabaseDecryptor`'s 2-iteration PBKDF2 with salt XOR 0x3A is strictly SQLCipher4's HMAC subkey derivation, and must never be confused with the 256,000-iteration account-passphrase KDF.
+* **Bounded message shard refresh.** `SourceLocator` remains strictly record-only ("Not discovery"). A separate `BoundedSourceRefresher` enumerates only the already-selected message directory for current `*.db` shards and companions. New message shards (`message_1.db`, etc.) are decrypted cleanly on demand without broad filesystem discovery and without requiring an operator re-bootstrap.
+* **KeyStore role records.** The KeyStore stores the validated account secret under role-addressed descriptors (`messages`, `conversation_identity`, `display_identity`), preserving the existing role-based lease and atomic publication/compensation contract while ensuring partial or inconsistent role records fail closed.
+* **Credential profile versioning.** Compatibility addressing incorporates `ACCOUNT_PASSPHRASE_PROFILE` (`wechat-passphrase-pbkdf2-sha512-256000/v1`), structurally preventing legacy raw-key profile records (`account-shared-secret/v1`) from being loaded as account passphrases while keeping descriptor layout version `RECORD_FORMAT_VERSION = 1`.
+* **D-005 remains intact.** Automatic runtime extraction remains prohibited; the operator-supplied account secret remains the explicit bootstrap boundary, and the normal Reader derives keys without process access or runtime hooks.
+
 ---
 
 ## 5. Bootstrap boundary
