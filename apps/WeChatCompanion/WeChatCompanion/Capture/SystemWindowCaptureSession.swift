@@ -90,14 +90,21 @@ actor SystemWindowCaptureSession {
 
     /// Presents the macOS content-sharing picker restricted to a single window.
     /// We never activate, move, or otherwise control the target app.
-    func selectWindow() async {
+    func selectWindow(
+        onCancel: @escaping @Sendable () -> Void = {},
+        onFailure: (@Sendable () -> Void)? = nil
+    ) async {
         let observer = WindowPickerObserver(
             onFilter: { [weak self] box in
                 Task { await self?.applySelection(box.filter) }
             },
-            onCancel: {},
+            onCancel: onCancel,
             onFail: { [weak self] in
-                Task { await self?.handleSelectionLost() }
+                if let onFailure {
+                    onFailure()
+                } else {
+                    Task { await self?.handleSelectionLost() }
+                }
             }
         )
         pickerObserver = observer

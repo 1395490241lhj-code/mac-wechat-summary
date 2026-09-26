@@ -163,4 +163,10 @@ actor MessageIngestor: MessageIngesting {
         if message.sender?.isEmpty == false { return true }
         return message.kind != .unknown
     }
+
+    #if DEBUG
+    static func isMeaningfulForQualityGate(_ message: ExtractedVisibleMessage) -> Bool {
+        isMeaningful(message)
+    }
+    #endif
 }

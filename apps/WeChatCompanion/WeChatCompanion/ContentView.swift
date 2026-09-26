@@ -316,6 +316,10 @@ private struct DiagnosticsView: View {
                     )
                 }
 
+#if DEBUG
+                VisualQualityGateSection(model: model)
+#endif
+
                 if model.persistenceFailed {
                     Label("Diagnostic metadata could not be saved.", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
@@ -327,6 +331,313 @@ private struct DiagnosticsView: View {
         .navigationTitle("Diagnostics")
     }
 }
+
+#if DEBUG
+private struct VisualQualityGateSection: View {
+    @Bindable var model: AppModel
+
+    private var canBegin: Bool {
+        model.allowsRemoteProcessing
+            && model.hasProviderCredential
+    }
+
+    private var unavailableReason: String? {
+        if !model.allowsRemoteProcessing {
+            "Remote Processing consent is off. Enable the existing consent in Settings first."
+        } else if !model.hasProviderCredential {
+            "A Gemini credential is not configured."
+        } else {
+            nil
+        }
+    }
+
+    var body: some View {
+        GroupBox("Real Visual Extraction Quality Gate · Debug only") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Frames are sent through the existing Gemini extractor only while Remote Processing consent is on. Nothing is written to the message store or diagnostics. Review content stays in memory and is cleared when the evaluation ends.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if let modelID = model.visualQualityGateModelID {
+                    Text("Frozen Gemini model: \(modelID)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.visualQualityGateIsActive {
+                    switch model.visualQualityGatePhase {
+                    case .selectingWindow:
+                        Text("Normal extraction and local ingestion are isolated. Select the WeChat window to begin the evaluation.")
+                            .foregroundStyle(.secondary)
+                        Button("Select WeChat Window") {
+                            Task { await model.selectWindowForVisualQualityGate() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    case .capturing:
+                        ProgressView("Capturing and extracting one frame…")
+                    case .reviewing:
+                        if let review = model.visualQualityGateReview {
+                            VisualQualityFrameReviewView(model: model, review: review)
+                        }
+                    case .failed:
+                        Label(
+                            "Extraction failed: \(model.visualQualityGateMetrics.lastFailureCategory?.label ?? "Unknown")",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .foregroundStyle(.secondary)
+                        Button("Capture Another Frame") {
+                            Task { await model.captureNextVisualQualityFrame() }
+                        }
+                    case .readyForNext:
+                        Text("Review recorded. Change the WeChat view manually if needed, then capture the next frame.")
+                            .foregroundStyle(.secondary)
+                        Button("Capture Next Frame") {
+                            Task { await model.captureNextVisualQualityFrame() }
+                        }
+                    case .inactive, .finished:
+                        EmptyView()
+                    }
+
+                    HStack {
+                        if model.visualQualityGatePhase == .reviewing {
+                            Button("Finish and Discard This Frame") {
+                                Task { await model.finishVisualQualityGate() }
+                            }
+                        }
+                        Button("Finish Evaluation") {
+                            Task { await model.finishVisualQualityGate() }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                } else {
+                    if model.visualQualityGatePhase == .finished {
+                        Text("Evaluation ended. Images, extracted rows, and reconciliation keys were cleared.")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let unavailableReason {
+                        Text(unavailableReason)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Begin Evaluation") {
+                        Task { await model.beginVisualQualityGate() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canBegin)
+                }
+
+                VisualQualityMetricsView(metrics: model.visualQualityGateMetrics)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct VisualQualityFrameReviewView: View {
+    @Bindable var model: AppModel
+    let review: VisualQualityFrameReview
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Frame \(model.visualQualityGateMetrics.totalFrames) · \(review.extraction.messages.count) extracted rows")
+                .font(.headline)
+            Image(decorative: review.frame.image, scale: 1)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxHeight: 420)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            LabeledContent("Extracted conversation title") {
+                Text(review.extraction.chat?.title ?? "No title returned")
+                    .multilineTextAlignment(.trailing)
+                qualityPicker(
+                    "Review",
+                    selection: Binding(
+                        get: { model.visualQualityGateReview?.titleRating },
+                        set: { model.setVisualQualityTitleRating($0) }
+                    ),
+                    choices: VisualQualityTitleRating.allCases,
+                    label: \.label
+                )
+            }
+
+            LabeledContent("Reconciliation") {
+                Text("\(review.reconciliation.action.label) · overlap \(review.reconciliation.overlapCount) · new \(review.reconciliation.newMessageCount)")
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(review.extraction.messages.indices, id: \.self) { index in
+                let message = review.extraction.messages[index]
+                GroupBox("Message \(index + 1)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        LabeledContent("Sender", value: message.sender ?? "No sender returned")
+                        LabeledContent("Visible time", value: message.visibleTime ?? "No time returned")
+                        LabeledContent("Message kind", value: message.kind.qualityLabel)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Extracted text")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(message.text ?? "No text returned")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        qualityPicker(
+                            "Detection",
+                            selection: messageBinding(index, keyPath: \.detection),
+                            choices: [.correct, .hallucinated, .duplicate],
+                            label: \.label
+                        )
+                        qualityPicker(
+                            "Sender",
+                            selection: messageBinding(index, keyPath: \.sender),
+                            choices: VisualQualitySenderRating.allCases,
+                            label: \.label
+                        )
+                        qualityPicker(
+                            "Text",
+                            selection: messageBinding(index, keyPath: \.text),
+                            choices: VisualQualityTextRating.allCases,
+                            label: \.label
+                        )
+                        qualityPicker(
+                            "Time",
+                            selection: messageBinding(index, keyPath: \.time),
+                            choices: VisualQualityTimeRating.allCases,
+                            label: \.label
+                        )
+                        qualityPicker(
+                            "Kind",
+                            selection: messageBinding(index, keyPath: \.kind),
+                            choices: VisualQualityKindRating.allCases,
+                            label: \.label
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            HStack {
+                Button("−") { model.removeMissingVisibleMessage() }
+                    .disabled(review.missingVisibleMessages == 0)
+                    .accessibilityLabel("Remove one missing visible message")
+                Text("Missing visible messages: \(review.missingVisibleMessages)")
+                Button("+") { model.addMissingVisibleMessage() }
+                    .accessibilityLabel("Add one missing visible message")
+            }
+            Text("Mark a message Duplicate only when that same visible message appeared in an earlier reviewed frame. Correct means a distinct visible message. Missing messages are counted above without retyping their content.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Record Review") {
+                Task { await model.recordVisualQualityReview() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!review.isComplete)
+        }
+    }
+
+    private func messageBinding<Value: Hashable>(
+        _ index: Int,
+        keyPath: WritableKeyPath<VisualQualityMessageAssessment, Value?>
+    ) -> Binding<Value?> {
+        Binding(
+            get: {
+                guard let review = model.visualQualityGateReview,
+                      review.messageAssessments.indices.contains(index) else { return nil }
+                return review.messageAssessments[index][keyPath: keyPath]
+            },
+            set: { value in
+                model.setVisualQualityMessageRating(at: index) {
+                    $0[keyPath: keyPath] = value
+                }
+            }
+        )
+    }
+
+    private func qualityPicker<Value: Hashable & Identifiable>(
+        _ title: String,
+        selection: Binding<Value?>,
+        choices: [Value],
+        label: @escaping (Value) -> String
+    ) -> some View where Value.ID == Value {
+        Picker(title, selection: selection) {
+            Text("Select…").tag(nil as Value?)
+            ForEach(choices, id: \.self) { choice in
+                Text(label(choice)).tag(Optional(choice))
+            }
+        }
+    }
+}
+
+private struct VisualQualityMetricsView: View {
+    let metrics: VisualQualityMetrics
+
+    var body: some View {
+        GroupBox("Aggregate Results · Memory Only") {
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
+                row("Frames attempted / reviewed", "\(metrics.totalFrames) / \(metrics.reviewedFrames)")
+                row("Conversation-title correctness", fraction(metrics.conversationTitleAccuracy))
+                row("Message detection precision", fraction(metrics.messageDetectionPrecision))
+                row("Message detection recall", fraction(metrics.messageDetectionRecall))
+                row("Sender correctness", fraction(metrics.senderAccuracy))
+                row("Text exact rate", fraction(metrics.textExactRate))
+                row("Text exact or minor error", fraction(metrics.textExactOrMinorRate))
+                row("Visible-time correctness", fraction(metrics.visibleTimeAccuracy))
+                row("Message-kind correctness", fraction(metrics.messageKindAccuracy))
+                row("Visible messages", String(metrics.visibleMessages))
+                row("Unknown title/sender", String(metrics.unknownCount))
+                row("Text visually unreadable", String(metrics.textVisuallyUnreadable))
+                row("Time not shown / unreadable", "\(metrics.timeNotShown) / \(metrics.timeUnreadable)")
+                row("Hallucinated messages", String(metrics.hallucinatedMessageCount))
+                row("Hallucinated message content", String(metrics.hallucinatedContentCount))
+                row("All hallucinated fields", String(metrics.hallucinationCount))
+                row("Duplicate rows after reconciliation", String(metrics.duplicateAfterReconciliationCount))
+                row("Lost rows across overlap", String(metrics.lostMessageCountAcrossOverlap))
+                row("Append / prepend / gaps / unchanged", "\(metrics.appendFrames) / \(metrics.prependFrames) / \(metrics.gapFrames) / \(metrics.unchangedFrames)")
+                row("Extraction failures", String(metrics.extractionFailures))
+                if metrics.totalFrames > 0 {
+                    row(
+                        "Fabricated-message hard gate",
+                        metrics.reviewedFrames == 0
+                            ? "Not Established"
+                            : (metrics.fabricatedMessageHardGatePasses ? "0 observed" : "FAIL")
+                    )
+                }
+            }
+            if !metrics.failureCategories.isEmpty {
+                Text(metrics.failureCategories.keys.sorted { $0.rawValue < $1.rawValue }
+                    .map { "\($0.label): \(metrics.failureCategories[$0, default: 0])" }
+                    .joined(separator: " · "))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func row(_ title: String, _ value: String) -> some View {
+        GridRow {
+            Text(title).foregroundStyle(.secondary)
+            Text(value).monospacedDigit()
+        }
+    }
+
+    private func fraction(_ rate: VisualQualityRate) -> String {
+        "\(rate.numerator) / \(rate.denominator)"
+    }
+}
+
+private extension VisibleMessageKind {
+    var qualityLabel: String {
+        switch self {
+        case .text: "Text"
+        case .image: "Image"
+        case .file: "File"
+        case .link: "Link"
+        case .voice: "Voice"
+        case .system: "System"
+        case .unknown: "Unknown"
+        }
+    }
+}
+#endif
 
 private struct StatusRow: View {
     let label: String

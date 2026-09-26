@@ -31,6 +31,17 @@ final class AppModel {
     private(set) var retentionPolicy = RetentionPolicy.defaultPolicy
     private(set) var selectedGeminiModel = GeminiModel.provisionalDefault
     private(set) var credentialErrorOccurred = false
+#if DEBUG
+    private(set) var visualQualityGateMode = VisualQualityGateMode.normal
+    var visualQualityGateIsActive: Bool { visualQualityGateMode != .normal }
+    var visualQualityGatePhase = VisualQualityGatePhase.inactive
+    var visualQualityGateMetrics = VisualQualityMetrics()
+    var visualQualityGateReview: VisualQualityFrameReview?
+    var visualQualityGateModelID: String?
+    @ObservationIgnored private var visualQualityGateTask: Task<Void, Never>?
+    @ObservationIgnored private var visualQualityReconciler = VisualQualityReconciliationTracker()
+    @ObservationIgnored private var visualQualityGateModel: GeminiModel?
+#endif
 
     @ObservationIgnored private let service: DiagnosticsService
     @ObservationIgnored private let store: DiagnosticsStore
@@ -110,6 +121,9 @@ final class AppModel {
     // MARK: - Extraction settings
 
     func saveProviderAPIKey() async {
+#if DEBUG
+        if visualQualityGateIsActive { await finishVisualQualityGate() }
+#endif
         let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return }
         credentialErrorOccurred = false
@@ -125,6 +139,9 @@ final class AppModel {
     }
 
     func removeProviderAPIKey() async {
+#if DEBUG
+        if visualQualityGateIsActive { await finishVisualQualityGate() }
+#endif
         credentialErrorOccurred = false
         do {
             try credentials.remove(account: GeminiFrameExtractor.credentialAccount)
@@ -141,6 +158,12 @@ final class AppModel {
     func setAllowsRemoteProcessing(_ isAllowed: Bool) async {
         allowsRemoteProcessing = isAllowed
         consentDefaults.set(isAllowed, forKey: Self.remoteConsentKey)
+#if DEBUG
+        if !isAllowed, visualQualityGateIsActive {
+            await finishVisualQualityGate()
+            return
+        }
+#endif
         await applyExtractionConfiguration()
     }
 
@@ -149,6 +172,9 @@ final class AppModel {
     /// consent value and accumulated metrics are all preserved.
     func setGeminiModel(_ model: GeminiModel) async {
         guard model != selectedGeminiModel else { return }
+#if DEBUG
+        if visualQualityGateIsActive { await finishVisualQualityGate() }
+#endif
         selectedGeminiModel = model
         consentDefaults.set(model.modelID, forKey: Self.geminiModelKey)
         await applyExtractionConfiguration()
@@ -350,6 +376,9 @@ final class AppModel {
     /// Presents the system window picker. The user chooses the WeChat window
     /// themselves; we never activate or control WeChat to do it.
     func selectWeChatWindow() async {
+#if DEBUG
+        guard !visualQualityGateIsActive else { return }
+#endif
         await session.selectWindow()
         await refreshCaptureMetrics()
         await refreshExtractionState()
@@ -358,6 +387,9 @@ final class AppModel {
     }
 
     func resumeObserving() async {
+#if DEBUG
+        if visualQualityGateIsActive { await finishVisualQualityGate(resumeCapture: false) }
+#endif
         await session.resume()
         await refreshCaptureMetrics()
         await refreshExtractionState()
@@ -366,6 +398,12 @@ final class AppModel {
     }
 
     func pauseObserving() async {
+#if DEBUG
+        if visualQualityGateIsActive {
+            await finishVisualQualityGate(resumeCapture: false)
+            return
+        }
+#endif
         await session.pause()
         await refreshCaptureMetrics()
         // Capture polling stops, but extraction polling deliberately does not:
@@ -375,6 +413,9 @@ final class AppModel {
     }
 
     func stopObserving() async {
+#if DEBUG
+        if visualQualityGateIsActive { await finishVisualQualityGate(resumeCapture: false) }
+#endif
         await session.stopObserving()
         await refreshCaptureMetrics()
         await refreshExtractionState()
@@ -386,6 +427,193 @@ final class AppModel {
         await session.clearPreview()
         capturePreview = nil
     }
+
+#if DEBUG
+    func beginVisualQualityGate() async {
+        guard visualQualityGateMode == .normal,
+              allowsRemoteProcessing,
+              hasProviderCredential else { return }
+
+        visualQualityGateMode = .preparingEvaluation
+        extractionCoordinator.closeForEvaluationImmediately()
+        await extractionCoordinator.beginEvaluationIsolation()
+        await extractionCoordinator.waitUntilIdle()
+        await extractionCoordinator.clearLatest()
+        await session.pause()
+        await session.clearPreview()
+        capturePreview = nil
+        latestExtraction = nil
+        stopMetricsPolling()
+        stopExtractionPolling()
+
+        visualQualityGateMetrics = VisualQualityMetrics()
+        visualQualityGateModel = selectedGeminiModel
+        visualQualityGateModelID = selectedGeminiModel.modelID
+        visualQualityReconciler.reset()
+        visualQualityGatePhase = .selectingWindow
+    }
+
+    /// Installs the evaluation-only consumer before opening the system picker.
+    /// No ScreenCaptureKit stream starts until the user selects a window.
+    func selectWindowForVisualQualityGate() async {
+        guard visualQualityGateMode == .preparingEvaluation else { return }
+        await armVisualQualityFrameConsumer()
+        let finish: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in await self?.finishVisualQualityGate() }
+        }
+        await session.selectWindow(onCancel: finish, onFailure: finish)
+    }
+
+    /// Arms the in-memory evaluation stream without opening a picker or
+    /// starting capture. Kept internal so synthetic tests can inject frames.
+    func armVisualQualityFrameConsumer() async {
+        guard visualQualityGateMode == .preparingEvaluation,
+              visualQualityGateTask == nil else { return }
+        let frames = await session.meaningfulFrames()
+        visualQualityGateTask = Task { [weak self] in
+            await self?.extractOneVisualQualityFrame(from: frames)
+        }
+    }
+
+    func captureNextVisualQualityFrame() async {
+        guard visualQualityGateMode == .evaluating,
+              visualQualityGateTask == nil,
+              visualQualityGatePhase == .readyForNext || visualQualityGatePhase == .failed else {
+            return
+        }
+        visualQualityGatePhase = .capturing
+        await scheduleVisualQualityFrameCapture()
+    }
+
+    func setVisualQualityTitleRating(_ rating: VisualQualityTitleRating?) {
+        visualQualityGateReview?.titleRating = rating
+    }
+
+    func setVisualQualityMessageRating(
+        at index: Int,
+        _ update: (inout VisualQualityMessageAssessment) -> Void
+    ) {
+        guard var review = visualQualityGateReview,
+              review.messageAssessments.indices.contains(index) else { return }
+        update(&review.messageAssessments[index])
+        visualQualityGateReview = review
+    }
+
+    func addMissingVisibleMessage() {
+        guard visualQualityGateReview != nil else { return }
+        visualQualityGateReview?.missingVisibleMessages += 1
+    }
+
+    func removeMissingVisibleMessage() {
+        guard let count = visualQualityGateReview?.missingVisibleMessages, count > 0 else { return }
+        visualQualityGateReview?.missingVisibleMessages = count - 1
+    }
+
+    func recordVisualQualityReview() async {
+        guard let review = visualQualityGateReview, review.isComplete else { return }
+        visualQualityGateMetrics.recordReviewedFrame(
+            title: review.titleRating!,
+            messages: review.messageAssessments,
+            missingVisibleMessages: review.missingVisibleMessages,
+            reconciliation: review.reconciliation
+        )
+        visualQualityGateReview = nil
+        await session.clearPreview()
+        capturePreview = nil
+        visualQualityGatePhase = .readyForNext
+    }
+
+    func finishVisualQualityGate(resumeCapture: Bool = true) async {
+        guard visualQualityGateMode != .normal else { return }
+        visualQualityGateTask?.cancel()
+        if let task = visualQualityGateTask { await task.value }
+        visualQualityGateTask = nil
+        await session.pause()
+        await session.clearPreview()
+        capturePreview = nil
+        visualQualityGateReview = nil
+        visualQualityReconciler.reset()
+        visualQualityGateModel = nil
+        visualQualityGatePhase = .finished
+
+        await applyExtractionConfiguration()
+        await extractionCoordinator.clearLatest()
+        latestExtraction = nil
+        let freshFrames = await session.meaningfulFrames()
+        await extractionCoordinator.endEvaluationIsolation(frames: freshFrames)
+        visualQualityGateMode = .normal
+        if resumeCapture {
+            await session.resume()
+            startMetricsPolling()
+        }
+        startExtractionPolling()
+        await refreshCaptureMetrics()
+        await refreshExtractionState()
+    }
+
+    private func scheduleVisualQualityFrameCapture() async {
+        guard visualQualityGateTask == nil else { return }
+        let frames = await session.meaningfulFrames()
+        visualQualityGateTask = Task { [weak self] in
+            await self?.extractOneVisualQualityFrame(from: frames)
+        }
+        await session.resume()
+    }
+
+    private func extractOneVisualQualityFrame(from frames: AsyncStream<ObservedFrame>) async {
+        for await frame in frames {
+            guard !Task.isCancelled, visualQualityGateMode != .normal else { break }
+            visualQualityGateMode = .evaluating
+            visualQualityGatePhase = .capturing
+            await session.pause()
+            await session.clearPreview()
+            capturePreview = nil
+
+            let extractor = GeminiFrameExtractor(
+                credentials: credentials,
+                transport: geminiTransport,
+                model: visualQualityGateModel ?? selectedGeminiModel
+            )
+            guard ExtractionCapability(userEnabledRemoteProvider: allowsRemoteProcessing)
+                .allowsProcessing(at: extractor.processingLocation) else {
+                visualQualityGatePhase = .failed
+                visualQualityGateTask = nil
+                return
+            }
+            visualQualityGateMetrics.recordExtractionAttempt()
+            guard extractor.isConfigured else {
+                visualQualityGateMetrics.recordExtractionFailure(.missingCredential)
+                visualQualityGatePhase = .failed
+                visualQualityGateTask = nil
+                return
+            }
+
+            do {
+                let result = try await extractor.extract(from: frame)
+                guard !Task.isCancelled, visualQualityGateIsActive else { return }
+                let reconciliation = visualQualityReconciler.reconcile(result)
+                visualQualityGateReview = VisualQualityFrameReview(
+                    frame: frame,
+                    extraction: result,
+                    reconciliation: reconciliation
+                )
+                visualQualityGatePhase = .reviewing
+            } catch is CancellationError {
+                visualQualityGateMetrics.cancelledFrames += 1
+            } catch let error as URLError where error.code == .cancelled {
+                visualQualityGateMetrics.cancelledFrames += 1
+            } catch {
+                let category = (error as? any ExtractionFailureDescribing)?
+                    .failureDiagnostics.category ?? .other
+                visualQualityGateMetrics.recordExtractionFailure(category)
+                visualQualityGatePhase = .failed
+            }
+            visualQualityGateTask = nil
+            return
+        }
+        visualQualityGateTask = nil
+    }
+#endif
 
     /// The ledger also has to follow user actions that change what is kept --
     /// consent, retention and deletion -- because capture polling may not be
@@ -463,3 +691,427 @@ enum Destination: String, CaseIterable, Identifiable {
         }
     }
 }
+
+#if DEBUG
+enum VisualQualityGateMode: Equatable {
+    case normal
+    case preparingEvaluation
+    case evaluating
+}
+
+enum VisualQualityGatePhase: Equatable {
+    case inactive
+    case selectingWindow
+    case capturing
+    case reviewing
+    case failed
+    case readyForNext
+    case finished
+}
+
+struct VisualQualityRate: Equatable, Sendable {
+    let numerator: Int
+    let denominator: Int
+}
+
+enum VisualQualityTitleRating: String, CaseIterable, Identifiable, Hashable {
+    case correct
+    case wrong
+    case unknown
+    case hallucinated
+
+    var id: Self { self }
+    var label: String { rawValue.capitalized }
+}
+
+enum VisualQualityDetectionRating: String, CaseIterable, Identifiable, Hashable {
+    case correct
+    case missing
+    case hallucinated
+    case duplicate
+
+    var id: Self { self }
+    var label: String { rawValue.capitalized }
+}
+
+enum VisualQualitySenderRating: String, CaseIterable, Identifiable, Hashable {
+    case correct
+    case wrong
+    case unknown
+    case hallucinated
+
+    var id: Self { self }
+    var label: String { rawValue.capitalized }
+}
+
+enum VisualQualityTextRating: String, CaseIterable, Identifiable, Hashable {
+    case exact
+    case minorError
+    case wrong
+    case missing
+    case hallucinated
+    case visuallyUnreadable
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .exact: "Exact"
+        case .minorError: "Minor Error"
+        case .wrong: "Wrong"
+        case .missing: "Missing"
+        case .hallucinated: "Hallucinated"
+        case .visuallyUnreadable: "Visually Unreadable"
+        }
+    }
+}
+
+enum VisualQualityTimeRating: String, CaseIterable, Identifiable, Hashable {
+    case correct
+    case wrong
+    case notShown
+    case unreadable
+    case hallucinated
+
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .correct: "Correct"
+        case .wrong: "Wrong"
+        case .notShown: "Not Shown"
+        case .unreadable: "Unreadable"
+        case .hallucinated: "Hallucinated"
+        }
+    }
+}
+
+enum VisualQualityKindRating: String, CaseIterable, Identifiable, Hashable {
+    case correct
+    case wrong
+    case unsupported
+    case hallucinated
+
+    var id: Self { self }
+    var label: String { rawValue.capitalized }
+}
+
+struct VisualQualityMessageAssessment: Equatable {
+    var detection: VisualQualityDetectionRating? = nil
+    var sender: VisualQualitySenderRating? = nil
+    var text: VisualQualityTextRating? = nil
+    var time: VisualQualityTimeRating? = nil
+    var kind: VisualQualityKindRating? = nil
+
+    var isComplete: Bool {
+        detection != nil && sender != nil && text != nil && time != nil && kind != nil
+    }
+}
+
+struct VisualQualityFrameReview {
+    let frame: ObservedFrame
+    let extraction: ExtractedConversationFrame
+    let reconciliation: VisualQualityReconciliationSummary
+    var titleRating: VisualQualityTitleRating?
+    var messageAssessments: [VisualQualityMessageAssessment]
+    var missingVisibleMessages = 0
+
+    init(
+        frame: ObservedFrame,
+        extraction: ExtractedConversationFrame,
+        reconciliation: VisualQualityReconciliationSummary
+    ) {
+        self.frame = frame
+        self.extraction = extraction
+        self.reconciliation = reconciliation
+        self.messageAssessments = extraction.messages.map { _ in VisualQualityMessageAssessment() }
+    }
+
+    var isComplete: Bool {
+        titleRating != nil && messageAssessments.allSatisfy(\.isComplete)
+    }
+}
+
+struct VisualQualityReconciliationSummary: Equatable, Sendable {
+    let action: VisualQualityReconciliationAction
+    let overlapCount: Int
+    let newMessageCount: Int
+    let suppressedIndexes: Set<Int>
+    let contributionIndexes: Set<Int>
+}
+
+enum VisualQualityReconciliationAction: Equatable, Sendable {
+    case unattributed
+    case empty
+    case appended
+    case prepended
+    case gap
+    case unchanged
+
+    var label: String {
+        switch self {
+        case .unattributed: "No Conversation Identity"
+        case .empty: "No Meaningful Messages"
+        case .appended: "Append"
+        case .prepended: "Prepend"
+        case .gap: "Gap"
+        case .unchanged: "No New Messages"
+        }
+    }
+}
+
+/// Aggregate-only, session-memory measurements. This type intentionally has
+/// no Codable conformance and no field for titles, rows, text, or images.
+struct VisualQualityMetrics: Equatable {
+    var totalFrames = 0
+    var reviewedFrames = 0
+    var cancelledFrames = 0
+    var extractionFailures = 0
+    var failureCategories: [ExtractionFailureCategory: Int] = [:]
+    var lastFailureCategory: ExtractionFailureCategory?
+    var titleCorrect = 0
+    var titleWrong = 0
+    var titleUnknown = 0
+    var titleHallucinated = 0
+    var detectionCorrect = 0
+    var detectionMissing = 0
+    var detectionHallucinated = 0
+    var detectionDuplicate = 0
+    var senderCorrect = 0
+    var senderWrong = 0
+    var senderUnknown = 0
+    var senderHallucinated = 0
+    var textExact = 0
+    var textMinorError = 0
+    var textWrong = 0
+    var textMissing = 0
+    var textHallucinated = 0
+    var textVisuallyUnreadable = 0
+    var timeCorrect = 0
+    var timeWrong = 0
+    var timeNotShown = 0
+    var timeUnreadable = 0
+    var timeHallucinated = 0
+    var kindCorrect = 0
+    var kindWrong = 0
+    var kindUnsupported = 0
+    var kindHallucinated = 0
+    var duplicateAfterReconciliationCount = 0
+    var lostMessageCountAcrossOverlap = 0
+    var appendFrames = 0
+    var prependFrames = 0
+    var gapFrames = 0
+    var unchangedFrames = 0
+
+    var visibleMessages: Int { detectionCorrect + detectionMissing }
+    var hallucinatedMessageCount: Int { detectionHallucinated }
+    var hallucinatedContentCount: Int { textHallucinated }
+    var hallucinationCount: Int {
+        titleHallucinated + detectionHallucinated + senderHallucinated
+            + textHallucinated + timeHallucinated + kindHallucinated
+    }
+    var fabricatedMessageHardGatePasses: Bool {
+        hallucinatedMessageCount == 0 && hallucinatedContentCount == 0
+    }
+    var unknownCount: Int { titleUnknown + senderUnknown }
+    var wrongCount: Int { titleWrong + senderWrong + textWrong + timeWrong + kindWrong }
+
+    var conversationTitleAccuracy: VisualQualityRate {
+        rate(titleCorrect, titleCorrect + titleWrong + titleHallucinated)
+    }
+    var messageDetectionPrecision: VisualQualityRate {
+        rate(detectionCorrect, detectionCorrect + detectionHallucinated + detectionDuplicate)
+    }
+    var messageDetectionRecall: VisualQualityRate {
+        rate(detectionCorrect, detectionCorrect + detectionMissing)
+    }
+    var senderAccuracy: VisualQualityRate {
+        rate(senderCorrect, senderCorrect + senderWrong + senderHallucinated)
+    }
+    var textExactRate: VisualQualityRate {
+        rate(textExact, textExact + textMinorError + textWrong + textMissing + textHallucinated)
+    }
+    var textExactOrMinorRate: VisualQualityRate {
+        rate(textExact + textMinorError, textExact + textMinorError + textWrong + textMissing + textHallucinated)
+    }
+    var visibleTimeAccuracy: VisualQualityRate {
+        rate(timeCorrect, timeCorrect + timeWrong + timeHallucinated)
+    }
+    var messageKindAccuracy: VisualQualityRate {
+        rate(kindCorrect, kindCorrect + kindWrong + kindUnsupported + kindHallucinated)
+    }
+
+    mutating func recordExtractionAttempt() { totalFrames += 1 }
+
+    mutating func recordExtractionFailure(_ category: ExtractionFailureCategory) {
+        extractionFailures += 1
+        lastFailureCategory = category
+        failureCategories[category, default: 0] += 1
+    }
+
+    mutating func recordReviewedFrame(
+        title: VisualQualityTitleRating,
+        messages: [VisualQualityMessageAssessment],
+        missingVisibleMessages: Int,
+        reconciliation: VisualQualityReconciliationSummary
+    ) {
+        reviewedFrames += 1
+        detectionMissing += missingVisibleMessages
+        if reconciliation.overlapCount > 0 {
+            lostMessageCountAcrossOverlap += missingVisibleMessages
+        }
+        switch title {
+        case .correct: titleCorrect += 1
+        case .wrong: titleWrong += 1
+        case .unknown: titleUnknown += 1
+        case .hallucinated: titleHallucinated += 1
+        }
+
+        for (index, message) in messages.enumerated() {
+            switch message.detection {
+            case .correct:
+                detectionCorrect += 1
+            case .hallucinated:
+                detectionHallucinated += 1
+            case .missing:
+                detectionMissing += 1
+            case .duplicate:
+                detectionDuplicate += 1
+                if reconciliation.contributionIndexes.contains(index) {
+                    duplicateAfterReconciliationCount += 1
+                }
+            case nil:
+                break
+            }
+            switch message.sender {
+            case .correct: senderCorrect += 1
+            case .wrong: senderWrong += 1
+            case .unknown: senderUnknown += 1
+            case .hallucinated: senderHallucinated += 1
+            case nil: break
+            }
+            switch message.text {
+            case .exact: textExact += 1
+            case .minorError: textMinorError += 1
+            case .wrong: textWrong += 1
+            case .missing: textMissing += 1
+            case .hallucinated: textHallucinated += 1
+            case .visuallyUnreadable: textVisuallyUnreadable += 1
+            case nil: break
+            }
+            switch message.time {
+            case .correct: timeCorrect += 1
+            case .wrong: timeWrong += 1
+            case .notShown: timeNotShown += 1
+            case .unreadable: timeUnreadable += 1
+            case .hallucinated: timeHallucinated += 1
+            case nil: break
+            }
+            switch message.kind {
+            case .correct: kindCorrect += 1
+            case .wrong: kindWrong += 1
+            case .unsupported: kindUnsupported += 1
+            case .hallucinated: kindHallucinated += 1
+            case nil: break
+            }
+        }
+
+        switch reconciliation.action {
+        case .appended: appendFrames += 1
+        case .prepended: prependFrames += 1
+        case .gap: gapFrames += 1
+        case .unchanged: unchangedFrames += 1
+        case .unattributed, .empty: break
+        }
+    }
+
+    private func rate(_ numerator: Int, _ denominator: Int) -> VisualQualityRate {
+        VisualQualityRate(numerator: numerator, denominator: denominator)
+    }
+}
+
+/// Runs the same run-alignment logic as MessageIngestor without opening a
+/// MessageStore or retaining screenshots beyond the active review row.
+struct VisualQualityReconciliationTracker {
+    private var conversationTitle: String?
+    private var storedHead: [MessageIdentityKey] = []
+    private var storedTail: [MessageIdentityKey] = []
+
+    mutating func reconcile(_ frame: ExtractedConversationFrame) -> VisualQualityReconciliationSummary {
+        guard let title = frame.chat?.title else {
+            reset()
+            return VisualQualityReconciliationSummary(
+                action: .unattributed, overlapCount: 0, newMessageCount: 0,
+                suppressedIndexes: [], contributionIndexes: []
+            )
+        }
+        if title != conversationTitle {
+            reset()
+            conversationTitle = title
+        }
+
+        let meaningful = frame.messages.enumerated().filter {
+            MessageIngestor.isMeaningfulForQualityGate($0.element)
+        }
+        let sourceIndexes = meaningful.map(\.offset)
+        let incoming = meaningful.map { MessageIdentityKey($0.element) }
+        guard !incoming.isEmpty else {
+            return VisualQualityReconciliationSummary(
+                action: .empty, overlapCount: 0, newMessageCount: 0,
+                suppressedIndexes: [], contributionIndexes: []
+            )
+        }
+        let decision = FrameReconciler.reconcile(
+            incoming: incoming,
+            storedTail: storedTail,
+            storedHead: storedHead.isEmpty ? nil : storedHead
+        )
+        let summary: VisualQualityReconciliationSummary
+        switch decision {
+        case let .appended(overlap, range):
+            summary = VisualQualityReconciliationSummary(
+                action: .appended,
+                overlapCount: overlap,
+                newMessageCount: range.count,
+                suppressedIndexes: Set(sourceIndexes.prefix(overlap)),
+                contributionIndexes: Set(range.map { sourceIndexes[$0] })
+            )
+            if storedHead.isEmpty { storedHead = Array(incoming.prefix(MessageStore.reconciliationWindow)) }
+            storedTail = Array((storedTail + incoming[range]).suffix(MessageStore.reconciliationWindow))
+        case let .prepended(overlap, range):
+            let overlapStart = incoming.count - overlap
+            summary = VisualQualityReconciliationSummary(
+                action: .prepended,
+                overlapCount: overlap,
+                newMessageCount: range.count,
+                suppressedIndexes: Set(sourceIndexes[overlapStart..<incoming.count]),
+                contributionIndexes: Set(range.map { sourceIndexes[$0] })
+            )
+            storedHead = Array((Array(incoming[range]) + storedHead).prefix(MessageStore.reconciliationWindow))
+        case let .gap(range):
+            summary = VisualQualityReconciliationSummary(
+                action: .gap,
+                overlapCount: 0,
+                newMessageCount: range.count,
+                suppressedIndexes: [],
+                contributionIndexes: Set(range.map { sourceIndexes[$0] })
+            )
+            if storedHead.isEmpty { storedHead = Array(incoming.prefix(MessageStore.reconciliationWindow)) }
+            storedTail = Array((storedTail + incoming[range]).suffix(MessageStore.reconciliationWindow))
+        case .nothingNew:
+            summary = VisualQualityReconciliationSummary(
+                action: .unchanged,
+                overlapCount: incoming.count,
+                newMessageCount: 0,
+                suppressedIndexes: Set(sourceIndexes),
+                contributionIndexes: []
+            )
+        }
+        return summary
+    }
+
+    mutating func reset() {
+        conversationTitle = nil
+        storedHead.removeAll(keepingCapacity: false)
+        storedTail.removeAll(keepingCapacity: false)
+    }
+}
+#endif

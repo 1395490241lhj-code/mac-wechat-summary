@@ -49,6 +49,33 @@ struct ExtractionState: Sendable {
     let latest: ExtractedConversationFrame?
 }
 
+#if DEBUG
+/// Synchronous latch shared with the UI actor so the normal frame path closes
+/// before any asynchronous coordinator hop can admit another frame.
+private final class ExtractionEvaluationLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var closed = false
+
+    var isClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return closed
+    }
+
+    func close() {
+        lock.lock()
+        closed = true
+        lock.unlock()
+    }
+
+    func open() {
+        lock.lock()
+        closed = false
+        lock.unlock()
+    }
+}
+#endif
+
 /// Consumes meaningful frames and runs at most one extraction at a time.
 ///
 /// Backpressure is newest-wins with a single pending slot: while an extraction
@@ -72,6 +99,9 @@ actor ExtractionCoordinator {
     private var extractionGeneration = 0
     private var consumeTask: Task<Void, Never>?
     private var isPaused = false
+#if DEBUG
+    private nonisolated let evaluationLatch = ExtractionEvaluationLatch()
+#endif
     /// Latest result, in memory only. Never written to disk in this phase.
     private var latestExtraction: ExtractedConversationFrame?
 
@@ -103,6 +133,9 @@ actor ExtractionCoordinator {
     var isPersisting: Bool { ingestor != nil }
 
     func start(frames: AsyncStream<ObservedFrame>) {
+#if DEBUG
+        guard !evaluationLatch.isClosed else { return }
+#endif
         isPaused = false
         consumeTask?.cancel()
         consumeTask = Task { [weak self] in
@@ -127,6 +160,24 @@ actor ExtractionCoordinator {
         pendingFrame = nil
     }
 
+#if DEBUG
+    nonisolated func closeForEvaluationImmediately() {
+        evaluationLatch.close()
+    }
+
+    /// Holds the normal pipeline closed until a fresh post-evaluation stream is
+    /// supplied. Late provider results cannot reach the UI or the ingestor.
+    func beginEvaluationIsolation() {
+        evaluationLatch.close()
+        pause()
+    }
+
+    func endEvaluationIsolation(frames: AsyncStream<ObservedFrame>) {
+        evaluationLatch.open()
+        start(frames: frames)
+    }
+#endif
+
     func snapshot() -> ExtractionMetrics {
         var current = metrics
         current.status = status
@@ -135,6 +186,11 @@ actor ExtractionCoordinator {
 
     /// In-memory only; exposed for the future message store, never persisted here.
     func latest() -> ExtractedConversationFrame? { latestExtraction }
+
+    #if DEBUG
+    /// Releases the most recent result when a diagnostics-only session ends.
+    func clearLatest() { latestExtraction = nil }
+    #endif
 
     /// Metrics and latest result read in one actor hop, so the UI can never
     /// show counters from one instant beside a result from another.
@@ -156,6 +212,9 @@ actor ExtractionCoordinator {
     }
 
     func submit(_ frame: ObservedFrame) {
+#if DEBUG
+        guard !evaluationLatch.isClosed else { return }
+#endif
         metrics.framesReceived += 1
         guard !isPaused else { return }
 
@@ -224,6 +283,12 @@ actor ExtractionCoordinator {
         metrics.extractionsStarted += 1
         do {
             let extracted = try await extractor.extract(from: frame)
+#if DEBUG
+            guard !evaluationLatch.isClosed else {
+                recordCancellation()
+                return
+            }
+#endif
             metrics.extractionsSucceeded += 1
             latestExtraction = extracted
             metrics.lastExtractionAt = Date()
