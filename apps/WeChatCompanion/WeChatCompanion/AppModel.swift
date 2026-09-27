@@ -50,6 +50,7 @@ final class AppModel {
     @ObservationIgnored private let observerStore: ObserverMetricsStore
     @ObservationIgnored private let extractionCoordinator: ExtractionCoordinator
     @ObservationIgnored private let messageHistory: LocalMessageHistory
+    @ObservationIgnored private let shareInbox: WeChatShareInbox?
     @ObservationIgnored private let credentials: any CredentialStoring
     /// Held so rebuilding the extractor cannot silently fall back to the
     /// production transport. Without this seam a test's transport is detached
@@ -62,6 +63,7 @@ final class AppModel {
     /// Independent of capture polling: an extraction already in flight can
     /// still finish after capture is paused, and Chats must show that result.
     @ObservationIgnored private var extractionPollingTask: Task<Void, Never>?
+    @ObservationIgnored private var isConsumingShareInbox = false
     @ObservationIgnored private var didBootstrap = false
 
     init(
@@ -71,6 +73,7 @@ final class AppModel {
         observerStore: ObserverMetricsStore = .applicationSupport,
         extractionCoordinator: ExtractionCoordinator = ExtractionCoordinator(),
         messageHistory: LocalMessageHistory = .applicationSupport,
+        shareInbox: WeChatShareInbox? = AppModel.defaultShareInbox(),
         credentials: any CredentialStoring = KeychainCredentialStore(),
         geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
         consentDefaults: UserDefaults = .standard,
@@ -82,6 +85,7 @@ final class AppModel {
         self.observerStore = observerStore
         self.extractionCoordinator = extractionCoordinator
         self.messageHistory = messageHistory
+        self.shareInbox = shareInbox
         self.credentials = credentials
         self.geminiTransport = geminiTransport
         self.consentDefaults = consentDefaults
@@ -197,6 +201,11 @@ final class AppModel {
     /// the suite -- which it did, once, before the guard existed. Tests inject
     /// the runner they mean to exercise; only a shipped app takes the
     /// packaged one.
+    static func defaultShareInbox() -> WeChatShareInbox? {
+        guard !RuntimeEnvironment.isUnderTestHost else { return nil }
+        return WeChatShareInbox.appGroup()
+    }
+
     static func defaultMemorySyncRunner() -> any MemorySyncRunning {
         // `bundled()` refuses under a test host; this stays as the second of
         // two independent stops rather than trusting either alone.
@@ -267,6 +276,9 @@ final class AppModel {
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
         await refreshCaptureLedger()
+        if isAllowed {
+            await consumePendingShareArchives()
+        }
     }
 
     /// Applies immediately, including a sweep of anything the new policy has
@@ -280,11 +292,60 @@ final class AppModel {
         await refreshCaptureLedger()
     }
 
-    func importWeChatArchive(from url: URL) async {
+    func importWeChatArchive(
+        from url: URL,
+        suggestedConversationName: String? = nil
+    ) async {
+        _ = await performArchiveImport(
+            from: url,
+            suggestedConversationName: suggestedConversationName
+        )
+    }
+
+    func consumePendingShareArchives() async {
+        guard !isConsumingShareInbox, let shareInbox else { return }
+        isConsumingShareInbox = true
+        defer { isConsumingShareInbox = false }
+
+        let items: [WeChatShareInboxItem]
+        do {
+            items = try shareInbox.pendingItems()
+        } catch {
+            return
+        }
+        guard !items.isEmpty else { return }
+        selectedDestination = .chats
+
+        for item in items {
+            let terminal = await performArchiveImport(
+                from: item.archiveURL,
+                suggestedConversationName: item.suggestedConversationName
+            )
+            guard terminal else { return }
+            shareInbox.remove(item)
+        }
+    }
+
+    private func performArchiveImport(
+        from url: URL,
+        suggestedConversationName: String?
+    ) async -> Bool {
+        guard allowsLocalPersistence else {
+            archiveImportStatus = .localPersistenceConsentRequired
+            return false
+        }
+        guard await messageHistory.storeState == .ready else {
+            archiveImportStatus = .localStoreUnavailable
+            return false
+        }
+
         archiveImportStatus = .importing
         do {
             let outcome = try await WeChatArchiveImportService(history: messageHistory)
-                .importArchive(contentsOf: url)
+                .importArchive(
+                    contentsOf: url,
+                    suggestedConversationName: suggestedConversationName
+                )
             switch outcome.persistence {
             case .inserted:
                 archiveImportStatus = .imported(
@@ -295,14 +356,19 @@ final class AppModel {
                 archiveImportStatus = .alreadyImported
             }
             await refreshCaptureLedger()
+            return true
         } catch ArchivePersistenceError.localPersistenceConsentRequired {
             archiveImportStatus = .localPersistenceConsentRequired
+            return false
         } catch ArchivePersistenceError.localStoreUnavailable {
             archiveImportStatus = .localStoreUnavailable
+            return false
         } catch WeChatArchiveImportError.conversationIdentityUnavailable {
             archiveImportStatus = .conversationIdentityUnavailable
+            return false
         } catch {
             archiveImportStatus = .invalidArchive
+            return true
         }
     }
 
@@ -365,6 +431,7 @@ final class AppModel {
         await messageHistory.setRetention(retentionPolicy)
         await messageHistory.setEnabled(allowsLocalPersistence)
         await applyExtractionConfiguration()
+        await consumePendingShareArchives()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()
         startExtractionPolling()

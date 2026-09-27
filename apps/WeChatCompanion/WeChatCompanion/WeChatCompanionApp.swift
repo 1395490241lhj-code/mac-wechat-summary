@@ -8,6 +8,11 @@ struct WeChatCompanionApp: App {
         WindowGroup("WeChat Companion") {
             ContentView(model: model)
                 .frame(minWidth: 760, minHeight: 520)
+                .onOpenURL { url in
+                    guard url.scheme == "wechatcompanion",
+                          url.host == "share-import" else { return }
+                    Task { await model.consumePendingShareArchives() }
+                }
                 .task {
                     // Under an XCTest host this scene still appears, and
                     // bootstrap would restore the stored consent and open the

@@ -32,6 +32,11 @@
 		B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */; };
 		A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A4 /* ArchiveEvidence.swift */; };
 		A00000000000000000000A6 /* WeChatArchiveImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A6 /* WeChatArchiveImportService.swift */; };
+		A00000000000000000000A7 /* WeChatShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A7 /* WeChatShareInbox.swift */; };
+		B00000000000000000000A8 /* WeChatShareInboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A8 /* WeChatShareInboxTests.swift */; };
+		A00000000000000000000A9 /* ShareRequestHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A9 /* ShareRequestHandler.swift */; };
+		A00000000000000000000AA /* WeChatShareInbox.swift in Share Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000A7 /* WeChatShareInbox.swift */; };
+		A00000000000000000000AB /* WeChatCompanionShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C00000000000000000000AD /* WeChatCompanionShare.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		A0000000000000000000B2 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B2 /* RuntimeEnvironment.swift */; };
 		A0000000000000000000009B /* MemorySync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009B /* MemorySync.swift */; };
 		A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009E /* PackagedMemorySyncRunner.swift */; };
@@ -65,6 +70,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		D00000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = G00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F00000000000000000000003;
+			remoteInfo = WeChatCompanionShare;
+		};
 		D00000000000000000000001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = G00000000000000000000001 /* Project object */;
@@ -73,6 +85,20 @@
 			remoteInfo = WeChatCompanion;
 		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		E00000000000000000000024 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				A00000000000000000000AB /* WeChatCompanionShare.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		C00000000000000000000001 /* WeChatCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatCompanionApp.swift; sourceTree = "<group>"; };
@@ -99,6 +125,13 @@
 		C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatNativeArchiveTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000A4 /* ArchiveEvidence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/ArchiveEvidence.swift; sourceTree = "<group>"; };
 		C00000000000000000000A6 /* WeChatArchiveImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Archive/WeChatArchiveImportService.swift; sourceTree = "<group>"; };
+		C00000000000000000000A7 /* WeChatShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/Share/WeChatShareInbox.swift; sourceTree = "<group>"; };
+		C00000000000000000000A8 /* WeChatShareInboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatShareInboxTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000A9 /* ShareRequestHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareRequestHandler.swift; sourceTree = "<group>"; };
+		C00000000000000000000AA /* WeChatCompanionShare.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WeChatCompanionShare.entitlements; sourceTree = "<group>"; };
+		C00000000000000000000AB /* Share Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C00000000000000000000AC /* WeChatCompanion.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WeChatCompanion.entitlements; sourceTree = "<group>"; };
+		C00000000000000000000AD /* WeChatCompanionShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WeChatCompanionShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0000000000000000000B2 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
 		C00000000000000000000097 /* RetentionPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/RetentionPolicy.swift; sourceTree = "<group>"; };
 		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
@@ -136,6 +169,13 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		E00000000000000000000022 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E00000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -158,6 +198,7 @@
 			children = (
 				D00000000000000000000011 /* WeChatCompanion */,
 				D00000000000000000000012 /* WeChatCompanionTests */,
+				D00000000000000000000014 /* WeChatCompanionShare */,
 				D00000000000000000000013 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -196,11 +237,13 @@
 				C0000000000000000000009D /* MemoryStoreLocation.swift */,
 				C00000000000000000000A4 /* ArchiveEvidence.swift */,
 				C00000000000000000000A6 /* WeChatArchiveImportService.swift */,
+				C00000000000000000000A7 /* WeChatShareInbox.swift */,
 				C00000000000000000000A0 /* ZIPArchiveReader.swift */,
 				C00000000000000000000A1 /* WeChatNativeTranscriptParser.swift */,
 				C00000000000000000000A2 /* WeChatNativeArchive.swift */,
 				C00000000000000000000098 /* LocalMessageHistory.swift */,
 				C00000000000000000000007 /* Info.plist */,
+				C00000000000000000000AC /* WeChatCompanion.entitlements */,
 			);
 			path = WeChatCompanion;
 			sourceTree = "<group>";
@@ -228,8 +271,19 @@
 				C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */,
 				C00000000000000000000A5 /* ArchivePersistenceTests.swift */,
 				C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */,
+				C00000000000000000000A8 /* WeChatShareInboxTests.swift */,
 			);
 			path = WeChatCompanionTests;
+			sourceTree = "<group>";
+		};
+		D00000000000000000000014 /* WeChatCompanionShare */ = {
+			isa = PBXGroup;
+			children = (
+				C00000000000000000000A9 /* ShareRequestHandler.swift */,
+				C00000000000000000000AB /* Share Info.plist */,
+				C00000000000000000000AA /* WeChatCompanionShare.entitlements */,
+			);
+			path = WeChatCompanionShare;
 			sourceTree = "<group>";
 		};
 		D00000000000000000000013 /* Products */ = {
@@ -237,6 +291,7 @@
 			children = (
 				C00000000000000000000021 /* WeChat Companion.app */,
 				C00000000000000000000022 /* WeChatCompanionTests.xctest */,
+				C00000000000000000000AD /* WeChatCompanionShare.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -244,6 +299,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		F00000000000000000000003 /* WeChatCompanionShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = I00000000000000000000004 /* Build configuration list for PBXNativeTarget "WeChatCompanionShare" */;
+			buildPhases = (
+				E00000000000000000000021 /* Sources */,
+				E00000000000000000000022 /* Frameworks */,
+				E00000000000000000000023 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WeChatCompanionShare;
+			productName = WeChatCompanionShare;
+			productReference = C00000000000000000000AD /* WeChatCompanionShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		F00000000000000000000001 /* WeChatCompanion */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = I00000000000000000000002 /* Build configuration list for PBXNativeTarget "WeChatCompanion" */;
@@ -252,10 +324,12 @@
 				E00000000000000000000002 /* Frameworks */,
 				E00000000000000000000003 /* Resources */,
 		E00000000000000000000004 /* Embed Memory Worker */,
+				E00000000000000000000024 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				D00000000000000000000004 /* PBXTargetDependency */,
 			);
 			name = WeChatCompanion;
 			productName = "WeChat Companion";
@@ -314,11 +388,19 @@
 			targets = (
 				F00000000000000000000001 /* WeChatCompanion */,
 				F00000000000000000000002 /* WeChatCompanionTests */,
+				F00000000000000000000003 /* WeChatCompanionShare */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		E00000000000000000000023 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E00000000000000000000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -354,6 +436,15 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		E00000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A00000000000000000000A9 /* ShareRequestHandler.swift in Sources */,
+				A00000000000000000000AA /* WeChatShareInbox.swift in Share Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		E00000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -389,6 +480,7 @@
 				A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */,
 				A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */,
 				A00000000000000000000A6 /* WeChatArchiveImportService.swift in Sources */,
+				A00000000000000000000A7 /* WeChatShareInbox.swift in Sources */,
 				A00000000000000000000A0 /* ZIPArchiveReader.swift in Sources */,
 				A00000000000000000000A1 /* WeChatNativeTranscriptParser.swift in Sources */,
 				A00000000000000000000A2 /* WeChatNativeArchive.swift in Sources */,
@@ -420,6 +512,7 @@
 				B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */,
 				B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */,
 				B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */,
+				B00000000000000000000A8 /* WeChatShareInboxTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -431,9 +524,55 @@
 			target = F00000000000000000000001 /* WeChatCompanion */;
 			targetProxy = D00000000000000000000001 /* PBXContainerItemProxy */;
 		};
+		D00000000000000000000004 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = WeChatCompanionShare;
+			target = F00000000000000000000003 /* WeChatCompanionShare */;
+			targetProxy = D00000000000000000000003 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		H00000000000000000000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WeChatCompanionShare/WeChatCompanionShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 5M5KT5ZG74;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WeChatCompanionShare/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lianghongjing.WeChatCompanion.Share;
+				PRODUCT_NAME = WeChatCompanionShare;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		H00000000000000000000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = WeChatCompanionShare/WeChatCompanionShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 5M5KT5ZG74;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WeChatCompanionShare/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lianghongjing.WeChatCompanion.Share;
+				PRODUCT_NAME = WeChatCompanionShare;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 		H00000000000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -458,6 +597,7 @@
 		H00000000000000000000011 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = WeChatCompanion/WeChatCompanion.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 5M5KT5ZG74;
@@ -481,6 +621,7 @@
 		H00000000000000000000012 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = WeChatCompanion/WeChatCompanion.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				DEVELOPMENT_TEAM = 5M5KT5ZG74;
@@ -558,6 +699,15 @@
 			buildConfigurations = (
 				H00000000000000000000021 /* Debug */,
 				H00000000000000000000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		I00000000000000000000004 /* Build configuration list for PBXNativeTarget "WeChatCompanionShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				H00000000000000000000031 /* Debug */,
+				H00000000000000000000032 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -1234,3 +1234,130 @@ struct WeChatArchiveImportServiceTests {
         #expect(await history.hasOpenStore)
     }
 }
+
+
+@MainActor
+struct WeChatShareInboxAppModelTests {
+    private func defaults() -> (UserDefaults, String) {
+        let name = "share-inbox-model-" + UUID().uuidString
+        let value = UserDefaults(suiteName: name)!
+        value.removePersistentDomain(forName: name)
+        return (value, name)
+    }
+
+    private func model(
+        inbox: WeChatShareInbox,
+        history: LocalMessageHistory,
+        defaults: UserDefaults
+    ) -> AppModel {
+        AppModel(
+            messageHistory: history,
+            shareInbox: inbox,
+            credentials: ShareInboxTestCredentials(),
+            consentDefaults: defaults
+        )
+    }
+
+    @Test
+    func consentOffLeavesPendingTransportUnreadAndIntact() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip {
+            $0.add("家庭群/聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        await app.consumePendingShareArchives()
+
+        #expect(app.archiveImportStatus == .localPersistenceConsentRequired)
+        #expect(FileManager.default.fileExists(atPath: queued.archiveURL.path))
+        #expect(try inbox.pendingItems().map(\.id) == [queued.id])
+        #expect(await history.hasOpenStore == false)
+    }
+
+    @Test
+    func enablingConsentConsumesValidPendingArchiveAndDeletesTransport() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip {
+            $0.add("家庭群/聊天记录.txt", transcript([
+                ("张三", m35, "x"), ("李四", m36, "y"),
+            ]))
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        await app.setAllowsLocalPersistence(true)
+
+        #expect(app.archiveImportStatus == .imported(
+            recordCount: 2,
+            transcriptShape: "attributed"
+        ))
+        #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().isEmpty)
+        #expect(await history.hasOpenStore)
+    }
+
+    @Test
+    func invalidPendingArchiveIsTerminalAndDeleted() async throws {
+        let scratch = try Scratch()
+        let source = scratch.url.appendingPathComponent("invalid.zip")
+        try Data("not a zip".utf8).write(to: source)
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        await app.setAllowsLocalPersistence(true)
+
+        #expect(app.archiveImportStatus == .invalidArchive)
+        #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().isEmpty)
+    }
+
+    @Test
+    func validArchiveWithoutSourceIdentityStaysPending() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip {
+            $0.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        await app.setAllowsLocalPersistence(true)
+
+        #expect(app.archiveImportStatus == .conversationIdentityUnavailable)
+        #expect(FileManager.default.fileExists(atPath: queued.archiveURL.path))
+        #expect(try inbox.pendingItems().map(\.id) == [queued.id])
+    }
+}
+
+private final class ShareInboxTestCredentials: CredentialStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String: String] = [:]
+
+    func save(_ secret: String, account: String) throws {
+        lock.withLock { storage[account] = secret }
+    }
+
+    func secret(account: String) throws -> String? {
+        lock.withLock { storage[account] }
+    }
+
+    func remove(account: String) throws {
+        lock.withLock { storage[account] = nil }
+    }
+}
