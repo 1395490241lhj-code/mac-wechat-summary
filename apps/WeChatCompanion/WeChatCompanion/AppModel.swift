@@ -31,6 +31,7 @@ final class AppModel {
     private(set) var retentionPolicy = RetentionPolicy.defaultPolicy
     private(set) var selectedGeminiModel = GeminiModel.provisionalDefault
     private(set) var credentialErrorOccurred = false
+    private(set) var archiveImportStatus = ArchiveImportStatus.idle
 #if DEBUG
     private(set) var visualQualityGateMode = VisualQualityGateMode.normal
     var visualQualityGateIsActive: Bool { visualQualityGateMode != .normal }
@@ -277,6 +278,32 @@ final class AppModel {
         await messageHistory.setRetention(policy)
         // The sweep may have just removed messages the ledger is counting.
         await refreshCaptureLedger()
+    }
+
+    func importWeChatArchive(from url: URL) async {
+        archiveImportStatus = .importing
+        do {
+            let outcome = try await WeChatArchiveImportService(history: messageHistory)
+                .importArchive(contentsOf: url)
+            switch outcome.persistence {
+            case .inserted:
+                archiveImportStatus = .imported(
+                    recordCount: outcome.recordCount,
+                    transcriptShape: outcome.transcriptShape
+                )
+            case .alreadyImported:
+                archiveImportStatus = .alreadyImported
+            }
+            await refreshCaptureLedger()
+        } catch ArchivePersistenceError.localPersistenceConsentRequired {
+            archiveImportStatus = .localPersistenceConsentRequired
+        } catch ArchivePersistenceError.localStoreUnavailable {
+            archiveImportStatus = .localStoreUnavailable
+        } catch WeChatArchiveImportError.conversationIdentityUnavailable {
+            archiveImportStatus = .conversationIdentityUnavailable
+        } catch {
+            archiveImportStatus = .invalidArchive
+        }
     }
 
     /// Destructive: removes every locally stored conversation and message,
@@ -666,6 +693,38 @@ final class AppModel {
         extractionPollingTask = nil
     }
 
+}
+
+enum ArchiveImportStatus: Equatable {
+    case idle
+    case importing
+    case imported(recordCount: Int, transcriptShape: String)
+    case alreadyImported
+    case localPersistenceConsentRequired
+    case localStoreUnavailable
+    case conversationIdentityUnavailable
+    case invalidArchive
+
+    var message: String {
+        switch self {
+        case .idle:
+            "Choose a WeChat merged-forward ZIP to add it to local history."
+        case .importing:
+            "Importing archive…"
+        case .imported(let recordCount, let transcriptShape):
+            "Imported \(recordCount) \(transcriptShape) records."
+        case .alreadyImported:
+            "This archive is already in local history."
+        case .localPersistenceConsentRequired:
+            "Local message storage is off. Enable it in Settings before importing."
+        case .localStoreUnavailable:
+            "Local history is unavailable. The archive was not imported."
+        case .conversationIdentityUnavailable:
+            "The archive is valid, but its conversation identity could not be established."
+        case .invalidArchive:
+            "The file could not be imported as a supported WeChat archive."
+        }
+    }
 }
 
 enum Destination: String, CaseIterable, Identifiable {

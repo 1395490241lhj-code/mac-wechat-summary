@@ -1122,3 +1122,115 @@ struct WeChatNativeArchiveFixtureTests {
         #expect(summary.recordCount > 0)
     }
 }
+
+
+struct WeChatArchiveImportIdentityTests {
+    @Test
+    func topLevelDirectoryProducesOpaqueStableIdentity() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("群聊名称/聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+
+        let a = try ArchiveConversationIdentityResolver.resolve(
+            archive: archive,
+            suggestedConversationName: "different.zip"
+        )
+        let b = try ArchiveConversationIdentityResolver.resolve(
+            archive: archive,
+            suggestedConversationName: nil
+        )
+
+        #expect(a == b)
+        #expect(a.rawValue.hasPrefix("native-v1:"))
+        #expect(!a.rawValue.contains("群聊名称"))
+    }
+
+    @Test
+    func suggestedNameIsFallbackWhenArchiveHasNoDirectory() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+
+        let a = try ArchiveConversationIdentityResolver.resolve(
+            archive: archive,
+            suggestedConversationName: "家庭群.zip"
+        )
+
+        let b = try ArchiveConversationIdentityResolver.resolve(
+            archive: archive,
+            suggestedConversationName: "家庭群"
+        )
+
+        #expect(a == b)
+        #expect(!a.rawValue.contains("家庭群"))
+    }
+
+    @Test
+    func missingConversationIdentityFailsClosed() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("聊天记录.txt", unattributed(["x"]))
+        }
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+
+        #expect(throws: WeChatArchiveImportError.conversationIdentityUnavailable) {
+            _ = try ArchiveConversationIdentityResolver.resolve(
+                archive: archive,
+                suggestedConversationName: nil
+            )
+        }
+    }
+}
+
+struct WeChatArchiveImportServiceTests {
+    @Test
+    func importRequiresExistingLocalPersistenceConsent() async throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("家庭群/聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let history = LocalMessageHistory(url: nil)
+        let service = WeChatArchiveImportService(history: history)
+
+        await #expect(throws: ArchivePersistenceError.localPersistenceConsentRequired) {
+            _ = try await service.importArchive(contentsOf: url)
+        }
+        #expect(await history.hasOpenStore == false)
+    }
+
+
+    @Test
+    func importPersistsParsedEvidenceWithoutKeepingTheArchive() async throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip {
+            $0.add("家庭群/聊天记录.txt", transcript([
+                ("张三", m35, "x"), ("李四", m36, "y"),
+            ]))
+        }
+        let history = LocalMessageHistory(url: nil)
+        await history.setEnabled(true)
+        let service = WeChatArchiveImportService(history: history)
+
+        let first = try await service.importArchive(contentsOf: url)
+        let second = try await service.importArchive(contentsOf: url)
+
+        #expect(first.transcriptShape == "attributed")
+        #expect(first.recordCount == 2)
+        guard case .inserted(_, let count) = first.persistence else {
+            Issue.record("first import should insert")
+            return
+        }
+        #expect(count == 2)
+        guard case .alreadyImported = second.persistence else {
+            Issue.record("second import should be idempotent")
+            return
+        }
+
+        #expect(FileManager.default.fileExists(atPath: url.path))
+        #expect(await history.hasOpenStore)
+    }
+}

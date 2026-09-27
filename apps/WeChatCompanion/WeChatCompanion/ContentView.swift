@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var model: AppModel
@@ -706,6 +707,7 @@ private struct DiagnosticMetric: View {
 
 private struct ChatsView: View {
     @Bindable var model: AppModel
+    @State private var isChoosingArchive = false
 
     var body: some View {
         ScrollView {
@@ -790,6 +792,21 @@ private struct ChatsView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+                GroupBox("WeChat Archive") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(model.archiveImportStatus.message)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                        Button("Choose WeChat Export ZIP…") {
+                            isChoosingArchive = true
+                        }
+                        .disabled(model.archiveImportStatus == .importing)
+                    }
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
                 CaptureLedgerSection(ledger: model.captureLedger)
 
                 if let failure = model.extractionMetrics.lastFailure {
@@ -852,6 +869,14 @@ private struct ChatsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Chats")
+        .fileImporter(
+            isPresented: $isChoosingArchive,
+            allowedContentTypes: [.zip],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            Task { await model.importWeChatArchive(from: url) }
+        }
     }
 }
 
