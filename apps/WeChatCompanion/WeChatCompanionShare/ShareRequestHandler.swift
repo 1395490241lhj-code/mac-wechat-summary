@@ -1,7 +1,28 @@
+import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-final class ShareRequestHandler: NSObject, NSExtensionRequestHandling, @unchecked Sendable {
+/// ShareKit requires a real view-controller principal class even though our
+/// handoff has no visible UI.
+@objc(WeChatCompanionShareViewController)
+final class ShareViewController: NSViewController {
+    private var hasStarted = false
+
+    override func loadView() {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        view.alphaValue = 0
+        self.view = view
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        guard !hasStarted, let context = extensionContext else { return }
+        hasStarted = true
+        ShareRequestProcessor.begin(with: context)
+    }
+}
+
+private enum ShareRequestProcessor {
     private enum Failure {
         static let domain = "com.lianghongjing.WeChatCompanion.Share"
         static let unsupportedInput = 1
@@ -9,29 +30,32 @@ final class ShareRequestHandler: NSObject, NSExtensionRequestHandling, @unchecke
         static let handoffFailed = 3
     }
 
-    func beginRequest(with context: NSExtensionContext) {
+    static func begin(with context: NSExtensionContext) {
         let contextBox = ExtensionContextBox(context)
         let providers = context.inputItems
             .compactMap { $0 as? NSExtensionItem }
             .flatMap { $0.attachments ?? [] }
 
-        guard providers.count == 1,
-              let provider = providers.first,
-              let typeIdentifier = archiveTypeIdentifier(for: provider)
-        else {
-            cancel(context, code: Failure.unsupportedInput)
+        let supported = providers.compactMap { provider -> (NSItemProvider, String)? in
+            guard let identifier = archiveTypeIdentifier(for: provider) else { return nil }
+            return (provider, identifier)
+        }
+
+        // WeChat merged-forward currently produces one archive. If a future
+        // host sends multiple archive payloads, refuse rather than guessing
+        // which conversation should be imported.
+        guard supported.count == 1, let item = supported.first else {
+            cancel(contextBox.value, code: Failure.unsupportedInput)
             return
         }
 
-        provider.loadFileRepresentation(forTypeIdentifier: typeIdentifier) {
-            [weak self] url, error in
-            guard let self else { return }
+        item.0.loadFileRepresentation(forTypeIdentifier: item.1) { url, error in
             guard error == nil, let url else {
-                self.cancel(contextBox.value, code: Failure.handoffFailed)
+                cancel(contextBox.value, code: Failure.handoffFailed)
                 return
             }
             guard let inbox = WeChatShareInbox.appGroup() else {
-                self.cancel(contextBox.value, code: Failure.inboxUnavailable)
+                cancel(contextBox.value, code: Failure.inboxUnavailable)
                 return
             }
 
@@ -44,7 +68,7 @@ final class ShareRequestHandler: NSObject, NSExtensionRequestHandling, @unchecke
                     suggestedConversationName: nil
                 )
             } catch {
-                self.cancel(contextBox.value, code: Failure.handoffFailed)
+                cancel(contextBox.value, code: Failure.handoffFailed)
                 return
             }
 
@@ -54,7 +78,7 @@ final class ShareRequestHandler: NSObject, NSExtensionRequestHandling, @unchecke
         }
     }
 
-    private func archiveTypeIdentifier(for provider: NSItemProvider) -> String? {
+    private static func archiveTypeIdentifier(for provider: NSItemProvider) -> String? {
         if provider.hasItemConformingToTypeIdentifier(UTType.zip.identifier) {
             return UTType.zip.identifier
         }
@@ -64,7 +88,7 @@ final class ShareRequestHandler: NSObject, NSExtensionRequestHandling, @unchecke
         }
     }
 
-    private func cancel(_ context: NSExtensionContext, code: Int) {
+    private static func cancel(_ context: NSExtensionContext, code: Int) {
         context.cancelRequest(withError: NSError(
             domain: Failure.domain,
             code: code,

@@ -130,3 +130,47 @@ struct WeChatShareInboxTests {
         #expect(!FileManager.default.fileExists(atPath: malformed.path))
     }
 }
+
+
+struct WeChatShareExtensionConfigurationTests {
+    @Test
+    func shareExtensionUsesFileActivationRuleVersionTwo() throws {
+        let testsURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let appRoot = testsURL.deletingLastPathComponent()
+        let plistURL = appRoot.appendingPathComponent("WeChatCompanionShare/Info.plist")
+        let data = try Data(contentsOf: plistURL)
+        let root = try #require(
+            PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+                as? [String: Any]
+        )
+        let extensionDictionary = try #require(root["NSExtension"] as? [String: Any])
+        let attributes = try #require(
+            extensionDictionary["NSExtensionAttributes"] as? [String: Any]
+        )
+        let activation = try #require(
+            attributes["NSExtensionActivationRule"] as? [String: Any]
+        )
+
+        #expect(activation["NSExtensionActivationDictionaryVersion"] as? Int == 2)
+        #expect(activation["NSExtensionActivationSupportsFileWithMaxCount"] as? Int == 32)
+        #expect(activation["NSExtensionActivationSupportsAttachmentsWithMinCount"] == nil)
+        #expect(activation["NSExtensionActivationSupportsAttachmentsWithMaxCount"] == nil)
+        #expect(
+            extensionDictionary["NSExtensionPrincipalClass"] as? String
+                == "WeChatCompanionShareViewController"
+        )
+    }
+
+    @Test
+    func shareServicePrincipalRemainsAViewController() throws {
+        let testsURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let appRoot = testsURL.deletingLastPathComponent()
+        let sourceURL = appRoot
+            .appendingPathComponent("WeChatCompanionShare/ShareRequestHandler.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("@objc(WeChatCompanionShareViewController)"))
+        #expect(source.contains("final class ShareViewController: NSViewController"))
+        #expect(!source.contains("NSExtensionRequestHandling"))
+    }
+}
