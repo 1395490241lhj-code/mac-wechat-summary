@@ -46,13 +46,19 @@ actor MessageIngestor: MessageIngesting {
     static let sweepInterval: TimeInterval = 3_600
 
     private let store: MessageStore
+    private let retentionDidSweep: (@Sendable () async -> Void)?
     private var retention: RetentionPolicy
     private var lastSweepAt: Date?
     private var metrics = IngestionMetrics()
 
-    init(store: MessageStore, retention: RetentionPolicy = .defaultPolicy) {
+    init(
+        store: MessageStore,
+        retention: RetentionPolicy = .defaultPolicy,
+        retentionDidSweep: (@Sendable () async -> Void)? = nil
+    ) {
         self.store = store
         self.retention = retention
+        self.retentionDidSweep = retentionDidSweep
     }
 
     func snapshot() -> IngestionMetrics { metrics }
@@ -83,6 +89,7 @@ actor MessageIngestor: MessageIngesting {
         metrics.lastRetentionSweepAt = now
         do {
             metrics.messagesExpired += try await store.applyRetention(retention, now: now)
+            await retentionDidSweep?()
         } catch {
             // Aggregate only; the error can reference the statement.
             metrics.persistenceFailures += 1

@@ -164,6 +164,9 @@ struct ArchiveEvidenceImportSummary: Identifiable, Sendable, Equatable {
     let lastSentAt: Date?
     let isAnonymous: Bool
     let link: ArchiveConversationLink?
+    let attachmentBatchCount: Int
+    let attachmentCount: Int
+    let materializedAttachmentCount: Int
 }
 
 
@@ -216,4 +219,93 @@ enum ArchiveConversationLinkError: Error, Equatable, Sendable {
     case importUnknown
     case visualConversationUnknown
     case conflict(existingVisualConversationID: Int64)
+}
+
+
+// MARK: - B5 attachment evidence
+
+enum ArchiveAttachmentStorageState: String, Sendable, Equatable {
+    case materialized
+    case unsupportedType = "unsupported_type"
+    case typeMismatch = "type_mismatch"
+    case oversized
+    case budgetExceeded = "budget_exceeded"
+}
+
+struct ArchiveAttachmentManifest: Sendable, Equatable {
+    let sourceEntryIndex: Int
+    let pathExtension: String
+    let byteCount: Int
+    let crc32: UInt32
+    let kind: WeChatNativeAttachmentKind?
+    let storageState: ArchiveAttachmentStorageState
+    let contentSHA256: String?
+    let storedRelativePath: String?
+}
+
+enum ArchiveAttachmentBatchPersistenceResult: Sendable, Equatable {
+    case inserted(batchID: Int64, attachmentCount: Int, materializedCount: Int)
+    case alreadyPersisted(batchID: Int64, attachmentCount: Int, materializedCount: Int)
+}
+
+enum ArchiveAttachmentPersistenceError: Error, Equatable, Sendable {
+    case localPersistenceConsentRequired
+    case localStoreUnavailable
+    case attachmentStoreUnavailable
+    case materializationFailed
+    case manifestPersistenceFailed
+}
+
+/// Stable identity for one attachment set observed beside a parsed transcript.
+///
+/// Source filenames are intentionally absent. The fingerprint is scoped to the
+/// transcript import in SQLite and uses only source-entry ordinal, safe extension,
+/// uncompressed byte count and CRC declared by the already-verified ZIP. App
+/// materialization policy is excluded, so changing a size budget cannot make the
+/// same source ZIP look like a different attachment batch.
+enum ArchiveAttachmentBatchFingerprint {
+    private static let domain = "wechat-native-archive-attachment-batch-v1"
+
+    static func fingerprint(of attachments: [WeChatNativeArchiveAttachment]) -> String {
+        var digest = SHA256()
+        digest.update(data: Data(domain.utf8))
+        digest.update(data: Data([0]))
+        digest.update(data: Data(String(attachments.count).utf8))
+        digest.update(data: Data([0]))
+        for attachment in attachments.sorted(by: { $0.sourceEntryIndex < $1.sourceEntryIndex }) {
+            append("entry", String(attachment.sourceEntryIndex), to: &digest)
+            append("ext", attachment.pathExtension, to: &digest)
+            append("bytes", String(attachment.byteCount), to: &digest)
+            append("crc32", String(attachment.crc32), to: &digest)
+        }
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func append(_ tag: String, _ value: String, to digest: inout SHA256) {
+        let bytes = Data(value.utf8)
+        digest.update(data: Data(tag.utf8))
+        digest.update(data: Data([0]))
+        digest.update(data: Data(String(bytes.count).utf8))
+        digest.update(data: Data([0]))
+        digest.update(data: bytes)
+    }
+}
+
+struct ArchiveEvidenceAttachment: Identifiable, Sendable, Equatable {
+    let id: Int64
+    let sourceEntryIndex: Int
+    let pathExtension: String
+    let byteCount: Int
+    let kind: WeChatNativeAttachmentKind?
+    let storageState: ArchiveAttachmentStorageState
+
+    var isMaterialized: Bool { storageState == .materialized }
+}
+
+struct ArchiveEvidenceAttachmentBatch: Identifiable, Sendable, Equatable {
+    let id: Int64
+    let observedAt: Date
+    let attachmentCount: Int
+    let materializedCount: Int
+    let attachments: [ArchiveEvidenceAttachment]
 }

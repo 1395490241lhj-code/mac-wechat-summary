@@ -901,6 +901,29 @@ CREATE TABLE archive_conversation_links (
 """
 
 
+_V4_ATTACHMENT_TABLES = """
+CREATE TABLE archive_attachment_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  import_id INTEGER NOT NULL,
+  batch_fingerprint TEXT NOT NULL,
+  observed_at REAL NOT NULL,
+  attachment_count INTEGER NOT NULL,
+  materialized_count INTEGER NOT NULL);
+CREATE TABLE archive_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  source_entry_index INTEGER NOT NULL,
+  path_extension TEXT NOT NULL,
+  byte_count INTEGER NOT NULL,
+  crc32 INTEGER NOT NULL,
+  media_kind TEXT,
+  storage_state TEXT NOT NULL,
+  content_sha256 TEXT,
+  stored_relative_path TEXT,
+  relation_scope TEXT NOT NULL);
+"""
+
+
 def _schema_db(tmp_path, *, version, extra=""):
     path = tmp_path / f"schema-{version}.sqlite"
     connection = sqlite3.connect(path)
@@ -963,6 +986,43 @@ def test_schema_v3_missing_link_table_is_incomplete(tmp_path):
     assert error.value.state == "schema_incomplete"
 
 
+def test_complete_schema_v4_is_accepted(tmp_path):
+    assert _verify(
+        _schema_db(
+            tmp_path,
+            version=4,
+            extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE + _V4_ATTACHMENT_TABLES,
+        )
+    ) == 4
+
+
+@pytest.mark.parametrize("missing", ["archive_attachment_batches", "archive_attachments"])
+def test_schema_v4_missing_attachment_table_is_incomplete(tmp_path, missing):
+    statements = {
+        "archive_attachment_batches": """
+            CREATE TABLE archive_attachment_batches (
+              id INTEGER PRIMARY KEY, import_id INTEGER NOT NULL,
+              batch_fingerprint TEXT NOT NULL, observed_at REAL NOT NULL,
+              attachment_count INTEGER NOT NULL, materialized_count INTEGER NOT NULL);
+        """,
+        "archive_attachments": """
+            CREATE TABLE archive_attachments (
+              id INTEGER PRIMARY KEY, batch_id INTEGER NOT NULL,
+              source_entry_index INTEGER NOT NULL, path_extension TEXT NOT NULL,
+              byte_count INTEGER NOT NULL, crc32 INTEGER NOT NULL,
+              media_kind TEXT, storage_state TEXT NOT NULL,
+              content_sha256 TEXT, stored_relative_path TEXT,
+              relation_scope TEXT NOT NULL);
+        """,
+    }
+    extra = _V2_ARCHIVE_TABLES + _V3_LINK_TABLE + "".join(
+        sql for name, sql in statements.items() if name != missing
+    )
+    with pytest.raises(store_access.BridgeUnavailable) as error:
+        _verify(_schema_db(tmp_path, version=4, extra=extra))
+    assert error.value.state == "schema_incomplete"
+
+
 def test_schema_v1_tolerates_an_unrelated_additive_table(tmp_path):
     extra = "CREATE TABLE something_additive (id INTEGER PRIMARY KEY);"
     assert _verify(_schema_db(tmp_path, version=1, extra=extra)) == 1
@@ -973,8 +1033,8 @@ def test_a_future_schema_version_is_unsupported(tmp_path):
         _verify(
             _schema_db(
                 tmp_path,
-                version=4,
-                extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE,
+                version=5,
+                extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE + _V4_ATTACHMENT_TABLES,
             )
         )
     assert error.value.state == "schema_unsupported"

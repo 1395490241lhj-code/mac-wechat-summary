@@ -14,18 +14,29 @@ actor LocalMessageHistory {
     /// nil means an in-memory database, used by tests so no test run ever
     /// creates a file.
     private let url: URL?
+    private let attachmentStore: ArchiveAttachmentStore?
     private var store: MessageStore?
     private var activeIngestor: MessageIngestor?
     private var isEnabled = false
     private var retention: RetentionPolicy
 
-    init(url: URL?, retention: RetentionPolicy = .defaultPolicy) {
+    init(
+        url: URL?,
+        retention: RetentionPolicy = .defaultPolicy,
+        attachmentRoot: URL? = nil
+    ) {
         self.url = url
         self.retention = retention
+        self.attachmentStore = attachmentRoot.map(ArchiveAttachmentStore.init(rootURL:))
     }
 
     static var applicationSupport: LocalMessageHistory {
-        LocalMessageHistory(url: MessageStore.applicationSupport)
+        let databaseURL = MessageStore.applicationSupport
+        return LocalMessageHistory(
+            url: databaseURL,
+            attachmentRoot: databaseURL.deletingLastPathComponent()
+                .appendingPathComponent("archive-attachments", isDirectory: true)
+        )
     }
 
     /// The ingestor to hand the extraction coordinator, or nil while the
@@ -83,6 +94,69 @@ actor LocalMessageHistory {
     func archiveRecords(importID: Int64, limit: Int = 500) async -> [ArchiveEvidenceRecord] {
         guard storeState == .ready, let store else { return [] }
         return (try? await store.archiveRecords(importID: importID, limit: limit)) ?? []
+    }
+
+
+
+    func archiveAttachmentBatches(
+        importID: Int64
+    ) async -> [ArchiveEvidenceAttachmentBatch] {
+        guard storeState == .ready, let store else { return [] }
+        return (try? await store.archiveAttachmentBatches(importID: importID)) ?? []
+    }
+
+    @discardableResult
+    func persistArchiveAttachmentBatch(
+        importID: Int64,
+        attachments: [WeChatNativeArchiveAttachment],
+        observedAt: Date = Date()
+    ) async throws -> ArchiveAttachmentBatchPersistenceResult? {
+        guard isEnabled else {
+            throw ArchiveAttachmentPersistenceError.localPersistenceConsentRequired
+        }
+        guard let store else {
+            throw ArchiveAttachmentPersistenceError.localStoreUnavailable
+        }
+        guard !attachments.isEmpty else { return nil }
+
+        let fingerprint = ArchiveAttachmentBatchFingerprint.fingerprint(of: attachments)
+        if let existing = try await store.attachmentBatchResult(
+            importID: importID,
+            fingerprint: fingerprint
+        ) {
+            return existing
+        }
+        guard let attachmentStore else {
+            throw ArchiveAttachmentPersistenceError.attachmentStoreUnavailable
+        }
+
+        let manifests: [ArchiveAttachmentManifest]
+        do {
+            manifests = try attachmentStore.materialize(
+                importID: importID,
+                batchFingerprint: fingerprint,
+                attachments: attachments
+            )
+        } catch {
+            throw ArchiveAttachmentPersistenceError.materializationFailed
+        }
+
+        do {
+            let result = try await store.persistArchiveAttachmentBatch(
+                importID: importID,
+                fingerprint: fingerprint,
+                observedAt: observedAt,
+                manifests: manifests
+            )
+            await reconcileAttachments()
+            return result
+        } catch {
+            attachmentStore.removeBatch(
+                importID: importID,
+                batchFingerprint: fingerprint
+            )
+            throw ArchiveAttachmentPersistenceError.manifestPersistenceFailed
+        }
     }
 
     func searchArchiveEvidence(_ query: String, limit: Int = 100) async -> [ArchiveEvidenceRecord] {
@@ -161,6 +235,7 @@ actor LocalMessageHistory {
         store = nil
         lastOpenFailure = nil
         removeDatabaseFiles()
+        attachmentStore?.removeAll()
         if isEnabled { await open() }
     }
 
@@ -223,11 +298,25 @@ actor LocalMessageHistory {
         }
         lastOpenFailure = nil
         store = opened
-        let ingestor = MessageIngestor(store: opened, retention: retention)
+        let ingestor = MessageIngestor(
+            store: opened,
+            retention: retention,
+            retentionDidSweep: { [weak self] in
+                await self?.reconcileAttachments()
+            }
+        )
         // Applied before the first new write, so a policy tightened while the
         // app was closed is honoured immediately.
         await ingestor.sweepNow()
+        await reconcileAttachments()
         activeIngestor = ingestor
+    }
+
+
+    private func reconcileAttachments() async {
+        guard let store, let attachmentStore else { return }
+        guard let valid = try? await store.archiveAttachmentBatchKeys() else { return }
+        attachmentStore.reconcile(validBatches: valid)
     }
 
     /// SQLite in WAL mode keeps two sidecar files beside the database. Deleting
@@ -254,4 +343,198 @@ enum LocalHistoryStoreState: String, Sendable, Equatable {
     case ready
     /// Consent is on, but the store could not be opened and was left untouched.
     case unavailable
+}
+
+
+/// App-owned materialized attachment bytes for B5.
+///
+/// This type is deliberately outside Ingestion/Archive: the Archive directory
+/// is a pure-read boundary. Every path below is generated from database IDs and
+/// fingerprints, never from a ZIP entry name.
+struct ArchiveAttachmentStore: Sendable {
+    let rootURL: URL
+
+    func materialize(
+        importID: Int64,
+        batchFingerprint: String,
+        attachments: [WeChatNativeArchiveAttachment]
+    ) throws -> [ArchiveAttachmentManifest] {
+        guard isFingerprint(batchFingerprint) else {
+            throw ArchiveAttachmentPersistenceError.materializationFailed
+        }
+        let manager = FileManager.default
+        let importDirectory = rootURL
+            .appendingPathComponent("import-\(importID)", isDirectory: true)
+        let batchDirectory = importDirectory
+            .appendingPathComponent("batch-\(batchFingerprint)", isDirectory: true)
+
+        do {
+            try prepareDirectory(rootURL, manager: manager)
+            try prepareDirectory(importDirectory, manager: manager)
+            // If a prior process died after files were written but before the
+            // manifest committed, the database has already told the caller this
+            // batch is absent. Rebuild that orphan directory from scratch.
+            if manager.fileExists(atPath: batchDirectory.path) {
+                try manager.removeItem(at: batchDirectory)
+            }
+            try prepareDirectory(batchDirectory, manager: manager)
+
+            var manifests: [ArchiveAttachmentManifest] = []
+            manifests.reserveCapacity(attachments.count)
+
+            for attachment in attachments {
+                let state = storageState(for: attachment.disposition)
+                var relativePath: String?
+                if state == .materialized {
+                    guard let payload = attachment.payload,
+                          let sha = attachment.contentSHA256,
+                          sha.count == 64,
+                          sha.unicodeScalars.allSatisfy(Self.isHex),
+                          let canonicalExtension = attachment.canonicalExtension,
+                          let kind = attachment.kind
+                    else {
+                        throw ArchiveAttachmentPersistenceError.materializationFailed
+                    }
+                    let filename = "\(attachment.sourceEntryIndex)-\(sha).\(canonicalExtension)"
+                    let fileURL = batchDirectory.appendingPathComponent(filename, isDirectory: false)
+                    try payload.write(to: fileURL, options: .atomic)
+                    try manager.setAttributes(
+                        [.posixPermissions: 0o600], ofItemAtPath: fileURL.path
+                    )
+                    relativePath = "import-\(importID)/batch-\(batchFingerprint)/\(filename)"
+                    _ = kind
+                }
+
+                manifests.append(ArchiveAttachmentManifest(
+                    sourceEntryIndex: attachment.sourceEntryIndex,
+                    pathExtension: attachment.pathExtension,
+                    byteCount: attachment.byteCount,
+                    crc32: attachment.crc32,
+                    kind: attachment.kind,
+                    storageState: state,
+                    contentSHA256: attachment.contentSHA256,
+                    storedRelativePath: relativePath
+                ))
+            }
+            return manifests
+        } catch let error as ArchiveAttachmentPersistenceError {
+            try? manager.removeItem(at: batchDirectory)
+            throw error
+        } catch {
+            try? manager.removeItem(at: batchDirectory)
+            throw ArchiveAttachmentPersistenceError.materializationFailed
+        }
+    }
+
+    func removeBatch(importID: Int64, batchFingerprint: String) {
+        guard isFingerprint(batchFingerprint) else { return }
+        let url = rootURL
+            .appendingPathComponent("import-\(importID)", isDirectory: true)
+            .appendingPathComponent("batch-\(batchFingerprint)", isDirectory: true)
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    func removeAll() {
+        try? FileManager.default.removeItem(at: rootURL)
+    }
+
+    /// Deletes crash-orphans and retention-orphans. The database is the source
+    /// of truth for which import/batch directories remain justified.
+    func reconcile(validBatches: [Int64: Set<String>]) {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: rootURL.path) else { return }
+        guard safeDirectory(rootURL) else {
+            try? manager.removeItem(at: rootURL)
+            return
+        }
+        guard let importDirectories = try? manager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for importDirectory in importDirectories {
+            guard safeDirectory(importDirectory) else {
+                try? manager.removeItem(at: importDirectory)
+                continue
+            }
+            guard let importID = Self.importID(fromDirectoryName: importDirectory.lastPathComponent),
+                  let fingerprints = validBatches[importID]
+            else {
+                try? manager.removeItem(at: importDirectory)
+                continue
+            }
+
+            guard let batchDirectories = try? manager.contentsOfDirectory(
+                at: importDirectory,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for batchDirectory in batchDirectories {
+                guard safeDirectory(batchDirectory) else {
+                    try? manager.removeItem(at: batchDirectory)
+                    continue
+                }
+                let name = batchDirectory.lastPathComponent
+                guard name.hasPrefix("batch-") else {
+                    try? manager.removeItem(at: batchDirectory)
+                    continue
+                }
+                let fingerprint = String(name.dropFirst("batch-".count))
+                if !fingerprints.contains(fingerprint) {
+                    try? manager.removeItem(at: batchDirectory)
+                }
+            }
+        }
+    }
+
+    private func safeDirectory(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ) else { return false }
+        return values.isDirectory == true && values.isSymbolicLink != true
+    }
+
+    private func prepareDirectory(_ url: URL, manager: FileManager) throws {
+        if manager.fileExists(atPath: url.path) {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else {
+                throw ArchiveAttachmentPersistenceError.materializationFailed
+            }
+        } else {
+            try manager.createDirectory(
+                at: url,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private func storageState(
+        for disposition: WeChatNativeAttachmentDisposition
+    ) -> ArchiveAttachmentStorageState {
+        switch disposition {
+        case .materializable: .materialized
+        case .unsupportedType: .unsupportedType
+        case .typeMismatch: .typeMismatch
+        case .oversized: .oversized
+        case .budgetExceeded: .budgetExceeded
+        }
+    }
+
+    private func isFingerprint(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy(Self.isHex)
+    }
+
+    private static func isHex(_ scalar: Unicode.Scalar) -> Bool {
+        (scalar.value >= 48 && scalar.value <= 57)
+            || (scalar.value >= 97 && scalar.value <= 102)
+    }
+
+    private static func importID(fromDirectoryName name: String) -> Int64? {
+        guard name.hasPrefix("import-") else { return nil }
+        return Int64(name.dropFirst("import-".count))
+    }
 }

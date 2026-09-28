@@ -588,7 +588,7 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     connection = sqlite3.connect(messages)
     connection.executescript(
         """
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         CREATE TABLE conversations (
             id INTEGER PRIMARY KEY, title TEXT, first_seen_at REAL, last_seen_at REAL
         );
@@ -618,6 +618,27 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
             visual_conversation_id INTEGER NOT NULL,
             basis TEXT NOT NULL, asserted_at REAL NOT NULL
         );
+        CREATE TABLE archive_attachment_batches (
+            id INTEGER PRIMARY KEY,
+            import_id INTEGER NOT NULL,
+            batch_fingerprint TEXT NOT NULL,
+            observed_at REAL NOT NULL,
+            attachment_count INTEGER NOT NULL,
+            materialized_count INTEGER NOT NULL
+        );
+        CREATE TABLE archive_attachments (
+            id INTEGER PRIMARY KEY,
+            batch_id INTEGER NOT NULL,
+            source_entry_index INTEGER NOT NULL,
+            path_extension TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            crc32 INTEGER NOT NULL,
+            media_kind TEXT,
+            storage_state TEXT NOT NULL,
+            content_sha256 TEXT,
+            stored_relative_path TEXT,
+            relation_scope TEXT NOT NULL
+        );
         INSERT INTO archive_conversations VALUES (1, 'anonymous-a');
         INSERT INTO archive_conversations VALUES (2, 'anonymous-b');
         INSERT INTO archive_imports VALUES (1, 1, 'attributed', 1000.0);
@@ -626,6 +647,13 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
             VALUES (1, 0, '林晓', 100.0, '昨天 10:00', '麻烦确认归档报价');
         INSERT INTO archive_unattributed_records
             VALUES (2, 0, '不应进入 Memory');
+        INSERT INTO archive_attachment_batches
+            VALUES (1, 1, 'batch', 3000.0, 1, 1);
+        INSERT INTO archive_attachments
+            VALUES (
+                1, 1, 7, 'jpg', 12, 123, 'image', 'materialized',
+                'ATTACHMENT-SHA-SENTINEL', 'private/path', 'import_only'
+            );
         """
     )
     connection.commit()
@@ -649,13 +677,19 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert reply["counts"]["conversations_seen"] == 1
     assert reply["counts"]["messages_seen"] == 1
     assert reply["counts"]["messages_inserted"] == 1
+    reply_blob = json.dumps(reply, ensure_ascii=False)
+    assert "ATTACHMENT-SHA-SENTINEL" not in reply_blob
+    assert "private/path" not in reply_blob
 
     status, status_code = invoke(
         [str(FROZEN)], {"op": "status", "store_path": str(store)}, env
     )
     assert (status["ok"], status_code) == (True, 0)
     assert status["freshness"]["sources"][SOURCE_ARCHIVE]["stored_messages"] == 1
-    assert "不应进入 Memory" not in json.dumps(status, ensure_ascii=False)
+    status_blob = json.dumps(status, ensure_ascii=False)
+    assert "不应进入 Memory" not in status_blob
+    assert "ATTACHMENT-SHA-SENTINEL" not in status_blob
+    assert "private/path" not in status_blob
 
     summary, summary_code = invoke(
         [str(FROZEN)],
@@ -673,7 +707,10 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert summary["counts"]["returned_messages"] == 1
     assert summary["conversations"][0]["label"] == "Imported archive export"
     assert summary["messages"][0]["timestamp_kind"] == "source_created"
-    assert "不应进入 Memory" not in json.dumps(summary, ensure_ascii=False)
+    summary_blob = json.dumps(summary, ensure_ascii=False)
+    assert "不应进入 Memory" not in summary_blob
+    assert "ATTACHMENT-SHA-SENTINEL" not in summary_blob
+    assert "private/path" not in summary_blob
 
     reminders, reminder_code = invoke(
         [str(FROZEN)],
@@ -691,7 +728,10 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert reminders["counts"]["returned_candidates"] == 1
     assert reminders["conversations"][0]["label"] == "Imported archive export"
     assert reminders["candidates"][0]["timestamp_kind"] == "source_created"
-    assert "不应进入 Memory" not in json.dumps(reminders, ensure_ascii=False)
+    reminders_blob = json.dumps(reminders, ensure_ascii=False)
+    assert "不应进入 Memory" not in reminders_blob
+    assert "ATTACHMENT-SHA-SENTINEL" not in reminders_blob
+    assert "private/path" not in reminders_blob
 
 
 # --- canonical activation (M2.2e) --------------------------------------------

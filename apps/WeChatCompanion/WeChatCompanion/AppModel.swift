@@ -32,9 +32,11 @@ final class AppModel {
     private(set) var selectedGeminiModel = GeminiModel.provisionalDefault
     private(set) var credentialErrorOccurred = false
     private(set) var archiveImportStatus = ArchiveImportStatus.idle
+    private(set) var archiveAttachmentImportStatus = ArchiveAttachmentImportStatus.idle
     private(set) var archiveEvidence = ArchiveEvidenceSnapshot.unavailable(.disabled)
     private(set) var selectedArchiveImportID: Int64?
     private(set) var selectedArchiveRecords: [ArchiveEvidenceRecord] = []
+    private(set) var selectedArchiveAttachmentBatches: [ArchiveEvidenceAttachmentBatch] = []
     private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
     private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
 #if DEBUG
@@ -547,6 +549,7 @@ final class AppModel {
         guard snapshot.storeState == .ready else {
             selectedArchiveImportID = nil
             selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
             archiveSearchResults = []
             return
         }
@@ -556,12 +559,19 @@ final class AppModel {
             selectedArchiveRecords = await messageHistory.archiveRecords(
                 importID: selectedArchiveImportID
             )
+            selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
+                importID: selectedArchiveImportID
+            )
         } else if let first = snapshot.imports.first {
             selectedArchiveImportID = first.id
             selectedArchiveRecords = await messageHistory.archiveRecords(importID: first.id)
+            selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
+                importID: first.id
+            )
         } else {
             selectedArchiveImportID = nil
             selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
         }
     }
 
@@ -569,6 +579,9 @@ final class AppModel {
         guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
         selectedArchiveImportID = importID
         selectedArchiveRecords = await messageHistory.archiveRecords(importID: importID)
+        selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
+            importID: importID
+        )
     }
 
     func searchArchiveEvidence(_ query: String) async {
@@ -650,6 +663,7 @@ final class AppModel {
         }
 
         archiveImportStatus = .importing
+        archiveAttachmentImportStatus = .idle
         do {
             let outcome = try await WeChatArchiveImportService(history: messageHistory)
                 .importArchive(contentsOf: url)
@@ -662,9 +676,30 @@ final class AppModel {
             case .alreadyImported:
                 archiveImportStatus = .alreadyImported
             }
+            switch outcome.attachments {
+            case .none:
+                archiveAttachmentImportStatus = .none
+            case .inserted(let count, let materialized):
+                archiveAttachmentImportStatus = .inserted(
+                    attachmentCount: count,
+                    materializedCount: materialized
+                )
+            case .alreadyPersisted(let count, let materialized):
+                archiveAttachmentImportStatus = .alreadyPersisted(
+                    attachmentCount: count,
+                    materializedCount: materialized
+                )
+            case .unavailable:
+                archiveAttachmentImportStatus = .unavailable
+            }
             await refreshCaptureLedger()
             await refreshArchiveEvidence()
-            return true
+            // A native share is terminal only when both transcript and
+            // attachment evidence reached their intended local state. If the
+            // transcript committed but attachment materialization/persistence
+            // failed, keep the transport ZIP so a later pass can retry the
+            // same import idempotently and finish the attachment batch.
+            return outcome.attachments != .unavailable
         } catch ArchivePersistenceError.localPersistenceConsentRequired {
             archiveImportStatus = .localPersistenceConsentRequired
             return false
@@ -1109,6 +1144,29 @@ enum ArchiveLinkStatus: Equatable {
             "This archive is already linked to a different captured conversation."
         case .unavailable:
             "The archive link could not be updated."
+        }
+    }
+}
+
+
+
+enum ArchiveAttachmentImportStatus: Equatable {
+    case idle
+    case none
+    case inserted(attachmentCount: Int, materializedCount: Int)
+    case alreadyPersisted(attachmentCount: Int, materializedCount: Int)
+    case unavailable
+
+    var message: String? {
+        switch self {
+        case .idle, .none:
+            nil
+        case .inserted(let count, let materialized):
+            "\(count) attachment item(s) recorded; \(materialized) safely materialized locally."
+        case .alreadyPersisted(let count, let materialized):
+            "Attachment batch already recorded (\(count) item(s), \(materialized) materialized)."
+        case .unavailable:
+            "Chat text imported, but attachment evidence could not be persisted."
         }
     }
 }

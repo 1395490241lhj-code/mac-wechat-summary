@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - source checkout import path
     )
 
 SOURCE_ARCHIVE = "archive"
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 _REQUIRED_TABLES_BY_VERSION = {
     2: frozenset({
         "conversations", "messages",
@@ -49,6 +49,13 @@ _REQUIRED_TABLES_BY_VERSION = {
         "archive_conversations", "archive_imports",
         "archive_attributed_records", "archive_unattributed_records",
         "archive_conversation_links",
+    }),
+    4: frozenset({
+        "conversations", "messages",
+        "archive_conversations", "archive_imports",
+        "archive_attributed_records", "archive_unattributed_records",
+        "archive_conversation_links",
+        "archive_attachment_batches", "archive_attachments",
     }),
 }
 

@@ -802,6 +802,14 @@ private struct ChatsView: View {
                         Text(model.archiveImportStatus.message)
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                        if let attachmentMessage = model.archiveAttachmentImportStatus.message {
+                            Text(attachmentMessage)
+                                .font(.caption)
+                                .foregroundStyle(
+                                    model.archiveAttachmentImportStatus == .unavailable
+                                        ? Color.orange : Color.secondary
+                                )
+                        }
 
                         Button("Choose WeChat Export ZIP…") {
                             isChoosingArchive = true
@@ -1012,6 +1020,13 @@ private struct ArchiveEvidenceBrowser: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if selected.attachmentCount > 0 {
+                Divider()
+                ArchiveAttachmentSection(
+                    batches: model.selectedArchiveAttachmentBatches
+                )
+            }
         }
     }
 
@@ -1038,6 +1053,13 @@ private struct ArchiveEvidenceBrowser: View {
             "\(summary.recordCount) records",
             summary.shape.label,
         ]
+        if summary.attachmentCount > 0 {
+            parts.append(
+                "\(summary.attachmentCount) attachments"
+                    + (summary.materializedAttachmentCount > 0
+                        ? " (\(summary.materializedAttachmentCount) stored)" : "")
+            )
+        }
         if summary.isAnonymous {
             parts.append(summary.link == nil ? "Unlinked export" : "Explicitly linked")
         }
@@ -1112,6 +1134,122 @@ private struct ArchiveLinkControls: View {
     }
 }
 
+
+private struct ArchiveAttachmentSection: View {
+    let batches: [ArchiveEvidenceAttachmentBatch]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Attachments")
+                    .font(.callout.weight(.medium))
+                Text("Import-level evidence only · Unlinked to message")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if batches.isEmpty {
+                Text("Attachment metadata is unavailable for this import.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(batches) { batch in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(batch.observedAt.formatted(date: .abbreviated, time: .shortened))
+                                .font(.callout.weight(.medium))
+                            Spacer()
+                            Text("\(batch.attachmentCount) items · \(batch.materializedCount) stored")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ForEach(batch.attachments) { attachment in
+                            ArchiveAttachmentRow(attachment: attachment)
+                        }
+                    }
+                    .padding(.vertical, 6)
+
+                    if batch.id != batches.last?.id {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ArchiveAttachmentRow: View {
+    let attachment: ArchiveEvidenceAttachment
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.callout)
+                Text(statusText + " · Unlinked to message")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 12)
+
+            Text(ByteCountFormatter.string(
+                fromByteCount: Int64(attachment.byteCount),
+                countStyle: .file
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var title: String {
+        let ext = attachment.pathExtension == "(none)"
+            ? "No extension"
+            : attachment.pathExtension.uppercased()
+        if let kind = attachment.kind {
+            return "\(kindLabel(kind)) · \(ext)"
+        }
+        return ext
+    }
+
+    private var statusText: String {
+        switch attachment.storageState {
+        case .materialized:
+            "Stored locally"
+        case .unsupportedType:
+            "Metadata only · unsupported type"
+        case .typeMismatch:
+            "Metadata only · type could not be verified"
+        case .oversized:
+            "Metadata only · exceeds per-file limit"
+        case .budgetExceeded:
+            "Metadata only · batch materialization limit reached"
+        }
+    }
+
+    private var systemImage: String {
+        switch attachment.kind {
+        case .image: "photo"
+        case .video: "video"
+        case .document: "doc"
+        case nil: "paperclip"
+        }
+    }
+
+    private func kindLabel(_ kind: WeChatNativeAttachmentKind) -> String {
+        switch kind {
+        case .image: "Image"
+        case .video: "Video"
+        case .document: "Document"
+        }
+    }
+}
+
 private struct ArchiveImportRow: View {
     let summary: ArchiveEvidenceImportSummary
     let isSelected: Bool
@@ -1125,10 +1263,15 @@ private struct ArchiveImportRow: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(summary.importedAt.formatted(date: .abbreviated, time: .shortened))
                         .fontWeight(.medium)
-                    Text("\(summary.recordCount) records · \(summary.shape.label)"
+                    Text(
+                        "\(summary.recordCount) records · \(summary.shape.label)"
+                        + (summary.attachmentCount > 0
+                            ? " · \(summary.attachmentCount) attachments"
+                            : "")
                         + (summary.isAnonymous
                             ? (summary.link == nil ? " · Unlinked export" : " · Explicitly linked")
-                            : ""))
+                            : "")
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

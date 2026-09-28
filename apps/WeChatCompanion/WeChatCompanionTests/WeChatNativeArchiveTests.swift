@@ -47,9 +47,37 @@ private struct ZIPBuilder {
         localNameOverride: String? = nil,
         localExtraLengthOverride: UInt16? = nil
     ) {
+        add(
+            name,
+            Data(text.utf8),
+            deflated: deflated,
+            method: method,
+            flags: flags,
+            isSymlink: isSymlink,
+            crcOverride: crcOverride,
+            uncompressedSizeOverride: uncompressedSizeOverride,
+            localMethodOverride: localMethodOverride,
+            localNameOverride: localNameOverride,
+            localExtraLengthOverride: localExtraLengthOverride
+        )
+    }
+
+    mutating func add(
+        _ name: String,
+        _ body: Data,
+        deflated: Bool = false,
+        method: UInt16? = nil,
+        flags: UInt16 = 0,
+        isSymlink: Bool = false,
+        crcOverride: UInt32? = nil,
+        uncompressedSizeOverride: UInt32? = nil,
+        localMethodOverride: UInt16? = nil,
+        localNameOverride: String? = nil,
+        localExtraLengthOverride: UInt16? = nil
+    ) {
         entries.append(Entry(
             name: name,
-            body: Data(text.utf8),
+            body: body,
             deflated: deflated,
             method: method,
             flags: flags,
@@ -157,6 +185,35 @@ private func unattributed(_ records: [String], newline: String = "\n") -> String
         .appending("\n")
         .replacingOccurrences(of: "\n", with: newline)
 }
+
+private func isoBMFF(
+    majorBrand: String,
+    compatibleBrands: [String] = []
+) -> Data {
+    precondition(majorBrand.utf8.count == 4)
+    precondition(compatibleBrands.allSatisfy { $0.utf8.count == 4 })
+    let size = UInt32(16 + compatibleBrands.count * 4)
+    var data = Data([
+        UInt8((size >> 24) & 0xFF),
+        UInt8((size >> 16) & 0xFF),
+        UInt8((size >> 8) & 0xFF),
+        UInt8(size & 0xFF),
+    ])
+    data.append(Data("ftyp".utf8))
+    data.append(Data(majorBrand.utf8))
+    data.append(Data([0, 0, 0, 0]))
+    for brand in compatibleBrands {
+        data.append(Data(brand.utf8))
+    }
+    return data
+}
+
+private let tinyJPEG = Data([
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46,
+])
+private let tinyPNG = Data([
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00,
+])
 
 /// Shape A messages, or a test failure if the transcript was another shape.
 private func attributedMessages(_ t: WeChatNativeTranscript) -> [WeChatAttributedArchiveMessage] {
@@ -1124,6 +1181,321 @@ struct WeChatNativeArchiveFixtureTests {
 }
 
 
+
+
+struct WeChatNativeArchiveAttachmentTests {
+    @Test
+    func materializeModeKeepsOnlyVerifiedSupportedBytes() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("media/ok.jpg", tinyJPEG)
+            builder.add("media/fake.jpg", Data("not a jpeg".utf8))
+            builder.add("media/unknown.exe", Data([1, 2, 3, 4]))
+        }
+
+        let archive = try WeChatNativeArchiveReader.read(
+            contentsOf: url,
+            attachmentReadMode: .materializeSupported
+        )
+
+        #expect(archive.attachments.count == 3)
+        let byIndex = Dictionary(uniqueKeysWithValues: archive.attachments.map {
+            ($0.sourceEntryIndex, $0)
+        })
+        let materialized = try #require(byIndex.values.first(where: {
+            $0.pathExtension == "jpg" && $0.disposition == .materializable
+        }))
+        #expect(materialized.kind == .image)
+        #expect(materialized.canonicalExtension == "jpg")
+        #expect(materialized.payload == tinyJPEG)
+        #expect(materialized.contentSHA256?.count == 64)
+
+        let mismatch = try #require(byIndex.values.first(where: {
+            $0.pathExtension == "jpg" && $0.disposition == .typeMismatch
+        }))
+        #expect(mismatch.payload == nil)
+        #expect(mismatch.contentSHA256 == nil)
+
+        let unsupported = try #require(byIndex.values.first(where: {
+            $0.pathExtension == "exe"
+        }))
+        #expect(unsupported.disposition == .unsupportedType)
+        #expect(unsupported.payload == nil)
+        #expect(unsupported.kind == nil)
+    }
+
+    @Test
+    func inventoryOnlyNeverLoadsAttachmentEvidence() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/one.jpg", tinyJPEG)
+        }
+
+        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+
+        #expect(archive.attachmentCountsByExtension == ["jpg": 1])
+        #expect(archive.attachments.isEmpty)
+    }
+
+    @Test
+    func isoBaseMediaBrandsMustMatchTheClaimedExtension() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("media/good.heic", isoBMFF(majorBrand: "heic", compatibleBrands: ["mif1"]))
+            builder.add("media/fake.heic", isoBMFF(majorBrand: "mp42", compatibleBrands: ["isom"]))
+            builder.add("media/good.avif", isoBMFF(majorBrand: "avif", compatibleBrands: ["mif1"]))
+            builder.add("media/fake.avif", isoBMFF(majorBrand: "heic", compatibleBrands: ["mif1"]))
+            builder.add("media/good.mp4", isoBMFF(majorBrand: "mp42", compatibleBrands: ["isom"]))
+            builder.add("media/fake.mp4", isoBMFF(majorBrand: "heic", compatibleBrands: ["mif1"]))
+            builder.add("media/good.mov", isoBMFF(majorBrand: "qt  "))
+            builder.add("media/fake.mov", isoBMFF(majorBrand: "mp42"))
+        }
+
+        let archive = try WeChatNativeArchiveReader.read(
+            contentsOf: url,
+            attachmentReadMode: .materializeSupported
+        )
+        let grouped = Dictionary(grouping: archive.attachments, by: \.pathExtension)
+
+        for ext in ["heic", "avif", "mp4", "mov"] {
+            let items = try #require(grouped[ext])
+            #expect(items.count == 2)
+            #expect(items.filter { $0.disposition == .materializable }.count == 1)
+            #expect(items.filter { $0.disposition == .typeMismatch }.count == 1)
+        }
+    }
+
+    @Test
+    func perFileReadableLimitProducesMetadataOnlyOversizedEvidence() throws {
+        let scratch = try Scratch()
+        var largeJPEG = tinyJPEG
+        largeJPEG.append(Data(repeating: 0xAA, count: 128))
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/large.jpg", largeJPEG)
+        }
+        var limits = ZIPArchiveReader.Limits.standard
+        limits.maximumReadableEntryBytes = 96
+
+        let archive = try WeChatNativeArchiveReader.read(
+            contentsOf: url,
+            limits: limits,
+            attachmentReadMode: .materializeSupported
+        )
+
+        let item = try #require(archive.attachments.first)
+        #expect(item.disposition == .oversized)
+        #expect(item.payload == nil)
+        #expect(item.contentSHA256 == nil)
+    }
+
+    @Test
+    func materializationCountBudgetKeepsTheNewestPolicyBoundExplicit() throws {
+        let scratch = try Scratch()
+        let url = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            for index in 0...100 {
+                builder.add("images/\(index).jpg", tinyJPEG)
+            }
+        }
+
+        let archive = try WeChatNativeArchiveReader.read(
+            contentsOf: url,
+            attachmentReadMode: .materializeSupported
+        )
+
+        #expect(archive.attachments.count == 101)
+        #expect(archive.attachments.filter { $0.disposition == .materializable }.count == 100)
+        #expect(archive.attachments.filter { $0.disposition == .budgetExceeded }.count == 1)
+        #expect(archive.attachments.last?.disposition == .budgetExceeded)
+        #expect(archive.attachments.last?.payload == nil)
+        #expect(archive.attachments.last?.contentSHA256?.count == 64)
+    }
+}
+
+
+
+struct ArchiveAttachmentStoreTests {
+    @Test
+    func importMaterializesIntoGeneratedPrivatePathsAndDeleteHistoryRemovesBytes() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/private-name.jpg", tinyJPEG)
+            builder.add("images/fake.png", Data("not png".utf8))
+        }
+        let databaseURL = scratch.url.appendingPathComponent("messages.sqlite")
+        let attachmentRoot = scratch.url.appendingPathComponent("archive-attachments", isDirectory: true)
+        let history = LocalMessageHistory(
+            url: databaseURL,
+            attachmentRoot: attachmentRoot
+        )
+        await history.setEnabled(true)
+        let service = WeChatArchiveImportService(history: history)
+
+        let first = try await service.importArchive(
+            contentsOf: source,
+            importedAt: Date(timeIntervalSince1970: 1234)
+        )
+        let importID: Int64
+        switch first.persistence {
+        case .inserted(let id, _):
+            importID = id
+        case .alreadyImported:
+            Issue.record("first import unexpectedly deduplicated")
+            return
+        }
+        #expect(first.attachments == .inserted(attachmentCount: 2, materializedCount: 1))
+
+        let summaries = await history.archiveEvidenceSnapshot().imports
+        let summary = try #require(summaries.first)
+        #expect(summary.id == importID)
+        #expect(summary.attachmentBatchCount == 1)
+        #expect(summary.attachmentCount == 2)
+        #expect(summary.materializedAttachmentCount == 1)
+
+        let batches = await history.archiveAttachmentBatches(importID: importID)
+        let batch = try #require(batches.first)
+        #expect(batch.attachmentCount == 2)
+        #expect(batch.materializedCount == 1)
+        #expect(batch.attachments.map(\.storageState).contains(.materialized))
+        #expect(batch.attachments.map(\.storageState).contains(.typeMismatch))
+
+        let importDirectory = attachmentRoot.appendingPathComponent(
+            "import-\(importID)", isDirectory: true
+        )
+        let importChildren = try FileManager.default.contentsOfDirectory(
+            at: importDirectory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(importChildren.count == 1)
+        let batchDirectory = try #require(importChildren.first)
+        #expect(batchDirectory.lastPathComponent.hasPrefix("batch-"))
+
+        let storedFiles = try FileManager.default.contentsOfDirectory(
+            at: batchDirectory,
+            includingPropertiesForKeys: nil
+        )
+        #expect(storedFiles.count == 1)
+        let storedFile = try #require(storedFiles.first)
+        #expect(storedFile.lastPathComponent.hasSuffix(".jpg"))
+        #expect(!storedFile.lastPathComponent.contains("private-name"))
+        #expect(try Data(contentsOf: storedFile) == tinyJPEG)
+
+        let rootMode = try FileManager.default.attributesOfItem(
+            atPath: attachmentRoot.path
+        )[.posixPermissions] as? NSNumber
+        let importMode = try FileManager.default.attributesOfItem(
+            atPath: importDirectory.path
+        )[.posixPermissions] as? NSNumber
+        let batchMode = try FileManager.default.attributesOfItem(
+            atPath: batchDirectory.path
+        )[.posixPermissions] as? NSNumber
+        let fileMode = try FileManager.default.attributesOfItem(
+            atPath: storedFile.path
+        )[.posixPermissions] as? NSNumber
+        #expect(rootMode?.intValue == 0o700)
+        #expect(importMode?.intValue == 0o700)
+        #expect(batchMode?.intValue == 0o700)
+        #expect(fileMode?.intValue == 0o600)
+
+        let second = try await service.importArchive(contentsOf: source)
+        #expect(second.attachments == .alreadyPersisted(
+            attachmentCount: 2,
+            materializedCount: 1
+        ))
+        #expect(await history.archiveAttachmentBatches(importID: importID).count == 1)
+
+        await history.deleteAllHistory()
+
+        #expect(!FileManager.default.fileExists(atPath: attachmentRoot.path))
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(await history.archiveEvidenceSnapshot().imports.isEmpty)
+    }
+
+    @Test
+    func retentionSweepRemovesExpiredAttachmentBytesWithTheirImport() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/old.jpg", tinyJPEG)
+        }
+        let databaseURL = scratch.url.appendingPathComponent("messages.sqlite")
+        let attachmentRoot = scratch.url.appendingPathComponent(
+            "archive-attachments", isDirectory: true
+        )
+        let history = LocalMessageHistory(
+            url: databaseURL,
+            retention: .untilDeleted,
+            attachmentRoot: attachmentRoot
+        )
+        await history.setEnabled(true)
+        let service = WeChatArchiveImportService(history: history)
+        let oldImportDate = Date(timeIntervalSinceNow: -(10 * 86_400))
+
+        let outcome = try await service.importArchive(
+            contentsOf: source,
+            importedAt: oldImportDate
+        )
+        let importID: Int64
+        switch outcome.persistence {
+        case .inserted(let id, _):
+            importID = id
+        case .alreadyImported:
+            Issue.record("expected a new import")
+            return
+        }
+
+        let importDirectory = attachmentRoot.appendingPathComponent(
+            "import-\(importID)", isDirectory: true
+        )
+        #expect(FileManager.default.fileExists(atPath: importDirectory.path))
+        #expect(await history.archiveEvidenceSnapshot().imports.count == 1)
+
+        await history.setRetention(.sevenDays)
+
+        #expect(await history.archiveEvidenceSnapshot().imports.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: importDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: attachmentRoot.path))
+    }
+
+    @Test
+    func reconcileNeverFollowsImportOrRootSymlinks() throws {
+        let scratch = try Scratch()
+        let outside = scratch.url.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let sentinel = outside.appendingPathComponent("sentinel")
+        try Data("keep".utf8).write(to: sentinel)
+
+        let root = scratch.url.appendingPathComponent("attachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let importLink = root.appendingPathComponent("import-1", isDirectory: true)
+        try FileManager.default.createSymbolicLink(
+            at: importLink,
+            withDestinationURL: outside
+        )
+
+        let store = ArchiveAttachmentStore(rootURL: root)
+        store.reconcile(validBatches: [1: [String(repeating: "a", count: 64)]])
+
+        #expect(!FileManager.default.fileExists(atPath: importLink.path))
+        #expect(FileManager.default.fileExists(atPath: sentinel.path))
+
+        let rootLink = scratch.url.appendingPathComponent("root-link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(
+            at: rootLink,
+            withDestinationURL: outside
+        )
+        ArchiveAttachmentStore(rootURL: rootLink).reconcile(validBatches: [:])
+
+        #expect(!FileManager.default.fileExists(atPath: rootLink.path))
+        #expect(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+}
+
 struct WeChatArchiveImportIdentityTests {
     @Test
     func topLevelDirectoryProducesOpaqueStableIdentity() throws {
@@ -1304,6 +1676,106 @@ struct WeChatShareInboxAppModelTests {
         #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
         #expect(try inbox.pendingItems().isEmpty)
         #expect(await history.hasOpenStore)
+    }
+
+    @Test
+    func pendingArchiveWithAttachmentMaterializesEvidenceBeforeTransportDeletion() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/private-name.jpg", tinyJPEG)
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let queued = try inbox.enqueueCopy(from: source)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+
+        let databaseURL = scratch.url.appendingPathComponent("messages.sqlite")
+        let attachmentRoot = scratch.url.appendingPathComponent("archive-attachments", isDirectory: true)
+        let history = LocalMessageHistory(
+            url: databaseURL,
+            attachmentRoot: attachmentRoot
+        )
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        await app.setAllowsLocalPersistence(true)
+
+        #expect(app.archiveImportStatus == .imported(
+            recordCount: 1,
+            transcriptShape: "attributed"
+        ))
+        #expect(app.archiveAttachmentImportStatus == .inserted(
+            attachmentCount: 1,
+            materializedCount: 1
+        ))
+        #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().isEmpty)
+        #expect(app.archiveEvidence.imports.first?.attachmentCount == 1)
+        #expect(app.archiveEvidence.imports.first?.materializedAttachmentCount == 1)
+        #expect(app.selectedArchiveAttachmentBatches.count == 1)
+        #expect(app.selectedArchiveAttachmentBatches.first?.attachments.count == 1)
+        #expect(app.selectedArchiveAttachmentBatches.first?.attachments.first?.storageState == .materialized)
+
+        let importID = try #require(app.archiveEvidence.imports.first?.id)
+        let importDirectory = attachmentRoot.appendingPathComponent(
+            "import-\(importID)", isDirectory: true
+        )
+        #expect(FileManager.default.fileExists(atPath: importDirectory.path))
+    }
+
+    @Test
+    func attachmentFailureKeepsPendingAndRetryCompletesWithoutDuplicatingTranscript() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/private-name.jpg", tinyJPEG)
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+
+        let databaseURL = scratch.url.appendingPathComponent("messages.sqlite")
+        let attachmentRoot = scratch.url.appendingPathComponent("attachment-root")
+        let history = LocalMessageHistory(
+            url: databaseURL,
+            attachmentRoot: attachmentRoot
+        )
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+
+        // Open the store first with no pending work, then create a filesystem
+        // fault. This exercises an attachment failure during a live import
+        // rather than the startup reconcile path, which deliberately heals
+        // invalid attachment-root nodes.
+        await app.setAllowsLocalPersistence(true)
+        try Data("blocking file".utf8).write(to: attachmentRoot)
+        let queued = try inbox.enqueueCopy(from: source)
+
+        await app.consumePendingShareArchives()
+
+        #expect(app.archiveImportStatus == .imported(
+            recordCount: 1,
+            transcriptShape: "attributed"
+        ))
+        #expect(app.archiveAttachmentImportStatus == .unavailable)
+        #expect(FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().map(\.id) == [queued.id])
+        #expect(app.archiveEvidence.imports.count == 1)
+        #expect(app.archiveEvidence.imports.first?.attachmentCount == 0)
+
+        try FileManager.default.removeItem(at: attachmentRoot)
+        await app.consumePendingShareArchives()
+
+        #expect(app.archiveImportStatus == .alreadyImported)
+        #expect(app.archiveAttachmentImportStatus == .inserted(
+            attachmentCount: 1,
+            materializedCount: 1
+        ))
+        #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().isEmpty)
+        #expect(app.archiveEvidence.imports.count == 1)
+        #expect(app.archiveEvidence.imports.first?.recordCount == 1)
+        #expect(app.archiveEvidence.imports.first?.attachmentCount == 1)
+        #expect(app.selectedArchiveAttachmentBatches.count == 1)
     }
 
     @Test

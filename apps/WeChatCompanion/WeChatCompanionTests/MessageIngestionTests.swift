@@ -311,10 +311,11 @@ struct MessageIngestionTests {
         // Read-only consumers gate on this and fail closed when it is unknown.
         #expect(try await store.storedSchemaVersion() == MessageStore.schemaVersion)
         // v1 was visual capture only; v2 adds archive evidence; v3 adds
-        // the explicit Archive ↔ Visual conversation-link relation.
+        // the explicit Archive ↔ Visual conversation-link relation; v4 adds
+        // import-scoped attachment manifests.
         // Deliberately pinned: bumping it is a contract change the bridge and
         // its `REQUIRED_TABLES_BY_VERSION` must be updated in the same breath.
-        #expect(MessageStore.schemaVersion == 3)
+        #expect(MessageStore.schemaVersion == 4)
     }
 
     // MARK: - Persistence guards

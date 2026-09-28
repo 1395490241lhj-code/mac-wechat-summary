@@ -54,7 +54,8 @@ actor MessageStore {
     /// v1 — visual capture only.
     /// v2 — plus the four archive evidence tables.
     /// v3 — plus the explicit Archive ↔ Visual conversation link relation.
-    static let schemaVersion: Int32 = 3
+    /// v4 — plus import-level attachment batches and attachment manifests.
+    static let schemaVersion: Int32 = 4
 
     /// Tables each published version promises. The bridge checks the same
     /// contract from the read side.
@@ -71,14 +72,25 @@ actor MessageStore {
             "archive_attributed_records", "archive_unattributed_records",
             "archive_conversation_links",
         ],
+        4: [
+            "conversations", "messages",
+            "archive_conversations", "archive_imports",
+            "archive_attributed_records", "archive_unattributed_records",
+            "archive_conversation_links",
+            "archive_attachment_batches", "archive_attachments",
+        ],
     ]
 
     private static var postV1Tables: Set<String> {
-        requiredTables[3]!.subtracting(requiredTables[1]!)
+        requiredTables[4]!.subtracting(requiredTables[1]!)
     }
 
     private static var v3Tables: Set<String> {
         requiredTables[3]!.subtracting(requiredTables[2]!)
+    }
+
+    private static var v4Tables: Set<String> {
+        requiredTables[4]!.subtracting(requiredTables[3]!)
     }
 
     private let database: DatabaseHandle
@@ -142,11 +154,11 @@ actor MessageStore {
                 throw MessageStoreError.unversionedExistingSchema
             }
             try transaction(handle) {
-                for statement in schemaV1 + schemaV2Archive + schemaV3Links {
+                for statement in schemaV1 + schemaV2Archive + schemaV3Links + schemaV4Attachments {
                     try exec(handle, statement)
                 }
-                try require(tablesFor: 3, in: handle, version: 0)
-                try exec(handle, "PRAGMA user_version = 3;")
+                try require(tablesFor: 4, in: handle, version: 0)
+                try exec(handle, "PRAGMA user_version = 4;")
             }
         case 1:
             try require(tablesFor: 1, in: handle, version: 1)
@@ -156,24 +168,38 @@ actor MessageStore {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV2Archive + schemaV3Links {
+                for statement in schemaV2Archive + schemaV3Links + schemaV4Attachments {
                     try exec(handle, statement)
                 }
-                try require(tablesFor: 3, in: handle, version: 1)
-                try exec(handle, "PRAGMA user_version = 3;")
+                try require(tablesFor: 4, in: handle, version: 1)
+                try exec(handle, "PRAGMA user_version = 4;")
             }
         case 2:
             try require(tablesFor: 2, in: handle, version: 2)
-            guard try applicationTables(handle).isDisjoint(with: v3Tables) else {
+            guard try applicationTables(handle).isDisjoint(
+                with: v3Tables.union(v4Tables)
+            ) else {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV3Links { try exec(handle, statement) }
-                try require(tablesFor: 3, in: handle, version: 2)
-                try exec(handle, "PRAGMA user_version = 3;")
+                for statement in schemaV3Links + schemaV4Attachments {
+                    try exec(handle, statement)
+                }
+                try require(tablesFor: 4, in: handle, version: 2)
+                try exec(handle, "PRAGMA user_version = 4;")
             }
         case 3:
             try require(tablesFor: 3, in: handle, version: 3)
+            guard try applicationTables(handle).isDisjoint(with: v4Tables) else {
+                throw MessageStoreError.reservedTableAlreadyPresent
+            }
+            try transaction(handle) {
+                for statement in schemaV4Attachments { try exec(handle, statement) }
+                try require(tablesFor: 4, in: handle, version: 3)
+                try exec(handle, "PRAGMA user_version = 4;")
+            }
+        case 4:
+            try require(tablesFor: 4, in: handle, version: 4)
         case let future where future > schemaVersion:
             throw MessageStoreError.schemaFromFuture(version: future)
         default:
@@ -390,6 +416,67 @@ actor MessageStore {
         """,
     ]
 
+
+
+    /// B5 attachment evidence is source-package scoped, never message scoped.
+    /// One transcript import may accumulate multiple attachment batches when
+    /// the same transcript is re-shared from different source ZIPs.
+    private static let schemaV4Attachments: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS archive_attachment_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            import_id INTEGER NOT NULL
+                REFERENCES archive_imports(id) ON DELETE CASCADE,
+            batch_fingerprint TEXT NOT NULL,
+            observed_at REAL NOT NULL,
+            attachment_count INTEGER NOT NULL CHECK (attachment_count > 0),
+            materialized_count INTEGER NOT NULL
+                CHECK (materialized_count >= 0 AND materialized_count <= attachment_count),
+            UNIQUE (import_id, batch_fingerprint)
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS archive_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL
+                REFERENCES archive_attachment_batches(id) ON DELETE CASCADE,
+            source_entry_index INTEGER NOT NULL CHECK (source_entry_index >= 0),
+            path_extension TEXT NOT NULL,
+            byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+            crc32 INTEGER NOT NULL CHECK (crc32 >= 0 AND crc32 <= 4294967295),
+            media_kind TEXT
+                CHECK (media_kind IS NULL OR media_kind IN ('image', 'video', 'document')),
+            storage_state TEXT NOT NULL
+                CHECK (storage_state IN (
+                    'materialized', 'unsupported_type', 'type_mismatch',
+                    'oversized', 'budget_exceeded'
+                )),
+            content_sha256 TEXT,
+            stored_relative_path TEXT,
+            relation_scope TEXT NOT NULL DEFAULT 'import_only'
+                CHECK (relation_scope = 'import_only'),
+            CHECK (
+                (storage_state = 'materialized'
+                    AND media_kind IS NOT NULL
+                    AND content_sha256 IS NOT NULL
+                    AND stored_relative_path IS NOT NULL)
+                OR
+                (storage_state <> 'materialized'
+                    AND stored_relative_path IS NULL)
+            ),
+            UNIQUE (batch_id, source_entry_index)
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_attachment_batches_by_import
+            ON archive_attachment_batches(import_id, observed_at);
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_attachments_by_batch
+            ON archive_attachments(batch_id, source_entry_index);
+        """,
+    ]
+
     /// The schema version recorded in the database file itself.
     func storedSchemaVersion() throws -> Int32 {
         try query("PRAGMA user_version;") { Int32(sqlite3_column_int64($0, 0)) }.first ?? 0
@@ -516,7 +603,14 @@ actor MessageStore {
                    l.visual_conversation_id,
                    v.title,
                    l.basis,
-                   l.asserted_at
+                   l.asserted_at,
+                   (SELECT COUNT(*) FROM archive_attachment_batches b WHERE b.import_id = i.id),
+                   (SELECT COUNT(*) FROM archive_attachments a
+                      JOIN archive_attachment_batches b ON b.id = a.batch_id
+                     WHERE b.import_id = i.id),
+                   (SELECT COUNT(*) FROM archive_attachments a
+                      JOIN archive_attachment_batches b ON b.id = a.batch_id
+                     WHERE b.import_id = i.id AND a.storage_state = 'materialized')
             FROM archive_imports i
             JOIN archive_conversations c ON c.id = i.archive_conversation_id
             LEFT JOIN archive_conversation_links l ON l.archive_conversation_id = c.id
@@ -547,7 +641,10 @@ actor MessageStore {
                 firstSentAt: Self.optionalDate(statement, 4),
                 lastSentAt: Self.optionalDate(statement, 5),
                 isAnonymous: key.hasPrefix("native-anonymous-v1:"),
-                link: link
+                link: link,
+                attachmentBatchCount: Int(sqlite3_column_int64(statement, 12)),
+                attachmentCount: Int(sqlite3_column_int64(statement, 13)),
+                materializedAttachmentCount: Int(sqlite3_column_int64(statement, 14))
             )
         }
     }
@@ -848,6 +945,8 @@ actor MessageStore {
         // "Delete All History" would be a lie if it left any behind. Cascades
         // would cover the records, but deleting each table explicitly is what
         // a test can assert.
+        try run("DELETE FROM archive_attachments;")
+        try run("DELETE FROM archive_attachment_batches;")
         try run("DELETE FROM archive_attributed_records;")
         try run("DELETE FROM archive_unattributed_records;")
         try run("DELETE FROM archive_imports;")
@@ -1086,6 +1185,208 @@ actor MessageStore {
             }
         }
         return inserted
+    }
+
+
+
+    // MARK: - B5 attachment evidence
+
+    func attachmentBatchResult(
+        importID: Int64,
+        fingerprint: String
+    ) throws -> ArchiveAttachmentBatchPersistenceResult? {
+        let rows = try query(
+            """
+            SELECT id, attachment_count, materialized_count
+            FROM archive_attachment_batches
+            WHERE import_id = ? AND batch_fingerprint = ?;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, importID)
+                Self.bind($0, 2, fingerprint)
+            },
+            row: {
+                (
+                    sqlite3_column_int64($0, 0),
+                    Int(sqlite3_column_int64($0, 1)),
+                    Int(sqlite3_column_int64($0, 2))
+                )
+            }
+        )
+        guard let row = rows.first else { return nil }
+        return .alreadyPersisted(
+            batchID: row.0,
+            attachmentCount: row.1,
+            materializedCount: row.2
+        )
+    }
+
+    @discardableResult
+    func persistArchiveAttachmentBatch(
+        importID: Int64,
+        fingerprint: String,
+        observedAt: Date,
+        manifests: [ArchiveAttachmentManifest]
+    ) throws -> ArchiveAttachmentBatchPersistenceResult {
+        guard !manifests.isEmpty else {
+            throw ArchiveAttachmentPersistenceError.manifestPersistenceFailed
+        }
+        if let existing = try attachmentBatchResult(
+            importID: importID, fingerprint: fingerprint
+        ) {
+            return existing
+        }
+
+        let materializedCount = manifests.filter { $0.storageState == .materialized }.count
+        try Self.exec(handle, "BEGIN IMMEDIATE;")
+        do {
+            try run("""
+                INSERT INTO archive_attachment_batches(
+                    import_id, batch_fingerprint, observed_at,
+                    attachment_count, materialized_count
+                ) VALUES (?, ?, ?, ?, ?);
+                """) { statement in
+                    sqlite3_bind_int64(statement, 1, importID)
+                    Self.bind(statement, 2, fingerprint)
+                    sqlite3_bind_double(statement, 3, observedAt.timeIntervalSince1970)
+                    sqlite3_bind_int64(statement, 4, Int64(manifests.count))
+                    sqlite3_bind_int64(statement, 5, Int64(materializedCount))
+                }
+            let batchID = sqlite3_last_insert_rowid(handle)
+
+            var inserted = 0
+            for manifest in manifests {
+                try run("""
+                    INSERT INTO archive_attachments(
+                        batch_id, source_entry_index, path_extension, byte_count,
+                        crc32, media_kind, storage_state, content_sha256,
+                        stored_relative_path, relation_scope
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'import_only');
+                    """) { statement in
+                        sqlite3_bind_int64(statement, 1, batchID)
+                        sqlite3_bind_int64(statement, 2, Int64(manifest.sourceEntryIndex))
+                        Self.bind(statement, 3, manifest.pathExtension)
+                        sqlite3_bind_int64(statement, 4, Int64(manifest.byteCount))
+                        sqlite3_bind_int64(statement, 5, Int64(manifest.crc32))
+                        Self.bind(statement, 6, manifest.kind?.rawValue)
+                        Self.bind(statement, 7, manifest.storageState.rawValue)
+                        Self.bind(statement, 8, manifest.contentSHA256)
+                        Self.bind(statement, 9, manifest.storedRelativePath)
+                    }
+                inserted += 1
+            }
+            guard inserted == manifests.count else {
+                throw ArchiveAttachmentPersistenceError.manifestPersistenceFailed
+            }
+            try Self.exec(handle, "COMMIT;")
+            return .inserted(
+                batchID: batchID,
+                attachmentCount: inserted,
+                materializedCount: materializedCount
+            )
+        } catch {
+            try? Self.exec(handle, "ROLLBACK;")
+            throw error
+        }
+    }
+
+    func archiveAttachmentBatches(
+        importID: Int64
+    ) throws -> [ArchiveEvidenceAttachmentBatch] {
+        let batches = try query(
+            """
+            SELECT id, observed_at, attachment_count, materialized_count
+            FROM archive_attachment_batches
+            WHERE import_id = ?
+            ORDER BY observed_at DESC, id DESC;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: {
+                (
+                    sqlite3_column_int64($0, 0),
+                    Date(timeIntervalSince1970: sqlite3_column_double($0, 1)),
+                    Int(sqlite3_column_int64($0, 2)),
+                    Int(sqlite3_column_int64($0, 3))
+                )
+            }
+        )
+
+        var result: [ArchiveEvidenceAttachmentBatch] = []
+        result.reserveCapacity(batches.count)
+        for batch in batches {
+            let rawAttachments = try query(
+                """
+                SELECT id, source_entry_index, path_extension, byte_count,
+                       media_kind, storage_state
+                FROM archive_attachments
+                WHERE batch_id = ?
+                ORDER BY source_entry_index ASC, id ASC;
+                """,
+                bind: { sqlite3_bind_int64($0, 1, batch.0) },
+                row: {
+                    (
+                        sqlite3_column_int64($0, 0),
+                        Int(sqlite3_column_int64($0, 1)),
+                        Self.string($0, 2) ?? "",
+                        Int(sqlite3_column_int64($0, 3)),
+                        Self.string($0, 4),
+                        Self.string($0, 5) ?? ""
+                    )
+                }
+            )
+            var attachments: [ArchiveEvidenceAttachment] = []
+            attachments.reserveCapacity(rawAttachments.count)
+            for raw in rawAttachments {
+                guard let state = ArchiveAttachmentStorageState(rawValue: raw.5) else {
+                    throw MessageStoreError.statementFailed(status: SQLITE_CORRUPT)
+                }
+                let kind: WeChatNativeAttachmentKind?
+                if let value = raw.4 {
+                    guard let parsed = WeChatNativeAttachmentKind(rawValue: value) else {
+                        throw MessageStoreError.statementFailed(status: SQLITE_CORRUPT)
+                    }
+                    kind = parsed
+                } else {
+                    kind = nil
+                }
+                attachments.append(ArchiveEvidenceAttachment(
+                    id: raw.0,
+                    sourceEntryIndex: raw.1,
+                    pathExtension: raw.2,
+                    byteCount: raw.3,
+                    kind: kind,
+                    storageState: state
+                ))
+            }
+            guard attachments.count == batch.2 else {
+                throw MessageStoreError.statementFailed(status: SQLITE_CORRUPT)
+            }
+            result.append(ArchiveEvidenceAttachmentBatch(
+                id: batch.0,
+                observedAt: batch.1,
+                attachmentCount: batch.2,
+                materializedCount: batch.3,
+                attachments: attachments
+            ))
+        }
+        return result
+    }
+
+    func archiveAttachmentBatchKeys() throws -> [Int64: Set<String>] {
+        let rows = try query(
+            """
+            SELECT import_id, batch_fingerprint
+            FROM archive_attachment_batches
+            ORDER BY import_id, id;
+            """
+        ) {
+            (sqlite3_column_int64($0, 0), Self.string($0, 1) ?? "")
+        }
+        var result: [Int64: Set<String>] = [:]
+        for (importID, fingerprint) in rows {
+            result[importID, default: []].insert(fingerprint)
+        }
+        return result
     }
 
     func totalMessageCount() throws -> Int {

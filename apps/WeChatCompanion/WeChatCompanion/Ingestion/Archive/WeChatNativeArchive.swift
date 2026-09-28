@@ -1,4 +1,54 @@
+import CryptoKit
 import Foundation
+
+
+
+enum WeChatNativeAttachmentKind: String, Sendable, Equatable {
+    case image
+    case video
+    case document
+}
+
+enum WeChatNativeAttachmentDisposition: String, Sendable, Equatable {
+    /// The bytes were type-checked and retained in memory for the import layer
+    /// to materialize into the app-owned attachment store.
+    case materializable
+    /// The extension is not in B5's closed set. Metadata may still be retained.
+    case unsupportedType = "unsupported_type"
+    /// The extension is supported, but the bytes do not match that container.
+    case typeMismatch = "type_mismatch"
+    /// The entry is larger than the per-file in-memory/materialization cap.
+    case oversized
+    /// The type is supported but the batch-wide count/byte budget is exhausted.
+    case budgetExceeded = "budget_exceeded"
+}
+
+/// Import-level attachment evidence from one ZIP entry.
+///
+/// There is deliberately no source filename and no message sequence here. Real
+/// exports observed so far prove only that these files co-existed with the
+/// transcript inside the same ZIP; they do not prove which record a file belongs
+/// to. sourceEntryIndex is the central-directory ordinal, which is enough to
+/// audit one source package without persisting a potentially identifying name.
+struct WeChatNativeArchiveAttachment: Sendable, Equatable {
+    let sourceEntryIndex: Int
+    let pathExtension: String
+    let byteCount: Int
+    let crc32: UInt32
+    let kind: WeChatNativeAttachmentKind?
+    let disposition: WeChatNativeAttachmentDisposition
+    let canonicalExtension: String?
+    let contentSHA256: String?
+    let payload: Data?
+}
+
+enum WeChatNativeAttachmentReadMode: Sendable, Equatable {
+    /// Existing diagnostics/acceptance readers keep their old aggregate-only
+    /// behaviour and never load attachment bytes.
+    case inventoryOnly
+    /// B5 import path: type-check and retain a bounded subset of supported files.
+    case materializeSupported
+}
 
 /// A validated native WeChat export, held in memory.
 ///
@@ -24,9 +74,11 @@ struct WeChatNativeArchive: Sendable, Equatable {
     /// without reporting content.
     let entryCount: Int
     let transcriptCandidateCount: Int
-    /// Non-transcript file entries, counted by lowercased extension. Phase A
-    /// does not read, extract or interpret any of them.
+    /// Non-transcript file entries, counted by lowercased extension.
     let attachmentCountsByExtension: [String: Int]
+    /// B5 import-only attachment evidence. Empty in aggregate-only read mode.
+    /// No source filenames and no message-level relation are carried here.
+    let attachments: [WeChatNativeArchiveAttachment]
 
     // Privacy-safe aggregate semantics. "No strict attributed parse" is not
     // "invalid archive", and these are what say so.
@@ -94,6 +146,15 @@ enum WeChatNativeArchiveReader {
     /// Entries larger than this are not considered as transcripts. A chat
     /// export's TXT is far smaller; anything bigger is not one.
     static let maximumTranscriptBytes = 16 << 20
+    /// B5 deliberately keeps a much smaller materialization budget than the
+    /// ZIP container's 1 GiB aggregate validation ceiling.
+    static let maximumMaterializedAttachmentCount = 100
+    static let maximumMaterializedAttachmentBytes = 64 << 20
+
+    private static let supportedAttachmentExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif",
+        "mp4", "mov", "m4v", "pdf",
+    ]
 
     /// Validates the container, verifies **every** entry, then parses the best
     /// transcript in it.
@@ -112,7 +173,8 @@ enum WeChatNativeArchiveReader {
     static func read(
         contentsOf url: URL,
         limits: ZIPArchiveReader.Limits = .standard,
-        timeZone: TimeZone = WeChatNativeTranscriptParser.defaultTimeZone
+        timeZone: TimeZone = WeChatNativeTranscriptParser.defaultTimeZone,
+        attachmentReadMode: WeChatNativeAttachmentReadMode = .inventoryOnly
     ) throws -> WeChatNativeArchive {
         let reader: ZIPArchiveReader
         do {
@@ -158,9 +220,21 @@ enum WeChatNativeArchiveReader {
         }
         let best = recognized.max { $0.transcript.recordCount < $1.transcript.recordCount }!
 
-        var attachments: [String: Int] = [:]
+        var attachmentCounts: [String: Int] = [:]
         for file in files where file.name != best.name {
-            attachments[file.pathExtension.isEmpty ? "(none)" : file.pathExtension, default: 0] += 1
+            attachmentCounts[safeExtension(file.pathExtension), default: 0] += 1
+        }
+
+        let attachmentEvidence: [WeChatNativeArchiveAttachment]
+        switch attachmentReadMode {
+        case .inventoryOnly:
+            attachmentEvidence = []
+        case .materializeSupported:
+            attachmentEvidence = try readAttachmentEvidence(
+                reader: reader,
+                excludingTranscriptIndex: best.index,
+                limits: limits
+            )
         }
 
         return WeChatNativeArchive(
@@ -169,8 +243,216 @@ enum WeChatNativeArchiveReader {
             transcript: best.transcript,
             entryCount: reader.entries.count,
             transcriptCandidateCount: recognized.count,
-            attachmentCountsByExtension: attachments
+            attachmentCountsByExtension: attachmentCounts,
+            attachments: attachmentEvidence
         )
+    }
+
+
+    private static func readAttachmentEvidence(
+        reader: ZIPArchiveReader,
+        excludingTranscriptIndex: Int,
+        limits: ZIPArchiveReader.Limits
+    ) throws -> [WeChatNativeArchiveAttachment] {
+        var results: [WeChatNativeArchiveAttachment] = []
+        var retainedCount = 0
+        var retainedBytes = 0
+
+        for (index, entry) in reader.entries.enumerated() {
+            guard !entry.isDirectory, index != excludingTranscriptIndex else { continue }
+            let pathExtension = safeExtension(entry.pathExtension)
+
+            guard supportedAttachmentExtensions.contains(pathExtension) else {
+                results.append(WeChatNativeArchiveAttachment(
+                    sourceEntryIndex: index,
+                    pathExtension: pathExtension,
+                    byteCount: entry.uncompressedSize,
+                    crc32: entry.crc32,
+                    kind: nil,
+                    disposition: .unsupportedType,
+                    canonicalExtension: nil,
+                    contentSHA256: nil,
+                    payload: nil
+                ))
+                continue
+            }
+
+            guard entry.uncompressedSize <= limits.maximumReadableEntryBytes else {
+                results.append(WeChatNativeArchiveAttachment(
+                    sourceEntryIndex: index,
+                    pathExtension: pathExtension,
+                    byteCount: entry.uncompressedSize,
+                    crc32: entry.crc32,
+                    kind: nil,
+                    disposition: .oversized,
+                    canonicalExtension: nil,
+                    contentSHA256: nil,
+                    payload: nil
+                ))
+                continue
+            }
+
+            let data: Data
+            do {
+                data = try reader.data(for: entry)
+            } catch let error as ZIPArchiveError {
+                throw WeChatNativeArchiveError.archive(error)
+            }
+
+            guard let verified = verifiedType(pathExtension: pathExtension, data: data) else {
+                results.append(WeChatNativeArchiveAttachment(
+                    sourceEntryIndex: index,
+                    pathExtension: pathExtension,
+                    byteCount: entry.uncompressedSize,
+                    crc32: entry.crc32,
+                    kind: nil,
+                    disposition: .typeMismatch,
+                    canonicalExtension: nil,
+                    contentSHA256: nil,
+                    payload: nil
+                ))
+                continue
+            }
+
+            let sha = SHA256.hash(data: data)
+                .map { String(format: "%02x", $0) }
+                .joined()
+
+            guard retainedCount < maximumMaterializedAttachmentCount,
+                  retainedBytes + data.count <= maximumMaterializedAttachmentBytes
+            else {
+                results.append(WeChatNativeArchiveAttachment(
+                    sourceEntryIndex: index,
+                    pathExtension: pathExtension,
+                    byteCount: entry.uncompressedSize,
+                    crc32: entry.crc32,
+                    kind: verified.kind,
+                    disposition: .budgetExceeded,
+                    canonicalExtension: verified.canonicalExtension,
+                    contentSHA256: sha,
+                    payload: nil
+                ))
+                continue
+            }
+
+            retainedCount += 1
+            retainedBytes += data.count
+            results.append(WeChatNativeArchiveAttachment(
+                sourceEntryIndex: index,
+                pathExtension: pathExtension,
+                byteCount: entry.uncompressedSize,
+                crc32: entry.crc32,
+                kind: verified.kind,
+                disposition: .materializable,
+                canonicalExtension: verified.canonicalExtension,
+                contentSHA256: sha,
+                payload: data
+            ))
+        }
+        return results
+    }
+
+    private static func safeExtension(_ raw: String) -> String {
+        guard !raw.isEmpty else { return "(none)" }
+        let lowered = raw.lowercased()
+        guard lowered.count <= 16,
+              lowered.unicodeScalars.allSatisfy({
+                  ($0.value >= 48 && $0.value <= 57)
+                      || ($0.value >= 97 && $0.value <= 122)
+              })
+        else { return "(other)" }
+        return lowered
+    }
+
+    private static func verifiedType(
+        pathExtension: String,
+        data: Data
+    ) -> (kind: WeChatNativeAttachmentKind, canonicalExtension: String)? {
+        let prefix = Array(data.prefix(16))
+        switch pathExtension {
+        case "jpg", "jpeg":
+            guard prefix.count >= 3,
+                  prefix[0] == 0xFF, prefix[1] == 0xD8, prefix[2] == 0xFF
+            else { return nil }
+            return (.image, "jpg")
+        case "png":
+            guard prefix.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            else { return nil }
+            return (.image, "png")
+        case "gif":
+            guard data.starts(with: Data("GIF87a".utf8))
+                    || data.starts(with: Data("GIF89a".utf8))
+            else { return nil }
+            return (.image, "gif")
+        case "webp":
+            guard prefix.count >= 12,
+                  Array(prefix[0..<4]) == Array("RIFF".utf8),
+                  Array(prefix[8..<12]) == Array("WEBP".utf8)
+            else { return nil }
+            return (.image, "webp")
+        case "heic", "heif":
+            guard !isoBrands(in: data).isDisjoint(with: heifBrands) else { return nil }
+            return (.image, "heic")
+        case "avif":
+            guard !isoBrands(in: data).isDisjoint(with: avifBrands) else { return nil }
+            return (.image, "avif")
+        case "mp4":
+            guard !isoBrands(in: data).isDisjoint(with: mp4Brands) else { return nil }
+            return (.video, "mp4")
+        case "m4v":
+            guard !isoBrands(in: data).isDisjoint(with: m4vBrands) else { return nil }
+            return (.video, "mp4")
+        case "mov":
+            guard isoBrands(in: data).contains("qt  ") else { return nil }
+            return (.video, "mov")
+        case "pdf":
+            guard data.starts(with: Data("%PDF-".utf8)) else { return nil }
+            return (.document, "pdf")
+        default:
+            return nil
+        }
+    }
+
+    private static let heifBrands: Set<String> = [
+        "heic", "heix", "hevc", "hevx", "mif1", "msf1",
+    ]
+    private static let avifBrands: Set<String> = ["avif", "avis"]
+    private static let mp4Brands: Set<String> = [
+        "isom", "iso2", "mp41", "mp42", "avc1", "dash",
+    ]
+    private static let m4vBrands: Set<String> = [
+        "M4V ", "M4VH", "M4VP", "mp41", "mp42", "isom",
+    ]
+
+    /// Returns the major and compatible ISO-BMFF brands from the ftyp box.
+    /// Having an ftyp box alone is not proof of HEIF, AVIF, MP4, or MOV.
+    private static func isoBrands(in data: Data) -> Set<String> {
+        guard data.count >= 16 else { return [] }
+        let bytes = [UInt8](data.prefix(min(data.count, 256)))
+        guard Array(bytes[4..<8]) == Array("ftyp".utf8) else { return [] }
+
+        let declaredSize = Int(bytes[0]) << 24
+            | Int(bytes[1]) << 16
+            | Int(bytes[2]) << 8
+            | Int(bytes[3])
+        guard declaredSize >= 16 else { return [] }
+        let boxEnd = min(declaredSize, bytes.count)
+
+        func brand(at offset: Int) -> String? {
+            guard offset + 4 <= boxEnd else { return nil }
+            let slice = bytes[offset..<(offset + 4)]
+            guard slice.allSatisfy({ $0 >= 0x20 && $0 <= 0x7E }) else { return nil }
+            return String(bytes: slice, encoding: .ascii)
+        }
+
+        var result: Set<String> = []
+        if let major = brand(at: 8) { result.insert(major) }
+        var offset = 16
+        while offset + 4 <= boxEnd {
+            if let compatible = brand(at: offset) { result.insert(compatible) }
+            offset += 4
+        }
+        return result
     }
 
     /// UTF-8, with an optional BOM. A native export is UTF-8; anything that is

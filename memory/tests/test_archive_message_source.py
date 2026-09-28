@@ -12,7 +12,7 @@ def seed_archive_store(path):
     connection = sqlite3.connect(path)
     connection.executescript(
         """
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         CREATE TABLE conversations (
             id INTEGER PRIMARY KEY,
             title TEXT,
@@ -60,6 +60,27 @@ def seed_archive_store(path):
             basis TEXT NOT NULL,
             asserted_at REAL NOT NULL
         );
+        CREATE TABLE archive_attachment_batches (
+            id INTEGER PRIMARY KEY,
+            import_id INTEGER NOT NULL,
+            batch_fingerprint TEXT NOT NULL,
+            observed_at REAL NOT NULL,
+            attachment_count INTEGER NOT NULL,
+            materialized_count INTEGER NOT NULL
+        );
+        CREATE TABLE archive_attachments (
+            id INTEGER PRIMARY KEY,
+            batch_id INTEGER NOT NULL,
+            source_entry_index INTEGER NOT NULL,
+            path_extension TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            crc32 INTEGER NOT NULL,
+            media_kind TEXT,
+            storage_state TEXT NOT NULL,
+            content_sha256 TEXT,
+            stored_relative_path TEXT,
+            relation_scope TEXT NOT NULL
+        );
         """
     )
     connection.executemany(
@@ -86,6 +107,17 @@ def seed_archive_store(path):
     )
     connection.execute(
         "INSERT INTO archive_unattributed_records VALUES (2, 0, 'unattributed')"
+    )
+    connection.execute(
+        "INSERT INTO archive_attachment_batches VALUES (1, 1, 'batch', 4000, 1, 1)"
+    )
+    connection.execute(
+        """INSERT INTO archive_attachments(
+               id, batch_id, source_entry_index, path_extension, byte_count,
+               crc32, media_kind, storage_state, content_sha256,
+               stored_relative_path, relation_scope
+           ) VALUES (1, 1, 7, 'jpg', 12, 123, 'image', 'materialized',
+                     'ATTACHMENT-SHA-SENTINEL', 'private/path', 'import_only')"""
     )
     connection.commit()
     connection.close()
@@ -248,3 +280,31 @@ def test_schema_v3_without_link_table_is_refused(tmp_path):
 
     assert status.ready is False
     assert status.state == "archive_schema_incomplete"
+
+
+def test_v4_attachment_evidence_is_not_promoted_into_memory(tmp_path):
+    path = tmp_path / "messages.sqlite"
+    seed_archive_store(path)
+    source = ArchiveMessageSource(str(path))
+
+    conversations = source.list_conversations(10)
+    messages = source.get_recent_messages(0.0, 10)
+
+    rendered = repr(conversations.items) + repr(messages.items)
+    assert "ATTACHMENT-SHA-SENTINEL" not in rendered
+    assert "private/path" not in rendered
+    assert [item.text for item in messages.items] == ["one", "two", "three"]
+
+
+def test_schema_v4_requires_both_attachment_tables(tmp_path):
+    for missing in ("archive_attachment_batches", "archive_attachments"):
+        path = tmp_path / f"missing-{missing}.sqlite"
+        seed_archive_store(path)
+        connection = sqlite3.connect(path)
+        connection.execute(f"DROP TABLE {missing}")
+        connection.commit()
+        connection.close()
+
+        status = ArchiveMessageSource(str(path)).status()
+        assert status.ready is False
+        assert status.state == "archive_schema_incomplete"

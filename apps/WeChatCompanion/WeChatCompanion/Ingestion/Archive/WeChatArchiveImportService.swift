@@ -1,10 +1,18 @@
 import CryptoKit
 import Foundation
 
+enum WeChatArchiveAttachmentImportOutcome: Sendable, Equatable {
+    case none
+    case inserted(attachmentCount: Int, materializedCount: Int)
+    case alreadyPersisted(attachmentCount: Int, materializedCount: Int)
+    case unavailable
+}
+
 struct WeChatArchiveImportOutcome: Sendable, Equatable {
     let persistence: ArchivePersistenceResult
     let transcriptShape: String
     let recordCount: Int
+    let attachments: WeChatArchiveAttachmentImportOutcome
 }
 
 enum ArchiveConversationIdentityResolver {
@@ -79,7 +87,10 @@ struct WeChatArchiveImportService: Sendable {
             if didAccess { url.stopAccessingSecurityScopedResource() }
         }
 
-        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        let archive = try WeChatNativeArchiveReader.read(
+            contentsOf: url,
+            attachmentReadMode: .materializeSupported
+        )
         let conversationKey = ArchiveConversationIdentityResolver.resolve(
             archive: archive
         )
@@ -88,10 +99,47 @@ struct WeChatArchiveImportService: Sendable {
             conversationKey: conversationKey,
             importedAt: importedAt
         )
+        let importID: Int64
+        switch persistence {
+        case .inserted(let id, _), .alreadyImported(let id):
+            importID = id
+        }
+
+        let attachmentOutcome: WeChatArchiveAttachmentImportOutcome
+        if archive.attachments.isEmpty {
+            attachmentOutcome = .none
+        } else {
+            do {
+                switch try await history.persistArchiveAttachmentBatch(
+                    importID: importID,
+                    attachments: archive.attachments,
+                    observedAt: importedAt
+                ) {
+                case .inserted(_, let count, let materialized):
+                    attachmentOutcome = .inserted(
+                        attachmentCount: count,
+                        materializedCount: materialized
+                    )
+                case .alreadyPersisted(_, let count, let materialized):
+                    attachmentOutcome = .alreadyPersisted(
+                        attachmentCount: count,
+                        materializedCount: materialized
+                    )
+                case nil:
+                    attachmentOutcome = .none
+                }
+            } catch {
+                // Transcript persistence has already succeeded. Keep that fact
+                // truthful and surface attachment failure as its own outcome.
+                attachmentOutcome = .unavailable
+            }
+        }
+
         return WeChatArchiveImportOutcome(
             persistence: persistence,
             transcriptShape: archive.transcriptShape,
-            recordCount: archive.recordCount
+            recordCount: archive.recordCount,
+            attachments: attachmentOutcome
         )
     }
 }

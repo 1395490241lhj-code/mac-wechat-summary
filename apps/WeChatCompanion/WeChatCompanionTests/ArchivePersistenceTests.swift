@@ -130,6 +130,18 @@ private let v2ArchiveSchema = [
     """,
 ]
 
+private let v3LinkSchema = [
+    """
+    CREATE TABLE archive_conversation_links (
+        archive_conversation_id INTEGER PRIMARY KEY,
+        visual_conversation_id INTEGER NOT NULL,
+        basis TEXT NOT NULL,
+        asserted_at REAL NOT NULL
+    );
+    """,
+]
+
+
 // MARK: - Migration
 
 struct ArchiveMigrationTests {
@@ -138,8 +150,8 @@ struct ArchiveMigrationTests {
         let scratch = try Scratch()
         _ = try MessageStore(url: scratch.databaseURL)
         let (version, present) = scratch.inspect { (scalar($0, "PRAGMA user_version;"), tables($0)) }
-        #expect(version == "3")
-        #expect(MessageStore.requiredTables[3]!.isSubset(of: present))
+        #expect(version == "4")
+        #expect(MessageStore.requiredTables[4]!.isSubset(of: present))
     }
 
     @Test
@@ -157,13 +169,13 @@ struct ArchiveMigrationTests {
         let (version, messages, present) = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "SELECT COUNT(*) FROM messages;"), tables($0))
         }
-        #expect(version == "3")
+        #expect(version == "4")
         #expect(messages == "1", "existing visual rows must survive the migration")
-        #expect(MessageStore.requiredTables[3]!.isSubset(of: present))
+        #expect(MessageStore.requiredTables[4]!.isSubset(of: present))
     }
 
     @Test
-    func aRealV2FileMigratesToV3AndKeepsArchiveRows() throws {
+    func aRealV2FileMigratesToCurrentAndKeepsArchiveRows() throws {
         let scratch = try Scratch()
         try scratch.seed(v1Schema + v2ArchiveSchema + [
             "INSERT INTO archive_conversations(source_conversation_key) VALUES('archive-key');",
@@ -190,10 +202,45 @@ struct ArchiveMigrationTests {
                 tables($0)
             )
         }
-        #expect(version == "3")
+        #expect(version == "4")
         #expect(imports == "1")
         #expect(records == "1")
         #expect(present.contains("archive_conversation_links"))
+        #expect(present.contains("archive_attachment_batches"))
+        #expect(present.contains("archive_attachments"))
+    }
+
+    @Test
+    func aRealV3FileMigratesToV4AndKeepsLinks() throws {
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema + v2ArchiveSchema + v3LinkSchema + [
+            "INSERT INTO conversations(title,first_seen_at,last_seen_at) VALUES('chat',1,2);",
+            "INSERT INTO archive_conversations(source_conversation_key) VALUES('archive-key');",
+            """
+            INSERT INTO archive_imports(
+                archive_conversation_id, import_fingerprint, fingerprint_format_version,
+                source_type, transcript_shape, imported_at, archive_parser_version
+            ) VALUES(1, 'fingerprint', 1, 'wechat_native_archive', 'attributed', 10, 1);
+            """,
+            """
+            INSERT INTO archive_conversation_links(
+                archive_conversation_id, visual_conversation_id, basis, asserted_at
+            ) VALUES(1, 1, 'operator', 20);
+            """,
+        ], userVersion: 3)
+
+        _ = try MessageStore(url: scratch.databaseURL)
+
+        let (version, links, present) = scratch.inspect {
+            (
+                scalar($0, "PRAGMA user_version;"),
+                scalar($0, "SELECT COUNT(*) FROM archive_conversation_links;"),
+                tables($0)
+            )
+        }
+        #expect(version == "4")
+        #expect(links == "1")
+        #expect(MessageStore.requiredTables[4]!.isSubset(of: present))
     }
 
     @Test
@@ -201,7 +248,7 @@ struct ArchiveMigrationTests {
         let scratch = try Scratch()
         _ = try MessageStore(url: scratch.databaseURL)
         _ = try MessageStore(url: scratch.databaseURL)
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "4")
     }
 
     @Test
@@ -225,7 +272,7 @@ struct ArchiveMigrationTests {
         ], userVersion: 1)
         _ = try MessageStore(url: scratch.databaseURL)
         #expect(scratch.inspect { tables($0).contains("sqlite_sequence") })
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "4")
     }
 
     @Test
@@ -255,20 +302,20 @@ struct ArchiveMigrationTests {
     @Test
     func aFutureVersionIsRefusedAndTheFileIsLeftUntouched() throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 4)
+        try scratch.seed(v1Schema, userVersion: 5)
         let before = scratch.inspect { (scalar($0, "PRAGMA user_version;"),
                                         scalar($0, "PRAGMA journal_mode;"), tables($0)) }
-        #expect(before.0 == "4")
+        #expect(before.0 == "5")
 
-        #expect(throws: MessageStoreError.schemaFromFuture(version: 4)) {
+        #expect(throws: MessageStoreError.schemaFromFuture(version: 5)) {
             _ = try MessageStore(url: scratch.databaseURL)
         }
 
         let after = scratch.inspect { (scalar($0, "PRAGMA user_version;"),
                                        scalar($0, "PRAGMA journal_mode;"), tables($0)) }
-        #expect(after.0 == "4", "must never stamp downward")
+        #expect(after.0 == "5", "must never stamp downward")
         #expect(after.2 == before.2, "no table may be created")
-        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[3]!
+        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[4]!
             .subtracting(MessageStore.requiredTables[1]!)))
         // journal_mode is persistent state: refusing after switching it would
         // make "we did not touch the file" untrue.
@@ -783,7 +830,7 @@ struct SchemaEnumerationTests {
         // journal mode. Proved indirectly by the future-version path, which
         // exits before any of those -- see
         // ArchiveMigrationTests.aFutureVersionIsRefusedAndTheFileIsLeftUntouched.
-        #expect(MessageStore.schemaVersion == 3)
+        #expect(MessageStore.schemaVersion == 4)
     }
 }
 
@@ -887,7 +934,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func consentOnWithAFutureDatabaseReportsUnavailableNotConsent() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 4)
+        try scratch.seed(v1Schema, userVersion: 5)
         let before = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
         }
@@ -907,17 +954,17 @@ struct LocalHistoryLifecycleTests {
                 transcript: try transcript(), conversationKey: key
             )
         }
-        #expect(await history.lastOpenFailure == .schemaFromFuture(version: 4))
+        #expect(await history.lastOpenFailure == .schemaFromFuture(version: 5))
 
         // Fail closed: the existing file is untouched.
         let after = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
         }
-        #expect(after.0 == "4")
+        #expect(after.0 == "5")
         #expect(after.0 == before.0)
         #expect(after.1 == before.1, "journal mode must not change")
         #expect(after.2 == before.2, "no table may be created")
-        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[3]!
+        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[4]!
             .subtracting(MessageStore.requiredTables[1]!)))
     }
 
@@ -955,7 +1002,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func deleteAllHistoryRecoversFromAnUnavailableStore() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 4)
+        try scratch.seed(v1Schema, userVersion: 5)
         let history = LocalMessageHistory(url: scratch.databaseURL)
         await history.setEnabled(true)
         #expect(await history.storeState == .unavailable)
@@ -966,7 +1013,7 @@ struct LocalHistoryLifecycleTests {
         #expect(await history.isConsentEnabled)
         #expect(await history.storeState == .ready)
         #expect(await history.lastOpenFailure == nil)
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "4")
 
         let result = try await history.persistArchiveEvidence(
             transcript: try transcript(), conversationKey: key
@@ -977,7 +1024,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func turningConsentOffFromUnavailableClearsTheFailure() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 4)
+        try scratch.seed(v1Schema, userVersion: 5)
         let history = LocalMessageHistory(url: scratch.databaseURL)
         await history.setEnabled(true)
         #expect(await history.storeState == .unavailable)
