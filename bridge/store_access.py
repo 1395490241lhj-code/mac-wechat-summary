@@ -82,7 +82,7 @@ except ImportError:  # pragma: no cover - imported by path from another cwd
 #: and would fail on a benign additive column. The writer may be stricter.
 #: The macOS app stamps it in ``MessageStore.migrate``. Anything else fails
 #: closed: the shape is never inferred from whatever tables happen to exist.
-SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2})
+SUPPORTED_SCHEMA_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, 3})
 
 #: What each version promises, checked against the stamp rather than guessed
 #: from the file. Widening the accepted versions alone is not enough: a database
@@ -101,6 +101,15 @@ REQUIRED_TABLES_BY_VERSION: Final[dict[int, frozenset[str]]] = {
         "archive_imports",
         "archive_attributed_records",
         "archive_unattributed_records",
+    }),
+    3: frozenset({
+        "conversations",
+        "messages",
+        "archive_conversations",
+        "archive_imports",
+        "archive_attributed_records",
+        "archive_unattributed_records",
+        "archive_conversation_links",
     }),
 }
 

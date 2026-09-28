@@ -89,6 +89,47 @@ private let v1Schema = [
     """,
 ]
 
+private let v2ArchiveSchema = [
+    """
+    CREATE TABLE archive_conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_conversation_key TEXT NOT NULL UNIQUE
+    );
+    """,
+    """
+    CREATE TABLE archive_imports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        archive_conversation_id INTEGER NOT NULL,
+        import_fingerprint TEXT NOT NULL UNIQUE,
+        fingerprint_format_version INTEGER NOT NULL,
+        source_type TEXT NOT NULL,
+        transcript_shape TEXT NOT NULL,
+        imported_at REAL NOT NULL,
+        archive_parser_version INTEGER NOT NULL,
+        time_zone_identifier TEXT
+    );
+    """,
+    """
+    CREATE TABLE archive_attributed_records (
+        import_id INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        sender TEXT NOT NULL,
+        sent_at REAL NOT NULL,
+        sent_at_text TEXT NOT NULL,
+        text TEXT NOT NULL,
+        PRIMARY KEY(import_id, sequence)
+    );
+    """,
+    """
+    CREATE TABLE archive_unattributed_records (
+        import_id INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        record_text TEXT NOT NULL,
+        PRIMARY KEY(import_id, sequence)
+    );
+    """,
+]
+
 // MARK: - Migration
 
 struct ArchiveMigrationTests {
@@ -97,8 +138,8 @@ struct ArchiveMigrationTests {
         let scratch = try Scratch()
         _ = try MessageStore(url: scratch.databaseURL)
         let (version, present) = scratch.inspect { (scalar($0, "PRAGMA user_version;"), tables($0)) }
-        #expect(version == "2")
-        #expect(MessageStore.requiredTables[2]!.isSubset(of: present))
+        #expect(version == "3")
+        #expect(MessageStore.requiredTables[3]!.isSubset(of: present))
     }
 
     @Test
@@ -116,17 +157,51 @@ struct ArchiveMigrationTests {
         let (version, messages, present) = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "SELECT COUNT(*) FROM messages;"), tables($0))
         }
-        #expect(version == "2")
+        #expect(version == "3")
         #expect(messages == "1", "existing visual rows must survive the migration")
-        #expect(MessageStore.requiredTables[2]!.isSubset(of: present))
+        #expect(MessageStore.requiredTables[3]!.isSubset(of: present))
     }
 
     @Test
-    func reopeningAV2FileIsANoOp() throws {
+    func aRealV2FileMigratesToV3AndKeepsArchiveRows() throws {
+        let scratch = try Scratch()
+        try scratch.seed(v1Schema + v2ArchiveSchema + [
+            "INSERT INTO archive_conversations(source_conversation_key) VALUES('archive-key');",
+            """
+            INSERT INTO archive_imports(
+                archive_conversation_id, import_fingerprint, fingerprint_format_version,
+                source_type, transcript_shape, imported_at, archive_parser_version
+            ) VALUES(1, 'fingerprint', 1, 'wechat_native_archive', 'attributed', 10, 1);
+            """,
+            """
+            INSERT INTO archive_attributed_records(
+                import_id, sequence, sender, sent_at, sent_at_text, text
+            ) VALUES(1, 0, 's', 5, 't', 'hello');
+            """,
+        ], userVersion: 2)
+
+        _ = try MessageStore(url: scratch.databaseURL)
+
+        let (version, imports, records, present) = scratch.inspect {
+            (
+                scalar($0, "PRAGMA user_version;"),
+                scalar($0, "SELECT COUNT(*) FROM archive_imports;"),
+                scalar($0, "SELECT COUNT(*) FROM archive_attributed_records;"),
+                tables($0)
+            )
+        }
+        #expect(version == "3")
+        #expect(imports == "1")
+        #expect(records == "1")
+        #expect(present.contains("archive_conversation_links"))
+    }
+
+    @Test
+    func reopeningACurrentFileIsANoOp() throws {
         let scratch = try Scratch()
         _ = try MessageStore(url: scratch.databaseURL)
         _ = try MessageStore(url: scratch.databaseURL)
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "2")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
     }
 
     @Test
@@ -150,7 +225,7 @@ struct ArchiveMigrationTests {
         ], userVersion: 1)
         _ = try MessageStore(url: scratch.databaseURL)
         #expect(scratch.inspect { tables($0).contains("sqlite_sequence") })
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "2")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
     }
 
     @Test
@@ -180,20 +255,20 @@ struct ArchiveMigrationTests {
     @Test
     func aFutureVersionIsRefusedAndTheFileIsLeftUntouched() throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 3)
+        try scratch.seed(v1Schema, userVersion: 4)
         let before = scratch.inspect { (scalar($0, "PRAGMA user_version;"),
                                         scalar($0, "PRAGMA journal_mode;"), tables($0)) }
-        #expect(before.0 == "3")
+        #expect(before.0 == "4")
 
-        #expect(throws: MessageStoreError.schemaFromFuture(version: 3)) {
+        #expect(throws: MessageStoreError.schemaFromFuture(version: 4)) {
             _ = try MessageStore(url: scratch.databaseURL)
         }
 
         let after = scratch.inspect { (scalar($0, "PRAGMA user_version;"),
                                        scalar($0, "PRAGMA journal_mode;"), tables($0)) }
-        #expect(after.0 == "3", "must never stamp downward")
+        #expect(after.0 == "4", "must never stamp downward")
         #expect(after.2 == before.2, "no table may be created")
-        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[2]!
+        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[3]!
             .subtracting(MessageStore.requiredTables[1]!)))
         // journal_mode is persistent state: refusing after switching it would
         // make "we did not touch the file" untrue.
@@ -708,7 +783,7 @@ struct SchemaEnumerationTests {
         // journal mode. Proved indirectly by the future-version path, which
         // exits before any of those -- see
         // ArchiveMigrationTests.aFutureVersionIsRefusedAndTheFileIsLeftUntouched.
-        #expect(MessageStore.schemaVersion == 2)
+        #expect(MessageStore.schemaVersion == 3)
     }
 }
 
@@ -812,7 +887,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func consentOnWithAFutureDatabaseReportsUnavailableNotConsent() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 3)
+        try scratch.seed(v1Schema, userVersion: 4)
         let before = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
         }
@@ -832,17 +907,17 @@ struct LocalHistoryLifecycleTests {
                 transcript: try transcript(), conversationKey: key
             )
         }
-        #expect(await history.lastOpenFailure == .schemaFromFuture(version: 3))
+        #expect(await history.lastOpenFailure == .schemaFromFuture(version: 4))
 
         // Fail closed: the existing file is untouched.
         let after = scratch.inspect {
             (scalar($0, "PRAGMA user_version;"), scalar($0, "PRAGMA journal_mode;"), tables($0))
         }
-        #expect(after.0 == "3")
+        #expect(after.0 == "4")
         #expect(after.0 == before.0)
         #expect(after.1 == before.1, "journal mode must not change")
         #expect(after.2 == before.2, "no table may be created")
-        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[2]!
+        #expect(after.2.isDisjoint(with: MessageStore.requiredTables[3]!
             .subtracting(MessageStore.requiredTables[1]!)))
     }
 
@@ -880,7 +955,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func deleteAllHistoryRecoversFromAnUnavailableStore() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 3)
+        try scratch.seed(v1Schema, userVersion: 4)
         let history = LocalMessageHistory(url: scratch.databaseURL)
         await history.setEnabled(true)
         #expect(await history.storeState == .unavailable)
@@ -891,7 +966,7 @@ struct LocalHistoryLifecycleTests {
         #expect(await history.isConsentEnabled)
         #expect(await history.storeState == .ready)
         #expect(await history.lastOpenFailure == nil)
-        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "2")
+        #expect(scratch.inspect { scalar($0, "PRAGMA user_version;") } == "3")
 
         let result = try await history.persistArchiveEvidence(
             transcript: try transcript(), conversationKey: key
@@ -902,7 +977,7 @@ struct LocalHistoryLifecycleTests {
     @Test
     func turningConsentOffFromUnavailableClearsTheFailure() async throws {
         let scratch = try Scratch()
-        try scratch.seed(v1Schema, userVersion: 3)
+        try scratch.seed(v1Schema, userVersion: 4)
         let history = LocalMessageHistory(url: scratch.databaseURL)
         await history.setEnabled(true)
         #expect(await history.storeState == .unavailable)
@@ -1010,5 +1085,156 @@ struct ArchiveEvidenceQueryTests {
 
         #expect(try await store.searchArchiveEvidence("   ").isEmpty)
         #expect(try await store.searchArchiveEvidence("%", limit: 1).count == 1)
+    }
+}
+
+
+struct ArchiveConversationLinkTests {
+    @Test
+    func operatorLinkIsExplicitVisibleAndIdempotent() async throws {
+        let store = try MessageStore(url: nil)
+        let visualID = try await store.conversationID(
+            forTitle: "Captured chat",
+            seenAt: Date(timeIntervalSince1970: 100)
+        )
+        let result = try await store.persistArchiveEvidence(
+            transcript: try attributed([("A", m35, "hello")]),
+            conversationKey: ArchiveConversationKey("archive"),
+            importedAt: Date(timeIntervalSince1970: 200)
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected inserted import")
+            return
+        }
+
+        let assertedAt = Date(timeIntervalSince1970: 300)
+        let first = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: visualID,
+            basis: .operator,
+            assertedAt: assertedAt
+        )
+        let second = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: visualID,
+            basis: .operator,
+            assertedAt: Date(timeIntervalSince1970: 999)
+        )
+        #expect(first == second)
+        #expect(first.visualConversationTitle == "Captured chat")
+        #expect(first.basis == .operator)
+        #expect(first.assertedAt == assertedAt)
+
+        let summary = try #require(await store.archiveImportSummaries().first)
+        #expect(summary.link == first)
+    }
+
+    @Test
+    func oneArchiveCannotBeSilentlyMovedToAnotherConversation() async throws {
+        let store = try MessageStore(url: nil)
+        let firstVisual = try await store.conversationID(forTitle: "One", seenAt: Date())
+        let secondVisual = try await store.conversationID(forTitle: "Two", seenAt: Date())
+        let result = try await store.persistArchiveEvidence(
+            transcript: try attributed([("A", m35, "hello")]),
+            conversationKey: ArchiveConversationKey("archive"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected inserted import")
+            return
+        }
+        _ = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: firstVisual,
+            basis: .operator
+        )
+
+        await #expect(throws: ArchiveConversationLinkError.conflict(
+            existingVisualConversationID: firstVisual
+        )) {
+            _ = try await store.linkArchiveImport(
+                importID: importID,
+                toVisualConversationID: secondVisual,
+                basis: .operator
+            )
+        }
+        #expect(
+            try await store.archiveImportSummaries().first?.link?.visualConversationID
+                == firstVisual
+        )
+    }
+
+    @Test
+    func unlinkRemovesOnlyTheAssertion() async throws {
+        let store = try MessageStore(url: nil)
+        let visualID = try await store.conversationID(forTitle: "Captured chat", seenAt: Date())
+        let result = try await store.persistArchiveEvidence(
+            transcript: try attributed([("A", m35, "hello")]),
+            conversationKey: ArchiveConversationKey("archive"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected inserted import")
+            return
+        }
+        _ = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: visualID,
+            basis: .operator
+        )
+
+        try await store.unlinkArchiveImport(importID: importID)
+
+        #expect(try await store.archiveImportCount() == 1)
+        #expect(try await store.archiveRecordCount(shape: "attributed") == 1)
+        #expect(try await store.conversations().contains(where: { $0.id == visualID }))
+        #expect(try await store.archiveImportSummaries().first?.link == nil)
+    }
+    @Test
+    func databaseConstraintRejectsInventedLinkBasis() async throws {
+        let store = try MessageStore(url: nil)
+        _ = try await store.conversationID(forTitle: "Captured chat", seenAt: Date())
+        _ = try await store.persistArchiveEvidence(
+            transcript: try attributed([("A", m35, "hello")]),
+            conversationKey: ArchiveConversationKey("archive"),
+            importedAt: Date()
+        )
+
+        await #expect(throws: MessageStoreError.self) {
+            try await store.executeForTesting(
+                """
+                INSERT INTO archive_conversation_links(
+                    archive_conversation_id, visual_conversation_id, basis, asserted_at
+                ) VALUES(1, 1, 'text_similarity', 1);
+                """
+            )
+        }
+    }
+
+    @Test
+    func deletingHistoryAlsoRemovesExplicitLinks() async throws {
+        let store = try MessageStore(url: nil)
+        let visualID = try await store.conversationID(forTitle: "Captured chat", seenAt: Date())
+        let result = try await store.persistArchiveEvidence(
+            transcript: try attributed([("A", m35, "hello")]),
+            conversationKey: ArchiveConversationKey("archive"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected inserted import")
+            return
+        }
+        _ = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: visualID,
+            basis: .operator
+        )
+
+        try await store.deleteAllHistory()
+
+        #expect(try await store.archiveImportCount() == 0)
+        #expect(try await store.archiveConversationCount() == 0)
+        #expect(try await store.conversations().isEmpty)
+        #expect(try await store.linkCountForTesting() == 0)
     }
 }

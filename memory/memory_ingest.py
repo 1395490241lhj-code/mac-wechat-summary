@@ -57,6 +57,7 @@ from memory_store import (
     new_run_id,
 )
 try:
+    from archive_message_source import SOURCE_ARCHIVE
     from message_source import (
         SOURCE_DATABASE,
         SOURCE_VISUAL,
@@ -79,6 +80,7 @@ except ImportError:  # pragma: no cover - imported from another cwd
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bridge"
         ),
     )
+    from archive_message_source import SOURCE_ARCHIVE
     from message_source import (
         SOURCE_DATABASE,
         SOURCE_VISUAL,
@@ -100,6 +102,8 @@ DEFAULT_IDENTITY_MODES: dict[str, str] = {
     SOURCE_VISUAL: IDENTITY_SOURCE,
     # WeChat's own local message id, surfaced by the reader.
     SOURCE_DATABASE: IDENTITY_SOURCE,
+    # Archive import + sequence is a stable source identifier inside the app store.
+    SOURCE_ARCHIVE: IDENTITY_SOURCE,
 }
 
 #: What ``NormalizedMessage.first_observed_at`` means, per source. The field is
@@ -108,6 +112,8 @@ DEFAULT_IDENTITY_MODES: dict[str, str] = {
 DEFAULT_TIMESTAMP_KINDS: dict[str, str] = {
     SOURCE_VISUAL: TIME_FIRST_OBSERVED,
     SOURCE_DATABASE: TIME_SOURCE_CREATED,
+    # B4 promotes only attributed archive rows, which carry WeChat's sent_at.
+    SOURCE_ARCHIVE: TIME_SOURCE_CREATED,
 }
 
 #: A recent-message sweep of an external reader visits a bounded number of

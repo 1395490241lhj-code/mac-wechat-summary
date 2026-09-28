@@ -163,6 +163,7 @@ struct ArchiveEvidenceImportSummary: Identifiable, Sendable, Equatable {
     let firstSentAt: Date?
     let lastSentAt: Date?
     let isAnonymous: Bool
+    let link: ArchiveConversationLink?
 }
 
 
@@ -194,4 +195,25 @@ struct ArchiveEvidenceSnapshot: Sendable, Equatable {
     static func unavailable(_ state: LocalHistoryStoreState) -> ArchiveEvidenceSnapshot {
         ArchiveEvidenceSnapshot(storeState: state, imports: [])
     }
+}
+
+
+enum ArchiveConversationLinkBasis: String, Sendable, Equatable {
+    case `operator`
+    case sourceProvided = "source_provided"
+}
+
+struct ArchiveConversationLink: Sendable, Equatable {
+    let archiveConversationID: Int64
+    let visualConversationID: Int64
+    let visualConversationTitle: String
+    let basis: ArchiveConversationLinkBasis
+    let assertedAt: Date
+}
+
+
+enum ArchiveConversationLinkError: Error, Equatable, Sendable {
+    case importUnknown
+    case visualConversationUnknown
+    case conflict(existingVisualConversationID: Int64)
 }

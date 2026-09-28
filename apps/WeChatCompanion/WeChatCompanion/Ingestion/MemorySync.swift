@@ -22,11 +22,15 @@ import Foundation
 /// operator side and is never chosen silently.
 enum MemorySource: String, Equatable, Sendable {
     case visual
+    case archive
     case database
+
+    static let appSelectable: [MemorySource] = [.visual, .archive]
 
     var label: String {
         switch self {
         case .visual: return "Visual capture store"
+        case .archive: return "Imported WeChat archives"
         case .database: return "External database reader"
         }
     }

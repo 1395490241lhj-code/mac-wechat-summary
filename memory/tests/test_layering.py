@@ -89,6 +89,7 @@ ALLOWED_IMPORTS = {
     "unicodedata", "urllib",
     # The MCP SDK, used by the read-only memory server only (M2.1).
     "mcp",
+    "archive_message_source",
     "memory_consent", "memory_freshness", "memory_identity", "memory_ingest", "memory_paths",
     "memory_query", "memory_retrieval", "memory_store", "memory_sync", "memory_worker",
     "message_source",

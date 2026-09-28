@@ -51,8 +51,10 @@ actor MessageStore {
     /// refuse to read anything they do not recognise, rather than inferring the
     /// shape from the tables they happen to find. Bump it whenever a column is
     /// added, removed, renamed, or changes meaning.
-    /// v1 — visual capture only. v2 — plus the four archive evidence tables.
-    static let schemaVersion: Int32 = 2
+    /// v1 — visual capture only.
+    /// v2 — plus the four archive evidence tables.
+    /// v3 — plus the explicit Archive ↔ Visual conversation link relation.
+    static let schemaVersion: Int32 = 3
 
     /// Tables each published version promises. The bridge checks the same
     /// contract from the read side.
@@ -63,10 +65,20 @@ actor MessageStore {
             "archive_conversations", "archive_imports",
             "archive_attributed_records", "archive_unattributed_records",
         ],
+        3: [
+            "conversations", "messages",
+            "archive_conversations", "archive_imports",
+            "archive_attributed_records", "archive_unattributed_records",
+            "archive_conversation_links",
+        ],
     ]
 
-    private static var archiveTables: Set<String> {
-        requiredTables[2]!.subtracting(requiredTables[1]!)
+    private static var postV1Tables: Set<String> {
+        requiredTables[3]!.subtracting(requiredTables[1]!)
+    }
+
+    private static var v3Tables: Set<String> {
+        requiredTables[3]!.subtracting(requiredTables[2]!)
     }
 
     private let database: DatabaseHandle
@@ -130,25 +142,38 @@ actor MessageStore {
                 throw MessageStoreError.unversionedExistingSchema
             }
             try transaction(handle) {
-                for statement in schemaV1 + schemaV2Archive { try exec(handle, statement) }
-                try exec(handle, "PRAGMA user_version = 2;")
+                for statement in schemaV1 + schemaV2Archive + schemaV3Links {
+                    try exec(handle, statement)
+                }
+                try require(tablesFor: 3, in: handle, version: 0)
+                try exec(handle, "PRAGMA user_version = 3;")
             }
         case 1:
             try require(tablesFor: 1, in: handle, version: 1)
-            // These names never existed in shipped v1. If one is already here,
-            // something else wrote it; CREATE TABLE IF NOT EXISTS would adopt
-            // whatever shape it has and call the result version 2.
-            guard try applicationTables(handle).isDisjoint(with: archiveTables) else {
+            // No post-v1 table name may already exist: adopting one with
+            // CREATE TABLE IF NOT EXISTS would bless an unknown shape.
+            guard try applicationTables(handle).isDisjoint(with: postV1Tables) else {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV2Archive { try exec(handle, statement) }
-                // Stamped only after every object the version promises exists.
-                try require(tablesFor: 2, in: handle, version: 1)
-                try exec(handle, "PRAGMA user_version = 2;")
+                for statement in schemaV2Archive + schemaV3Links {
+                    try exec(handle, statement)
+                }
+                try require(tablesFor: 3, in: handle, version: 1)
+                try exec(handle, "PRAGMA user_version = 3;")
             }
         case 2:
             try require(tablesFor: 2, in: handle, version: 2)
+            guard try applicationTables(handle).isDisjoint(with: v3Tables) else {
+                throw MessageStoreError.reservedTableAlreadyPresent
+            }
+            try transaction(handle) {
+                for statement in schemaV3Links { try exec(handle, statement) }
+                try require(tablesFor: 3, in: handle, version: 2)
+                try exec(handle, "PRAGMA user_version = 3;")
+            }
+        case 3:
+            try require(tablesFor: 3, in: handle, version: 3)
         case let future where future > schemaVersion:
             throw MessageStoreError.schemaFromFuture(version: future)
         default:
@@ -345,6 +370,26 @@ actor MessageStore {
         """,
     ]
 
+    /// B4 linkage is a separate relation, never a column on either observation.
+    /// Deleting the relation removes the assertion without rewriting Archive
+    /// evidence or visual capture history.
+    private static let schemaV3Links: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS archive_conversation_links (
+            archive_conversation_id INTEGER PRIMARY KEY
+                REFERENCES archive_conversations(id) ON DELETE CASCADE,
+            visual_conversation_id INTEGER NOT NULL
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            basis TEXT NOT NULL CHECK (basis IN ('operator', 'source_provided')),
+            asserted_at REAL NOT NULL
+        );
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS archive_links_by_visual_conversation
+            ON archive_conversation_links(visual_conversation_id);
+        """,
+    ]
+
     /// The schema version recorded in the database file itself.
     func storedSchemaVersion() throws -> Int32 {
         try query("PRAGMA user_version;") { Int32(sqlite3_column_int64($0, 0)) }.first ?? 0
@@ -466,13 +511,34 @@ actor MessageStore {
                    END,
                    (SELECT MIN(sent_at) FROM archive_attributed_records a WHERE a.import_id = i.id),
                    (SELECT MAX(sent_at) FROM archive_attributed_records a WHERE a.import_id = i.id),
-                   c.source_conversation_key
+                   c.source_conversation_key,
+                   c.id,
+                   l.visual_conversation_id,
+                   v.title,
+                   l.basis,
+                   l.asserted_at
             FROM archive_imports i
             JOIN archive_conversations c ON c.id = i.archive_conversation_id
+            LEFT JOIN archive_conversation_links l ON l.archive_conversation_id = c.id
+            LEFT JOIN conversations v ON v.id = l.visual_conversation_id
             ORDER BY i.imported_at DESC, i.id DESC;
             """
         ) { statement in
             let key = Self.string(statement, 6) ?? ""
+            let link: ArchiveConversationLink?
+            if sqlite3_column_type(statement, 8) == SQLITE_NULL {
+                link = nil
+            } else {
+                link = ArchiveConversationLink(
+                    archiveConversationID: sqlite3_column_int64(statement, 7),
+                    visualConversationID: sqlite3_column_int64(statement, 8),
+                    visualConversationTitle: Self.string(statement, 9) ?? "",
+                    basis: ArchiveConversationLinkBasis(
+                        rawValue: Self.string(statement, 10) ?? ""
+                    ) ?? .operator,
+                    assertedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 11))
+                )
+            }
             return ArchiveEvidenceImportSummary(
                 id: sqlite3_column_int64(statement, 0),
                 shape: ArchiveEvidenceShape(rawValue: Self.string(statement, 1) ?? "") ?? .unattributed,
@@ -480,9 +546,99 @@ actor MessageStore {
                 recordCount: Int(sqlite3_column_int64(statement, 3)),
                 firstSentAt: Self.optionalDate(statement, 4),
                 lastSentAt: Self.optionalDate(statement, 5),
-                isAnonymous: key.hasPrefix("native-anonymous-v1:")
+                isAnonymous: key.hasPrefix("native-anonymous-v1:"),
+                link: link
             )
         }
+    }
+
+    @discardableResult
+    func linkArchiveImport(
+        importID: Int64,
+        toVisualConversationID visualConversationID: Int64,
+        basis: ArchiveConversationLinkBasis,
+        assertedAt: Date = Date()
+    ) throws -> ArchiveConversationLink {
+        guard let archiveConversationID = try query(
+            "SELECT archive_conversation_id FROM archive_imports WHERE id = ?;",
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { sqlite3_column_int64($0, 0) }
+        ).first else {
+            throw ArchiveConversationLinkError.importUnknown
+        }
+
+        guard let visualTitle = try query(
+            "SELECT title FROM conversations WHERE id = ?;",
+            bind: { sqlite3_bind_int64($0, 1, visualConversationID) },
+            row: { Self.string($0, 0) ?? "" }
+        ).first else {
+            throw ArchiveConversationLinkError.visualConversationUnknown
+        }
+
+        if let existing = try query(
+            """
+            SELECT visual_conversation_id, basis, asserted_at
+            FROM archive_conversation_links
+            WHERE archive_conversation_id = ?;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, archiveConversationID) },
+            row: {
+                (
+                    sqlite3_column_int64($0, 0),
+                    ArchiveConversationLinkBasis(
+                        rawValue: Self.string($0, 1) ?? ""
+                    ) ?? .operator,
+                    Date(timeIntervalSince1970: sqlite3_column_double($0, 2))
+                )
+            }
+        ).first {
+            guard existing.0 == visualConversationID else {
+                throw ArchiveConversationLinkError.conflict(
+                    existingVisualConversationID: existing.0
+                )
+            }
+            return ArchiveConversationLink(
+                archiveConversationID: archiveConversationID,
+                visualConversationID: existing.0,
+                visualConversationTitle: visualTitle,
+                basis: existing.1,
+                assertedAt: existing.2
+            )
+        }
+
+        try run(
+            """
+            INSERT INTO archive_conversation_links(
+                archive_conversation_id, visual_conversation_id, basis, asserted_at
+            ) VALUES (?, ?, ?, ?);
+            """
+        ) { statement in
+            sqlite3_bind_int64(statement, 1, archiveConversationID)
+            sqlite3_bind_int64(statement, 2, visualConversationID)
+            Self.bind(statement, 3, basis.rawValue)
+            sqlite3_bind_double(statement, 4, assertedAt.timeIntervalSince1970)
+        }
+
+        return ArchiveConversationLink(
+            archiveConversationID: archiveConversationID,
+            visualConversationID: visualConversationID,
+            visualConversationTitle: visualTitle,
+            basis: basis,
+            assertedAt: assertedAt
+        )
+    }
+
+    func unlinkArchiveImport(importID: Int64) throws {
+        guard let archiveConversationID = try query(
+            "SELECT archive_conversation_id FROM archive_imports WHERE id = ?;",
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { sqlite3_column_int64($0, 0) }
+        ).first else {
+            throw ArchiveConversationLinkError.importUnknown
+        }
+        try run(
+            "DELETE FROM archive_conversation_links WHERE archive_conversation_id = ?;"
+        ) { sqlite3_bind_int64($0, 1, archiveConversationID) }
     }
 
     /// Ordered rows for one import. The result is bounded so a large export
@@ -985,6 +1141,12 @@ actor MessageStore {
         try query("SELECT source_conversation_key FROM archive_conversations ORDER BY id;") {
             Self.string($0, 0) ?? ""
         }
+    }
+
+    func linkCountForTesting() throws -> Int {
+        try query("SELECT COUNT(*) FROM archive_conversation_links;") {
+            Int(sqlite3_column_int64($0, 0))
+        }.first ?? 0
     }
 
     // MARK: - SQLite plumbing

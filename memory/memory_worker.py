@@ -59,6 +59,7 @@ try:
         prepare_store_directory,
         relative_store_path,
     )
+    from archive_message_source import ArchiveMessageSource, SOURCE_ARCHIVE
     from memory_store import MemoryStore, MemoryStoreError
     from memory_sync import build_selected_source, sync_from_source
     from message_source import (
@@ -83,6 +84,7 @@ except ImportError:  # pragma: no cover - source checkout, run by path
         prepare_store_directory,
         relative_store_path,
     )
+    from archive_message_source import ArchiveMessageSource, SOURCE_ARCHIVE
     from memory_store import MemoryStore, MemoryStoreError
     from memory_sync import build_selected_source, sync_from_source
     from message_source import (
@@ -104,6 +106,7 @@ ALLOW_READ_ENV: str = "WECHAT_COMPANION_ALLOW_AGENT_READ"
 DB_PATH_ENV: str = "WECHAT_COMPANION_DB_PATH"
 
 OPERATIONS: frozenset[str] = frozenset({"sync", "status", "paths"})
+MEMORY_SOURCE_NAMES: frozenset[str] = SOURCE_NAMES | frozenset({SOURCE_ARCHIVE})
 
 #: Largest request accepted. A request is a handful of fields; anything larger
 #: is a mistake or an attempt to make this process do something else.
@@ -162,8 +165,14 @@ def _apply_source_activation(request: dict[str, Any]) -> str:
     import os
 
     selection = request.get("message_source")
-    if selection is not None and (not isinstance(selection, str) or selection not in SOURCE_NAMES):
-        raise BadRequest("message_source must be one of: " + ", ".join(sorted(SOURCE_NAMES)) + ".")
+    if selection is not None and (
+        not isinstance(selection, str) or selection not in MEMORY_SOURCE_NAMES
+    ):
+        raise BadRequest(
+            "message_source must be one of: "
+            + ", ".join(sorted(MEMORY_SOURCE_NAMES))
+            + "."
+        )
     store = request.get("message_store_path")
     if store is not None and (not isinstance(store, str) or not store.strip()):
         raise BadRequest("message_store_path must be a non-empty string when present.")
@@ -226,7 +235,11 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
     message_limit = _limit(request, "message_limit", 200, MAX_MESSAGE_LIMIT)
     selected = _apply_source_activation(request)
     try:
-        source = build_selected_source()
+        source = (
+            ArchiveMessageSource(request.get("message_store_path") or str(canonical_message_store_path()))
+            if selected == SOURCE_ARCHIVE
+            else build_selected_source()
+        )
     except MessageSourceError as error:
         # The selected source cannot be built. Never substitute another one.
         return _refusal(op, f"{selected}:{error.state}", error.detail), EXIT_REFUSED

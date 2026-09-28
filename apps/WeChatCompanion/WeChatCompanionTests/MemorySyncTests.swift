@@ -8,7 +8,7 @@ private final class FakeMemorySyncRunner: MemorySyncRunning, @unchecked Sendable
     var outcomes: [MemorySyncOutcome]
     var freshnessToReport: MemoryFreshnessSummary?
     private(set) var syncCalls: [MemorySource] = []
-    private(set) var freshnessCalls = 0
+    private(set) var freshnessCalls: [MemorySource] = []
 
     init(outcomes: [MemorySyncOutcome], freshness: MemoryFreshnessSummary? = nil) {
         self.outcomes = outcomes
@@ -21,7 +21,7 @@ private final class FakeMemorySyncRunner: MemorySyncRunning, @unchecked Sendable
     }
 
     func freshness(source: MemorySource) async -> MemoryFreshnessSummary? {
-        freshnessCalls += 1
+        freshnessCalls.append(source)
         return freshnessToReport
     }
 }
@@ -35,9 +35,14 @@ private func makeDefaults() -> UserDefaults {
 
 private let counts = MemorySyncCounts(conversationsSeen: 2, messagesSeen: 13, messagesInserted: 3, messagesUpdated: 10)
 
-private func freshness(state: String = "succeeded", failure: String? = nil, coverage: String = "complete") -> MemoryFreshnessSummary {
+private func freshness(
+    source: MemorySource = .visual,
+    state: String = "succeeded",
+    failure: String? = nil,
+    coverage: String = "complete"
+) -> MemoryFreshnessSummary {
     MemoryFreshnessSummary(
-        source: .visual,
+        source: source,
         lastSuccessfulSync: Date(timeIntervalSince1970: 1_700_000_000),
         observedThrough: Date(timeIntervalSince1970: 1_699_999_880),   // 09:58
         completeThrough: Date(timeIntervalSince1970: 1_699_999_880),
@@ -67,6 +72,32 @@ struct MemorySyncTests {
     }
 
     @Test @MainActor
+    func archiveIsAppSelectableButDatabaseIsNot() async {
+        let runner = FakeMemorySyncRunner(
+            outcomes: [.succeeded(counts, freshness(source: .archive))],
+            freshness: freshness(source: .archive)
+        )
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: runner
+        )
+        await model.setAllowsLocalPersistence(true)
+
+        await model.setMemorySource(.archive)
+        #expect(model.memorySource == .archive)
+        #expect(runner.freshnessCalls.last == .archive)
+
+        await model.syncMemoryNow()
+        #expect(runner.syncCalls == [.archive])
+        #expect(model.memoryFreshness?.source == .archive)
+
+        await model.setMemorySource(.database)
+        #expect(model.memorySource == .archive)
+        #expect(MemorySource.appSelectable == [.visual, .archive])
+    }
+
+    @Test @MainActor
     func aConsentedSyncRunsInTheForegroundAndRefreshesFreshness() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, freshness())])
         let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
@@ -88,7 +119,7 @@ struct MemorySyncTests {
         let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(), memorySync: runner)
         await model.setAllowsLocalPersistence(true)
         await model.syncMemoryNow()
-        #expect(runner.freshnessCalls == 1)
+        #expect(runner.freshnessCalls == [.visual])
         #expect(model.memoryFreshness == freshness())
     }
 
@@ -156,7 +187,7 @@ struct MemorySyncTests {
         #expect(model.memorySyncPhase == .failed(.consentWithheld))
         #expect(runner.syncCalls.count == 1)
         await model.refreshMemoryFreshness()
-        #expect(runner.freshnessCalls == 0)
+        #expect(runner.freshnessCalls.isEmpty)
     }
 
     @Test @MainActor

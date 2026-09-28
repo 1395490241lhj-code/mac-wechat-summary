@@ -76,13 +76,24 @@ def test_the_embed_step_fails_release_without_a_worker():
 
 
 def test_no_entitlement_weakens_library_validation():
-    """The escape hatch that would have made onefile work is not taken."""
-    for path in (BUILD_SCRIPT, EMBED_SCRIPT,
-                 ROOT / "apps/WeChatCompanion/WeChatCompanion.xcodeproj/project.pbxproj"):
-        source = code_of(path)
-        assert "disable-library-validation" not in source
-        assert "CODE_SIGN_ENTITLEMENTS" not in source
-    assert not list((ROOT / "apps/WeChatCompanion").rglob("*.entitlements"))
+    """The MemoryWorker never takes the library-validation escape hatch."""
+    for path in (
+        BUILD_SCRIPT,
+        EMBED_SCRIPT,
+        ROOT / "apps/WeChatCompanion/WeChatCompanion.xcodeproj/project.pbxproj",
+    ):
+        assert "disable-library-validation" not in code_of(path)
+
+    build = build_script()
+    embed = code_of(EMBED_SCRIPT)
+    assert "--entitlements" not in build
+    assert "--entitlements" not in embed
+
+    # Share Extension App Group entitlements are legitimate and unrelated to
+    # the nested worker. The worker itself must not acquire an entitlement file.
+    assert not list(
+        (ROOT / ".build/memory-worker").rglob("*.entitlements")
+    )
 
 
 @pytest.mark.skipif(not BUILT.exists(), reason="worker not built; run scripts/build-memory-worker.sh")

@@ -992,6 +992,8 @@ private struct ArchiveEvidenceBrowser: View {
                     .foregroundStyle(.secondary)
             }
 
+            ArchiveLinkControls(model: model, summary: selected)
+
             if model.selectedArchiveRecords.isEmpty {
                 Text("This import contains no readable records.")
                     .foregroundStyle(.secondary)
@@ -1032,7 +1034,9 @@ private struct ArchiveEvidenceBrowser: View {
             "\(summary.recordCount) records",
             summary.shape.label,
         ]
-        if summary.isAnonymous { parts.append("Unlinked export") }
+        if summary.isAnonymous {
+            parts.append(summary.link == nil ? "Unlinked export" : "Explicitly linked")
+        }
         if let first = summary.firstSentAt, let last = summary.lastSentAt {
             parts.append(
                 first.formatted(date: .abbreviated, time: .shortened)
@@ -1041,6 +1045,66 @@ private struct ArchiveEvidenceBrowser: View {
             )
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct ArchiveLinkControls: View {
+    @Bindable var model: AppModel
+    let summary: ArchiveEvidenceImportSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let link = summary.link {
+                HStack {
+                    Label("Linked to \(link.visualConversationTitle)", systemImage: "link")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    Button("Unlink") {
+                        Task { await model.unlinkArchiveImport(summary.id) }
+                    }
+                    .disabled(model.archiveLinkStatus == .linking)
+                }
+            } else if model.captureLedger.conversations.isEmpty {
+                Text("Not linked to a visually captured conversation.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Text("Not linked to a visually captured conversation.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Menu("Link…") {
+                        ForEach(model.captureLedger.conversations) { conversation in
+                            Button(conversation.title) {
+                                Task {
+                                    await model.linkArchiveImport(
+                                        summary.id,
+                                        toVisualConversationID: conversation.id
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    .disabled(model.archiveLinkStatus == .linking)
+                }
+            }
+
+            Text("Links are explicit assertions. WeChat Companion never links chats from matching text or timing alone.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let message = model.archiveLinkStatus.message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(
+                        model.archiveLinkStatus == .conflict
+                            || model.archiveLinkStatus == .unavailable
+                            ? Color.red : Color.secondary
+                    )
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -1058,7 +1122,9 @@ private struct ArchiveImportRow: View {
                     Text(summary.importedAt.formatted(date: .abbreviated, time: .shortened))
                         .fontWeight(.medium)
                     Text("\(summary.recordCount) records · \(summary.shape.label)"
-                        + (summary.isAnonymous ? " · Unlinked export" : ""))
+                        + (summary.isAnonymous
+                            ? (summary.link == nil ? " · Unlinked export" : " · Explicitly linked")
+                            : ""))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1477,7 +1543,33 @@ private struct MemorySection: View {
     var body: some View {
         GroupBox("Memory") {
             VStack(alignment: .leading, spacing: 0) {
-                MemoryRow(label: "Source", value: model.memorySource.label)
+                HStack {
+                    Text("Source")
+                    Spacer()
+                    Menu(model.memorySource.label) {
+                        ForEach(MemorySource.appSelectable, id: \.rawValue) { source in
+                            Button {
+                                Task { await model.setMemorySource(source) }
+                            } label: {
+                                if source == model.memorySource {
+                                    Label(source.label, systemImage: "checkmark")
+                                } else {
+                                    Text(source.label)
+                                }
+                            }
+                        }
+                    }
+                    .disabled(model.memorySyncPhase.isRunning)
+                }
+                .padding(.vertical, 8)
+
+                if model.memorySource == .archive {
+                    Text("Only attributed archive messages are promoted into Memory. "
+                        + "Unattributed exports remain archive-only until they have trustworthy time/attribution semantics.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 8)
+                }
                 Divider()
                 if model.isMemoryAvailable {
                     MemoryRow(label: "Last successful sync", value: stamp(model.memoryFreshness?.lastSuccessfulSync))

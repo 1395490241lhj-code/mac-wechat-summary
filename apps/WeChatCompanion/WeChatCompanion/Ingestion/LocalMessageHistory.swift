@@ -90,6 +90,29 @@ actor LocalMessageHistory {
         return (try? await store.searchArchiveEvidence(query, limit: limit)) ?? []
     }
 
+    func linkArchiveImport(
+        importID: Int64,
+        toVisualConversationID visualConversationID: Int64,
+        assertedAt: Date = Date()
+    ) async throws {
+        guard storeState == .ready, let store else {
+            throw ArchivePersistenceError.localStoreUnavailable
+        }
+        _ = try await store.linkArchiveImport(
+            importID: importID,
+            toVisualConversationID: visualConversationID,
+            basis: .operator,
+            assertedAt: assertedAt
+        )
+    }
+
+    func unlinkArchiveImport(importID: Int64) async throws {
+        guard storeState == .ready, let store else {
+            throw ArchivePersistenceError.localStoreUnavailable
+        }
+        try await store.unlinkArchiveImport(importID: importID)
+    }
+
     /// Why the last open attempt failed, kept for diagnostics. Cleared on a
     /// successful open and when consent is turned off, so it never lingers as
     /// a stale explanation for a state that has since changed.

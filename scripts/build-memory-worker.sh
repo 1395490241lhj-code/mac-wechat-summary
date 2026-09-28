@@ -69,6 +69,7 @@ rm -rf "$BUILD/dist" "$BUILD/work"
   --paths "$ROOT/memory" --paths "$ROOT/bridge" \
   --hidden-import store_access \
   --hidden-import message_source \
+  --hidden-import archive_message_source \
   --hidden-import rion_reader_adapter \
   --hidden-import memory_paths \
   --hidden-import memory_sync \

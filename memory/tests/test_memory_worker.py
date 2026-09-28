@@ -22,6 +22,7 @@ import pytest
 import memory_consent as consent
 import memory_paths as paths
 import memory_worker as worker
+from archive_message_source import SOURCE_ARCHIVE
 from conftest import app_state, conversation, visual_message
 from message_source import (
     COVERAGE_COMPLETE,
@@ -378,6 +379,90 @@ def test_the_frozen_worker_is_self_contained_and_syncs_end_to_end(tmp_path):
     status, _ = invoke([str(FROZEN)], {"op": "status", "store_path": str(store)}, env)
     assert status["freshness"]["sources"][SOURCE_VISUAL]["stored_messages"] == 1
     assert str(tmp_path) not in json.dumps(status)
+
+
+@pytest.mark.skipif(not FROZEN.exists(),
+                    reason="frozen worker not built; run scripts/build-memory-worker.sh")
+def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
+    """The frozen artifact contains the archive source adapter and keeps Shape B out."""
+    import sqlite3
+
+    env = isolated_home(tmp_path)
+    store = paths.canonical_store_path(tmp_path)
+    messages = paths.canonical_message_store_path(tmp_path)
+    messages.parent.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(messages)
+    connection.executescript(
+        """
+        PRAGMA user_version = 3;
+        CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY, title TEXT, first_seen_at REAL, last_seen_at REAL
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY, conversation_id INTEGER, sequence INTEGER,
+            sender TEXT, ownership TEXT, visible_time TEXT, text TEXT,
+            kind TEXT, confidence REAL, first_observed_at REAL
+        );
+        CREATE TABLE archive_conversations (
+            id INTEGER PRIMARY KEY, source_conversation_key TEXT NOT NULL
+        );
+        CREATE TABLE archive_imports (
+            id INTEGER PRIMARY KEY, archive_conversation_id INTEGER NOT NULL,
+            transcript_shape TEXT NOT NULL, imported_at REAL NOT NULL
+        );
+        CREATE TABLE archive_attributed_records (
+            import_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
+            sender TEXT NOT NULL, sent_at REAL NOT NULL,
+            sent_at_text TEXT NOT NULL, text TEXT NOT NULL
+        );
+        CREATE TABLE archive_unattributed_records (
+            import_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
+            record_text TEXT NOT NULL
+        );
+        CREATE TABLE archive_conversation_links (
+            archive_conversation_id INTEGER PRIMARY KEY,
+            visual_conversation_id INTEGER NOT NULL,
+            basis TEXT NOT NULL, asserted_at REAL NOT NULL
+        );
+        INSERT INTO archive_conversations VALUES (1, 'anonymous-a');
+        INSERT INTO archive_conversations VALUES (2, 'anonymous-b');
+        INSERT INTO archive_imports VALUES (1, 1, 'attributed', 1000.0);
+        INSERT INTO archive_imports VALUES (2, 2, 'unattributed', 2000.0);
+        INSERT INTO archive_attributed_records
+            VALUES (1, 0, '林晓', 100.0, '昨天 10:00', '归档消息');
+        INSERT INTO archive_unattributed_records
+            VALUES (2, 0, '不应进入 Memory');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    reply, code = invoke(
+        [str(FROZEN)],
+        {
+            "op": "sync",
+            "store_path": str(store),
+            "message_store_path": str(messages),
+            "message_source": SOURCE_ARCHIVE,
+            "conversation_limit": 10,
+            "message_limit": 10,
+        },
+        env,
+    )
+
+    assert (reply["ok"], code) == (True, 0), reply
+    assert reply["source"] == SOURCE_ARCHIVE
+    assert reply["counts"]["conversations_seen"] == 1
+    assert reply["counts"]["messages_seen"] == 1
+    assert reply["counts"]["messages_inserted"] == 1
+
+    status, status_code = invoke(
+        [str(FROZEN)], {"op": "status", "store_path": str(store)}, env
+    )
+    assert (status["ok"], status_code) == (True, 0)
+    assert status["freshness"]["sources"][SOURCE_ARCHIVE]["stored_messages"] == 1
+    assert "不应进入 Memory" not in json.dumps(status, ensure_ascii=False)
 
 
 # --- canonical activation (M2.2e) --------------------------------------------

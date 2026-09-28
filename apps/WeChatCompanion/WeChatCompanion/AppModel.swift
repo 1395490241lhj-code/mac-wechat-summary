@@ -36,6 +36,7 @@ final class AppModel {
     private(set) var selectedArchiveImportID: Int64?
     private(set) var selectedArchiveRecords: [ArchiveEvidenceRecord] = []
     private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
+    private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
 #if DEBUG
     private(set) var visualQualityGateMode = VisualQualityGateMode.normal
     var visualQualityGateIsActive: Bool { visualQualityGateMode != .normal }
@@ -219,9 +220,10 @@ final class AppModel {
     }
 
 
-    /// The only source this app can offer: the store it fills itself. A
-    /// database reader is an operator-side selection and is never substituted.
-    let memorySource: MemorySource = .visual
+    /// The app offers only sources it owns locally: visual capture and
+    /// imported archive evidence. The external database reader remains an
+    /// operator-side selection and is never substituted.
+    private(set) var memorySource: MemorySource = .visual
     private(set) var memorySyncPhase: MemorySyncPhase = .idle
     /// The last freshness the runner reported. Kept across a consent
     /// withdrawal -- withdrawing is not a delete request -- but nothing new is
@@ -231,6 +233,18 @@ final class AppModel {
     /// Memory persistence and sync exist only under the local-storage consent.
     var isMemoryAvailable: Bool { allowsLocalPersistence }
     var canSyncMemory: Bool { isMemoryAvailable && !memorySyncPhase.isRunning }
+
+    func setMemorySource(_ source: MemorySource) async {
+        guard MemorySource.appSelectable.contains(source),
+              source != memorySource,
+              !memorySyncPhase.isRunning else { return }
+        memorySource = source
+        memorySyncPhase = .idle
+        memoryFreshness = nil
+        if allowsLocalPersistence {
+            await refreshMemoryFreshness()
+        }
+    }
 
     /// Explicit, foreground, user-initiated. The consent gate is checked here
     /// first, so the runner is never reached without it; the runner is then
@@ -332,6 +346,45 @@ final class AppModel {
 
     func searchArchiveEvidence(_ query: String) async {
         archiveSearchResults = await messageHistory.searchArchiveEvidence(query)
+    }
+
+    func linkArchiveImport(_ importID: Int64, toVisualConversationID visualConversationID: Int64) async {
+        guard archiveEvidence.imports.contains(where: { $0.id == importID }),
+              captureLedger.conversations.contains(where: { $0.id == visualConversationID })
+        else {
+            archiveLinkStatus = .unavailable
+            return
+        }
+
+        archiveLinkStatus = .linking
+        do {
+            try await messageHistory.linkArchiveImport(
+                importID: importID,
+                toVisualConversationID: visualConversationID
+            )
+            archiveLinkStatus = .linked
+            await refreshArchiveEvidence()
+        } catch ArchiveConversationLinkError.conflict {
+            archiveLinkStatus = .conflict
+        } catch {
+            archiveLinkStatus = .unavailable
+        }
+    }
+
+    func unlinkArchiveImport(_ importID: Int64) async {
+        guard archiveEvidence.imports.contains(where: { $0.id == importID }) else {
+            archiveLinkStatus = .unavailable
+            return
+        }
+
+        archiveLinkStatus = .linking
+        do {
+            try await messageHistory.unlinkArchiveImport(importID: importID)
+            archiveLinkStatus = .unlinked
+            await refreshArchiveEvidence()
+        } catch {
+            archiveLinkStatus = .unavailable
+        }
     }
 
     func importWeChatArchive(from url: URL) async {
@@ -804,6 +857,32 @@ final class AppModel {
         extractionPollingTask = nil
     }
 
+}
+
+enum ArchiveLinkStatus: Equatable {
+    case idle
+    case linking
+    case linked
+    case unlinked
+    case conflict
+    case unavailable
+
+    var message: String? {
+        switch self {
+        case .idle:
+            nil
+        case .linking:
+            "Updating link…"
+        case .linked:
+            "Archive link saved."
+        case .unlinked:
+            "Archive link removed."
+        case .conflict:
+            "This archive is already linked to a different captured conversation."
+        case .unavailable:
+            "The archive link could not be updated."
+        }
+    }
 }
 
 enum ArchiveImportStatus: Equatable {

@@ -849,11 +849,11 @@ def test_no_real_wechat_location_is_touched_by_this_suite(tmp_path, monkeypatch)
                                     ) or "pytest" in str(tmp_path)
 
 
-# --- Schema v2: version-specific required tables -----------------------------
+# --- Version-specific required tables ----------------------------------------
 #
-# Widening SUPPORTED_SCHEMA_VERSIONS alone would accept a database stamped 2
-# whose archive tables do not exist -- the stamp asserting a shape the file does
-# not have, which is the failure the version gate exists to prevent.
+# Widening SUPPORTED_SCHEMA_VERSIONS alone would accept a database whose
+# version-specific tables do not exist -- the stamp asserting a shape the file
+# does not have, which is the failure the version gate exists to prevent.
 
 _V1_TABLES = """
 CREATE TABLE conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL UNIQUE,
@@ -891,6 +891,14 @@ _V2_ARCHIVE_STATEMENTS = {
 }
 
 _V2_ARCHIVE_TABLES = "".join(_V2_ARCHIVE_STATEMENTS.values())
+
+_V3_LINK_TABLE = """
+CREATE TABLE archive_conversation_links (
+  archive_conversation_id INTEGER PRIMARY KEY,
+  visual_conversation_id INTEGER NOT NULL,
+  basis TEXT NOT NULL,
+  asserted_at REAL NOT NULL);
+"""
 
 
 def _schema_db(tmp_path, *, version, extra=""):
@@ -939,6 +947,22 @@ def test_schema_v2_missing_an_archive_table_is_incomplete(tmp_path):
         assert error.value.state == "schema_incomplete", dropped
 
 
+def test_complete_schema_v3_is_accepted(tmp_path):
+    assert _verify(
+        _schema_db(
+            tmp_path,
+            version=3,
+            extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE,
+        )
+    ) == 3
+
+
+def test_schema_v3_missing_link_table_is_incomplete(tmp_path):
+    with pytest.raises(store_access.BridgeUnavailable) as error:
+        _verify(_schema_db(tmp_path, version=3, extra=_V2_ARCHIVE_TABLES))
+    assert error.value.state == "schema_incomplete"
+
+
 def test_schema_v1_tolerates_an_unrelated_additive_table(tmp_path):
     extra = "CREATE TABLE something_additive (id INTEGER PRIMARY KEY);"
     assert _verify(_schema_db(tmp_path, version=1, extra=extra)) == 1
@@ -946,7 +970,13 @@ def test_schema_v1_tolerates_an_unrelated_additive_table(tmp_path):
 
 def test_a_future_schema_version_is_unsupported(tmp_path):
     with pytest.raises(store_access.BridgeUnavailable) as error:
-        _verify(_schema_db(tmp_path, version=3, extra=_V2_ARCHIVE_TABLES))
+        _verify(
+            _schema_db(
+                tmp_path,
+                version=4,
+                extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE,
+            )
+        )
     assert error.value.state == "schema_unsupported"
 
 

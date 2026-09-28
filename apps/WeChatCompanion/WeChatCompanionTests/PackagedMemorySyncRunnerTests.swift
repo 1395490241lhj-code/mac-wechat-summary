@@ -178,6 +178,27 @@ struct PackagedMemorySyncRunnerTests {
     }
 
     @Test
+    func archiveSelectionIsSentExplicitlyToTheWorker() async throws {
+        let stub = try StubWorker(replying: successReply)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let messages = store.deletingLastPathComponent().appendingPathComponent("messages.sqlite")
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: messages
+        )
+
+        _ = await runner.sync(source: .archive)
+
+        let sent = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: stub.requestDump)
+        ) as! [String: Any]
+        #expect(sent["message_source"] as? String == "archive")
+        #expect(sent["message_store_path"] as? String == messages.path)
+    }
+
+    @Test
     func theChildEnvironmentIsBuiltFromScratch() async throws {
         let stub = try StubWorker(replying: successReply)
         defer { stub.cleanup() }
