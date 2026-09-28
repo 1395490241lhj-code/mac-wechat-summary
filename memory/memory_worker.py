@@ -13,8 +13,10 @@ One JSON object in on stdin, one JSON object out on stdout, then exit. There
 is no shell, no command string, no second request, and no way to name an
 operation that is not in :data:`OPERATIONS`::
 
-    {"op": "sync",   "store_path": "<optional>", "conversation_limit": 50, "message_limit": 200}
-    {"op": "status", "store_path": "<optional>"}
+    {"op": "sync",          "store_path": "<optional>", "conversation_limit": 50, "message_limit": 200}
+    {"op": "status",        "store_path": "<optional>"}
+    {"op": "summary_input", "store_path": "<optional>", "message_source": "visual",
+                            "start": 1700000000.0, "end": 1700086400.0, "message_limit": 200}
     {"op": "paths"}
 
     {"ok": true,  "op": "sync", "state": "synced", "counts": {...}, "freshness": {...}}
@@ -60,6 +62,7 @@ try:
         relative_store_path,
     )
     from archive_message_source import ArchiveMessageSource, SOURCE_ARCHIVE
+    from memory_query import MemoryQueryService
     from memory_store import MemoryStore, MemoryStoreError
     from memory_sync import build_selected_source, sync_from_source
     from message_source import (
@@ -85,6 +88,7 @@ except ImportError:  # pragma: no cover - source checkout, run by path
         relative_store_path,
     )
     from archive_message_source import ArchiveMessageSource, SOURCE_ARCHIVE
+    from memory_query import MemoryQueryService
     from memory_store import MemoryStore, MemoryStoreError
     from memory_sync import build_selected_source, sync_from_source
     from message_source import (
@@ -105,7 +109,7 @@ except ImportError:  # pragma: no cover - source checkout, run by path
 ALLOW_READ_ENV: str = "WECHAT_COMPANION_ALLOW_AGENT_READ"
 DB_PATH_ENV: str = "WECHAT_COMPANION_DB_PATH"
 
-OPERATIONS: frozenset[str] = frozenset({"sync", "status", "paths"})
+OPERATIONS: frozenset[str] = frozenset({"sync", "status", "paths", "summary_input"})
 MEMORY_SOURCE_NAMES: frozenset[str] = SOURCE_NAMES | frozenset({SOURCE_ARCHIVE})
 
 #: Largest request accepted. A request is a handful of fields; anything larger
@@ -114,6 +118,8 @@ MAX_REQUEST_BYTES: int = 64 * 1024
 
 MAX_CONVERSATION_LIMIT: int = 500
 MAX_MESSAGE_LIMIT: int = 2_000
+MAX_SUMMARY_MESSAGES: int = 200
+MAX_SUMMARY_TEXT_CHARS: int = 2_000
 
 EXIT_OK: int = 0
 EXIT_REFUSED: int = 1
@@ -129,6 +135,40 @@ def _limit(request: dict[str, Any], key: str, default: int, maximum: int) -> int
     if isinstance(value, bool) or not isinstance(value, int):
         raise BadRequest(f"{key} must be an integer.")
     return max(1, min(value, maximum))
+
+
+def _timestamp(request: dict[str, Any], key: str) -> float:
+    value = request.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BadRequest(f"{key} must be a finite number.")
+    value = float(value)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise BadRequest(f"{key} must be a finite number.")
+    return value
+
+
+def _summary_source(request: dict[str, Any]) -> str:
+    source = request.get("message_source", "visual")
+    if not isinstance(source, str) or source not in MEMORY_SOURCE_NAMES:
+        raise BadRequest(
+            "message_source must be one of: "
+            + ", ".join(sorted(MEMORY_SOURCE_NAMES))
+            + "."
+        )
+    return source
+
+
+
+def _summary_parameters(
+    request: dict[str, Any],
+) -> tuple[str, float, float, int]:
+    source = _summary_source(request)
+    start = _timestamp(request, "start")
+    end = _timestamp(request, "end")
+    if end <= start:
+        raise BadRequest("end must be greater than start.")
+    limit = _limit(request, "message_limit", MAX_SUMMARY_MESSAGES, MAX_SUMMARY_MESSAGES)
+    return source, start, end, limit
 
 
 def _store_path(request: dict[str, Any]) -> str:
@@ -198,6 +238,115 @@ def _refusal(op: str, state: str, detail: str) -> dict[str, Any]:
     return {"ok": False, "op": op, "state": state, "detail": detail}
 
 
+
+def _summary_input(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
+    source, start, end, limit = _summary_parameters(request)
+    service = MemoryQueryService(store)
+    result = service.recent_context(
+        since=start,
+        until=end,
+        limit=limit,
+        order="oldest",
+        source=source,
+    )
+
+    discovery = service.conversations(limit=MAX_CONVERSATION_LIMIT)
+    labels: dict[str, str | None] = {}
+    for candidate in discovery.items:
+        for observation in candidate.observations:
+            labels[observation.canonical_conversation_id] = observation.display_name
+
+    conversation_indexes: dict[str, int] = {}
+    conversation_rows: dict[int, dict[str, Any]] = {}
+    sender_counts: dict[str, int] = {}
+    messages: list[dict[str, Any]] = []
+    clipped_count = 0
+
+    for ordinal, item in enumerate(result.items):
+        conversation_id = item.citation.canonical_conversation_id
+        if conversation_id not in conversation_indexes:
+            index = len(conversation_indexes)
+            conversation_indexes[conversation_id] = index
+            label = labels.get(conversation_id)
+            if not label:
+                label = "Imported archive export" if source == SOURCE_ARCHIVE else "Captured conversation"
+            conversation_rows[index] = {
+                "index": index,
+                "label": label,
+                "message_count": 0,
+                "senders": set(),
+                "first_at": item.timestamp,
+                "last_at": item.timestamp,
+            }
+        index = conversation_indexes[conversation_id]
+        conversation = conversation_rows[index]
+        conversation["message_count"] += 1
+        conversation["first_at"] = min(conversation["first_at"], item.timestamp)
+        conversation["last_at"] = max(conversation["last_at"], item.timestamp)
+
+        sender = item.sender
+        if sender:
+            conversation["senders"].add(sender)
+            sender_counts[sender] = sender_counts.get(sender, 0) + 1
+
+        text = item.text or ""
+        text_was_clipped = len(text) > MAX_SUMMARY_TEXT_CHARS
+        if text_was_clipped:
+            text = text[:MAX_SUMMARY_TEXT_CHARS]
+            clipped_count += 1
+
+        messages.append({
+            "ordinal": ordinal,
+            "conversation_index": index,
+            "source": source,
+            "timestamp": item.timestamp,
+            "timestamp_kind": item.citation.timestamp_kind,
+            "sender": sender,
+            "kind": item.kind,
+            "text": text,
+            "text_truncated": text_was_clipped,
+        })
+
+    conversations = []
+    for index in sorted(conversation_rows):
+        row = conversation_rows[index]
+        conversations.append({
+            "index": row["index"],
+            "label": row["label"],
+            "message_count": row["message_count"],
+            "sender_count": len(row["senders"]),
+            "first_at": row["first_at"],
+            "last_at": row["last_at"],
+        })
+
+    senders = [
+        {"sender": sender, "count": count}
+        for sender, count in sorted(
+            sender_counts.items(), key=lambda pair: (-pair[1], pair[0])
+        )
+    ]
+
+    return {
+        "ok": True,
+        "op": "summary_input",
+        "state": "ready",
+        "source": source,
+        "window": {"start": start, "end": end},
+        "counts": {
+            "returned_messages": len(messages),
+            "returned_conversations": len(conversations),
+            "returned_senders": len(sender_counts),
+            "text_truncated": clipped_count,
+        },
+        "truncated": result.truncated,
+        "coverage": result.coverage.as_dict(),
+        "freshness": result.freshness.as_dict(),
+        "conversations": conversations,
+        "senders": senders,
+        "messages": messages,
+    }
+
+
 def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dict[str, Any], int]:
     """Runs one operation and returns its response and exit code."""
     op = request.get("op")
@@ -210,25 +359,37 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
         return {"ok": True, "op": op, "state": "ok",
                 "relative_store_path": relative_store_path()}, EXIT_OK
 
+    if op == "summary_input":
+        _summary_parameters(request)
+
     store_path = _store_path(request)
     decision = consent.resolve_consent(_activation(store_path), reader)
     if not decision.allowed:
         return _refusal(op, decision.state, decision.detail), EXIT_REFUSED
 
-    if op == "status":
+    if op in {"status", "summary_input"}:
         try:
             store = MemoryStore.open_read_only(decision)
         except MemoryStoreError as error:
             return _refusal(op, error.state, error.detail), EXIT_REFUSED
         try:
-            import time
+            if op == "status":
+                import time
 
-            fresh = memory_freshness(store, generated_at=time.time()).as_dict()
+                fresh = memory_freshness(store, generated_at=time.time()).as_dict()
+                return {
+                    "ok": True,
+                    "op": op,
+                    "state": "ok",
+                    "consent_generation": decision.consent_generation,
+                    "freshness": fresh,
+                }, EXIT_OK
+            try:
+                return _summary_input(store, request), EXIT_OK
+            except MemoryStoreError as error:
+                return _refusal(op, error.state, error.detail), EXIT_REFUSED
         finally:
             store.close()
-        return {"ok": True, "op": op, "state": "ok",
-                "consent_generation": decision.consent_generation,
-                "freshness": fresh}, EXIT_OK
 
     # op == "sync"
     conversation_limit = _limit(request, "conversation_limit", 50, MAX_CONVERSATION_LIMIT)

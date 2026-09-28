@@ -26,6 +26,75 @@ private final class FakeMemorySyncRunner: MemorySyncRunning, @unchecked Sendable
     }
 }
 
+
+
+private final class FakeDailySummaryRunner: DailySummaryRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        let source: MemorySource
+        let start: Date
+        let end: Date
+        let messageLimit: Int
+    }
+
+    var outcomes: [DailySummaryOutcome]
+    private(set) var calls: [Call] = []
+
+    init(outcomes: [DailySummaryOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func prepare(
+        source: MemorySource,
+        start: Date,
+        end: Date,
+        messageLimit: Int
+    ) async -> DailySummaryOutcome {
+        calls.append(Call(source: source, start: start, end: end, messageLimit: messageLimit))
+        return outcomes.isEmpty ? .failed(.runnerUnavailable) : outcomes.removeFirst()
+    }
+}
+
+private func dailySnapshot(source: MemorySource = .archive) -> DailySummarySnapshot {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let end = Date(timeIntervalSince1970: 1_700_003_600)
+    return DailySummarySnapshot(
+        source: source,
+        start: start,
+        end: end,
+        returnedMessages: 1,
+        returnedConversations: 1,
+        returnedSenders: 1,
+        textTruncatedCount: 0,
+        truncated: false,
+        coverage: DailySummaryCoverage(status: "complete", trustworthyEmpty: true, caveats: []),
+        freshness: freshness(source: source),
+        conversations: [
+            DailySummaryConversation(
+                id: 0,
+                label: source == .archive ? "Imported archive export" : "Captured chat",
+                messageCount: 1,
+                senderCount: 1,
+                firstAt: start,
+                lastAt: end
+            ),
+        ],
+        senders: [DailySummarySenderCount(sender: "A", count: 1)],
+        messages: [
+            DailySummaryMessage(
+                id: 0,
+                conversationIndex: 0,
+                source: source,
+                timestamp: start,
+                timestampKind: source == .archive ? "source_created" : "first_observed",
+                sender: "A",
+                kind: "text",
+                text: "hello",
+                textTruncated: false
+            ),
+        ]
+    )
+}
+
 private func makeDefaults() -> UserDefaults {
     let suite = "WeChatCompanionTests-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -188,6 +257,84 @@ struct MemorySyncTests {
         #expect(runner.syncCalls.count == 1)
         await model.refreshMemoryFreshness()
         #expect(runner.freshnessCalls.isEmpty)
+    }
+
+
+
+    @Test @MainActor
+    func dailySummaryRequiresConsentAndNeverReachesTheRunner() async {
+        let summaryRunner = FakeDailySummaryRunner(outcomes: [.ready(dailySnapshot())])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: FakeMemorySyncRunner(outcomes: []),
+            dailySummary: summaryRunner
+        )
+
+        await model.prepareDailySummary()
+
+        #expect(model.dailySummaryPhase == .failed(.consentWithheld))
+        #expect(model.dailySummarySnapshot == nil)
+        #expect(summaryRunner.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func dailySummaryReadsAnIndependentSourceAndBoundedWindowWithoutSyncing() async {
+        let syncRunner = FakeMemorySyncRunner(outcomes: [])
+        let summaryRunner = FakeDailySummaryRunner(outcomes: [.ready(dailySnapshot(source: .archive))])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: syncRunner,
+            dailySummary: summaryRunner
+        )
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        model.setDailySummaryWindow(.last24Hours)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        await model.prepareDailySummary(now: now)
+
+        #expect(model.dailySummaryPhase == .ready)
+        #expect(model.dailySummarySnapshot == dailySnapshot(source: .archive))
+        #expect(syncRunner.syncCalls.isEmpty)
+        #expect(summaryRunner.calls == [
+            .init(
+                source: .archive,
+                start: now.addingTimeInterval(-24 * 60 * 60),
+                end: now,
+                messageLimit: 200
+            ),
+        ])
+        model.setDailySummarySource(.database)
+        #expect(model.dailySummarySource == .archive)
+    }
+
+    @Test @MainActor
+    func changingDailySummaryScopeAndRevokingConsentClearTheInMemorySnapshot() async {
+        let summaryRunner = FakeDailySummaryRunner(outcomes: [
+            .ready(dailySnapshot(source: .visual)),
+            .ready(dailySnapshot(source: .visual)),
+        ])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: FakeMemorySyncRunner(outcomes: []),
+            dailySummary: summaryRunner
+        )
+        await model.setAllowsLocalPersistence(true)
+        await model.prepareDailySummary(now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(model.dailySummarySnapshot != nil)
+
+        model.setDailySummaryWindow(.yesterday)
+        #expect(model.dailySummarySnapshot == nil)
+        #expect(model.dailySummaryPhase == .idle)
+
+        await model.prepareDailySummary(now: Date(timeIntervalSince1970: 1_800_000_000))
+        #expect(model.dailySummarySnapshot != nil)
+        await model.setAllowsLocalPersistence(false)
+        #expect(model.dailySummarySnapshot == nil)
+        #expect(model.dailySummaryPhase == .idle)
     }
 
     @Test @MainActor

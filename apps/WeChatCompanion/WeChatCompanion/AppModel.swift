@@ -64,6 +64,7 @@ final class AppModel {
     @ObservationIgnored private let geminiTransport: any GeminiTransporting
     @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private let memorySync: any MemorySyncRunning
+    @ObservationIgnored private let dailySummary: any DailySummaryRunning
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     /// Independent of capture polling: an extraction already in flight can
     /// still finish after capture is paused, and Chats must show that result.
@@ -83,7 +84,8 @@ final class AppModel {
         credentials: any CredentialStoring = KeychainCredentialStore(),
         geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
         consentDefaults: UserDefaults = .standard,
-        memorySync: any MemorySyncRunning = AppModel.defaultMemorySyncRunner()
+        memorySync: any MemorySyncRunning = AppModel.defaultMemorySyncRunner(),
+        dailySummary: any DailySummaryRunning = AppModel.defaultDailySummaryRunner()
     ) {
         self.service = service
         self.store = store
@@ -96,6 +98,7 @@ final class AppModel {
         self.geminiTransport = geminiTransport
         self.consentDefaults = consentDefaults
         self.memorySync = memorySync
+        self.dailySummary = dailySummary
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
         )
@@ -219,6 +222,13 @@ final class AppModel {
         return PackagedMemorySyncRunner.bundled() ?? UnavailableMemorySyncRunner()
     }
 
+    static func defaultDailySummaryRunner() -> any DailySummaryRunning {
+        guard !PackagedMemorySyncRunner.isUnderTestHost else {
+            return UnavailableDailySummaryRunner()
+        }
+        return PackagedMemorySyncRunner.bundled() ?? UnavailableDailySummaryRunner()
+    }
+
 
     /// The app offers only sources it owns locally: visual capture and
     /// imported archive evidence. The external database reader remains an
@@ -276,6 +286,60 @@ final class AppModel {
         }
     }
 
+    // MARK: - Daily Summary
+
+    private(set) var dailySummarySource: MemorySource = .visual
+    private(set) var dailySummaryWindow: DailySummaryWindow = .today
+    private(set) var dailySummaryPhase: DailySummaryPhase = .idle
+    private(set) var dailySummarySnapshot: DailySummarySnapshot?
+
+    var canPrepareDailySummary: Bool {
+        allowsLocalPersistence && !dailySummaryPhase.isRunning
+    }
+
+    func setDailySummarySource(_ source: MemorySource) {
+        guard MemorySource.appSelectable.contains(source),
+              source != dailySummarySource,
+              !dailySummaryPhase.isRunning else { return }
+        dailySummarySource = source
+        dailySummarySnapshot = nil
+        dailySummaryPhase = .idle
+    }
+
+    func setDailySummaryWindow(_ window: DailySummaryWindow) {
+        guard window != dailySummaryWindow,
+              !dailySummaryPhase.isRunning else { return }
+        dailySummaryWindow = window
+        dailySummarySnapshot = nil
+        dailySummaryPhase = .idle
+    }
+
+    func prepareDailySummary(now: Date = Date()) async {
+        guard allowsLocalPersistence else {
+            dailySummarySnapshot = nil
+            dailySummaryPhase = .failed(.consentWithheld)
+            return
+        }
+        guard !dailySummaryPhase.isRunning else { return }
+
+        let bounds = dailySummaryWindow.bounds(now: now)
+        dailySummaryPhase = .running
+        switch await dailySummary.prepare(
+            source: dailySummarySource,
+            start: bounds.start,
+            end: bounds.end,
+            messageLimit: 200
+        ) {
+        case .ready(let snapshot):
+            dailySummarySnapshot = snapshot
+            dailySummaryPhase = .ready
+        case .failed(let failure):
+            dailySummarySnapshot = nil
+            dailySummaryPhase = .failed(failure)
+        }
+    }
+
+
     // MARK: - Local persistence settings
 
     /// Turning this on opens (and if needed creates) the local database.
@@ -291,6 +355,8 @@ final class AppModel {
             // Takes effect immediately: no sync can start, and a result from
             // before the withdrawal is not shown as if it were current state.
             memorySyncPhase = .idle
+            dailySummarySnapshot = nil
+            dailySummaryPhase = .idle
         }
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()

@@ -115,6 +115,9 @@ def test_paths_answers_without_consent_and_without_an_absolute_path():
     ({"op": "sync", "conversation_limit": "many"}, "invalid_request"),
     ({"op": "sync", "message_source": "carrier-pigeon"}, "invalid_request"),
     ({"op": "sync", "store_path": ""}, "invalid_request"),
+    ({"op": "summary_input", "message_source": "visual"}, "invalid_request"),
+    ({"op": "summary_input", "message_source": "visual", "start": 2, "end": 1}, "invalid_request"),
+    ({"op": "summary_input", "message_source": "carrier-pigeon", "start": 1, "end": 2}, "invalid_request"),
 ])
 def test_an_unusable_request_is_refused_with_exit_two(request_body, state):
     reply, code = run(request_body)
@@ -133,8 +136,8 @@ def test_an_oversized_request_is_refused_before_being_parsed():
     assert (json.loads(out.getvalue())["state"], code) == ("request_too_large", 2)
 
 
-def test_there_is_no_operation_that_writes_or_deletes():
-    assert worker.OPERATIONS == {"sync", "status", "paths"}
+def test_there_is_no_operation_that_deletes_or_runs_arbitrary_commands():
+    assert worker.OPERATIONS == {"sync", "status", "paths", "summary_input"}
 
 
 # --- consent --------------------------------------------------------------------
@@ -193,6 +196,56 @@ def test_one_new_message_appears_on_the_next_sync(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "build_selected_source", lambda: second)
     reply, _ = run({"op": "sync", "store_path": str(store)})
     assert reply["counts"]["messages_inserted"] == 1
+
+
+
+def test_summary_input_reads_memory_only_and_returns_bounded_provenance(tmp_path, synthetic):
+    store = paths.canonical_store_path(tmp_path)
+    synced, sync_code = run({"op": "sync", "store_path": str(store)})
+    assert (synced["ok"], sync_code) == (True, 0)
+
+    reply, code = run({
+        "op": "summary_input",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_699_999_000.0,
+        "end": 1_700_001_000.0,
+        "message_limit": 1,
+    })
+
+    assert (reply["ok"], code) == (True, 0)
+    assert reply["state"] == "ready"
+    assert reply["source"] == SOURCE_VISUAL
+    assert reply["counts"]["returned_messages"] == 1
+    assert reply["counts"]["returned_conversations"] == 1
+    assert reply["truncated"] is True
+    assert reply["conversations"][0]["label"] == "项目组"
+    assert reply["messages"][0]["source"] == SOURCE_VISUAL
+    assert reply["messages"][0]["timestamp_kind"] == "first_observed"
+    assert "coverage" in reply and "trustworthy_empty" in reply["coverage"]
+    assert "freshness" in reply
+    blob = json.dumps(reply, ensure_ascii=False)
+    assert "canonical_message_id" not in blob
+    assert "canonical_conversation_id" not in blob
+    assert str(tmp_path) not in blob
+
+
+def test_summary_input_does_not_turn_not_observed_into_empty(tmp_path, synthetic):
+    store = paths.canonical_store_path(tmp_path)
+    run({"op": "sync", "store_path": str(store)})
+
+    reply, code = run({
+        "op": "summary_input",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_800_000_000.0,
+        "end": 1_800_003_600.0,
+    })
+
+    assert (reply["ok"], code) == (True, 0)
+    assert reply["messages"] == []
+    assert reply["coverage"]["trustworthy_empty"] is False
+    assert reply["coverage"]["status"] != "complete"
 
 
 def test_freshness_advances_and_keeps_its_parts_distinct(tmp_path, synthetic):
@@ -380,6 +433,24 @@ def test_the_frozen_worker_is_self_contained_and_syncs_end_to_end(tmp_path):
     assert status["freshness"]["sources"][SOURCE_VISUAL]["stored_messages"] == 1
     assert str(tmp_path) not in json.dumps(status)
 
+    summary, summary_code = invoke(
+        [str(FROZEN)],
+        {
+            "op": "summary_input",
+            "store_path": str(store),
+            "message_source": SOURCE_VISUAL,
+            "start": 1.0,
+            "end": 3.0,
+            "message_limit": 200,
+        },
+        env,
+    )
+    assert (summary["ok"], summary_code) == (True, 0), summary
+    assert summary["counts"]["returned_messages"] == 1
+    assert summary["conversations"][0]["label"] == "项目组"
+    assert summary["messages"][0]["timestamp_kind"] == "first_observed"
+    assert str(tmp_path) not in json.dumps(summary)
+
 
 @pytest.mark.skipif(not FROZEN.exists(),
                     reason="frozen worker not built; run scripts/build-memory-worker.sh")
@@ -463,6 +534,24 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert (status["ok"], status_code) == (True, 0)
     assert status["freshness"]["sources"][SOURCE_ARCHIVE]["stored_messages"] == 1
     assert "不应进入 Memory" not in json.dumps(status, ensure_ascii=False)
+
+    summary, summary_code = invoke(
+        [str(FROZEN)],
+        {
+            "op": "summary_input",
+            "store_path": str(store),
+            "message_source": SOURCE_ARCHIVE,
+            "start": 50.0,
+            "end": 150.0,
+        },
+        env,
+    )
+    assert (summary["ok"], summary_code) == (True, 0), summary
+    assert summary["source"] == SOURCE_ARCHIVE
+    assert summary["counts"]["returned_messages"] == 1
+    assert summary["conversations"][0]["label"] == "Imported archive export"
+    assert summary["messages"][0]["timestamp_kind"] == "source_created"
+    assert "不应进入 Memory" not in json.dumps(summary, ensure_ascii=False)
 
 
 # --- canonical activation (M2.2e) --------------------------------------------

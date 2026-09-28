@@ -19,6 +19,8 @@ struct ContentView: View {
                 OverviewView(model: model)
             case .chats:
                 ChatsView(model: model)
+            case .dailySummary:
+                DailySummaryView(model: model)
             case .settings:
                 SettingsView(model: model)
             case .diagnostics:
@@ -1686,6 +1688,319 @@ private struct ExtractionMetric: View {
                 .monospacedDigit()
         }
         .padding(.vertical, 10)
+    }
+}
+
+
+private struct DailySummaryView: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Daily Summary")
+                        .font(.largeTitle.bold())
+                    Text("A local evidence digest from Memory. Preparing it makes no network request and does not run an AI model.")
+                        .foregroundStyle(.secondary)
+                }
+
+                GroupBox("Summary Window") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Source")
+                            Spacer()
+                            Menu(model.dailySummarySource.label) {
+                                ForEach(MemorySource.appSelectable, id: \.rawValue) { source in
+                                    Button {
+                                        model.setDailySummarySource(source)
+                                    } label: {
+                                        if source == model.dailySummarySource {
+                                            Label(source.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(source.label)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(model.dailySummaryPhase.isRunning)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text("Window")
+                            Spacer()
+                            Menu(model.dailySummaryWindow.label) {
+                                ForEach(DailySummaryWindow.allCases) { window in
+                                    Button {
+                                        model.setDailySummaryWindow(window)
+                                    } label: {
+                                        if window == model.dailySummaryWindow {
+                                            Label(window.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(window.label)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(model.dailySummaryPhase.isRunning)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text("Reads only the already-synced Memory store.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(model.dailySummarySnapshot == nil ? "Prepare Summary" : "Refresh") {
+                                Task { await model.prepareDailySummary() }
+                            }
+                            .disabled(!model.canPrepareDailySummary)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                if !model.allowsLocalPersistence {
+                    ContentUnavailableView(
+                        "Local Storage Is Off",
+                        systemImage: "externaldrive.badge.xmark",
+                        description: Text("Enable local message storage in Settings before Daily Summary can read Memory.")
+                    )
+                } else {
+                    summaryState
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 920, alignment: .leading)
+        }
+        .navigationTitle("Daily Summary")
+    }
+
+    @ViewBuilder
+    private var summaryState: some View {
+        switch model.dailySummaryPhase {
+        case .idle:
+            ContentUnavailableView(
+                "Ready to Prepare",
+                systemImage: "text.document",
+                description: Text("Choose a source and bounded time window, then prepare a local evidence digest.")
+            )
+        case .running:
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Reading Memory evidence…")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+        case .failed(let failure):
+            ContentUnavailableView(
+                "Summary Evidence Unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text(failure.message)
+            )
+        case .ready:
+            if let snapshot = model.dailySummarySnapshot {
+                DailySummarySnapshotView(snapshot: snapshot)
+            }
+        }
+    }
+}
+
+private struct DailySummarySnapshotView: View {
+    let snapshot: DailySummarySnapshot
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            GroupBox("Evidence Status") {
+                VStack(spacing: 0) {
+                    summaryRow("Source", snapshot.source.label)
+                    Divider()
+                    summaryRow("Window", windowText)
+                    Divider()
+                    summaryRow("Coverage", coverageLabel)
+                    Divider()
+                    summaryRow("Returned messages", String(snapshot.returnedMessages))
+                    Divider()
+                    summaryRow("Conversations", String(snapshot.returnedConversations))
+                    Divider()
+                    summaryRow("Senders", String(snapshot.returnedSenders))
+                    if let lastSync = snapshot.freshness?.lastSuccessfulSync {
+                        Divider()
+                        summaryRow(
+                            "Last Memory sync",
+                            lastSync.formatted(date: .abbreviated, time: .shortened)
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            if snapshot.truncated || snapshot.textTruncatedCount > 0 || !snapshot.coverage.caveats.isEmpty {
+                GroupBox("Caveats") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if snapshot.truncated {
+                            Label(
+                                "The evidence set is capped at the newest 200 messages in this window.",
+                                systemImage: "ellipsis.circle"
+                            )
+                        }
+                        if snapshot.textTruncatedCount > 0 {
+                            Label(
+                                "\(snapshot.textTruncatedCount) long message(s) were clipped in the structured input.",
+                                systemImage: "text.badge.ellipsis"
+                            )
+                        }
+                        ForEach(snapshot.coverage.caveats, id: \.self) { caveat in
+                            Label(caveat, systemImage: "info.circle")
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+                }
+            }
+
+            evidenceDigest
+        }
+    }
+
+    @ViewBuilder
+    private var evidenceDigest: some View {
+        if snapshot.messages.isEmpty {
+            if snapshot.coverage.trustworthyEmpty {
+                ContentUnavailableView(
+                    "No Messages in This Covered Window",
+                    systemImage: "checkmark.circle",
+                    description: Text("Memory reports complete coverage for the selected source and window.")
+                )
+            } else {
+                ContentUnavailableView(
+                    "No Stored Evidence in This Window",
+                    systemImage: "questionmark.circle",
+                    description: Text("Coverage is not complete, so this cannot be interpreted as “no messages happened.”")
+                )
+            }
+        } else {
+            GroupBox("Local Evidence Digest") {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(digestSentence)
+                        .font(.headline)
+
+                    if !snapshot.senders.isEmpty {
+                        Text("Most active senders: " + senderSummary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Divider()
+
+                    ForEach(snapshot.conversations) { conversation in
+                        DailySummaryConversationSection(
+                            conversation: conversation,
+                            messages: snapshot.messages.filter {
+                                $0.conversationIndex == conversation.id
+                            }
+                        )
+                        if conversation.id != snapshot.conversations.last?.id {
+                            Divider()
+                        }
+                    }
+
+                    Text("This view is a deterministic local digest of stored evidence, not an AI-generated interpretation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
+        }
+    }
+
+    private var digestSentence: String {
+        "\(snapshot.returnedMessages) messages across \(snapshot.returnedConversations) conversations from \(snapshot.returnedSenders) senders."
+    }
+
+    private var senderSummary: String {
+        snapshot.senders.prefix(6)
+            .map { "\($0.sender) (\($0.count))" }
+            .joined(separator: ", ")
+    }
+
+    private var coverageLabel: String {
+        switch snapshot.coverage.status {
+        case "complete": "Complete"
+        case "partial": "Partial"
+        case "unavailable": "Unavailable"
+        case "not_observed": "Not observed"
+        default: snapshot.coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    private var windowText: String {
+        snapshot.start.formatted(date: .abbreviated, time: .shortened)
+            + " – "
+            + snapshot.end.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func summaryRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct DailySummaryConversationSection: View {
+    let conversation: DailySummaryConversation
+    let messages: [DailySummaryMessage]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(conversation.label)
+                    .font(.headline)
+                Spacer()
+                Text("\(conversation.messageCount) messages")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(
+                conversation.firstAt.formatted(date: .omitted, time: .shortened)
+                    + " – "
+                    + conversation.lastAt.formatted(date: .omitted, time: .shortened)
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            ForEach(messages) { message in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(message.sender ?? "Unknown sender")
+                            .font(.callout.weight(.medium))
+                        Spacer()
+                        Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(message.text)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if message.textTruncated {
+                        Text("Text clipped in summary input")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
     }
 }
 

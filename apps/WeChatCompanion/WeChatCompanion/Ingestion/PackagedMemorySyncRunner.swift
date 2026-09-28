@@ -27,7 +27,7 @@ private final class Expiry: @unchecked Sendable {
     var fired = false
 }
 
-struct PackagedMemorySyncRunner: MemorySyncRunning {
+struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning {
     /// Where the worker sits inside the bundle. It is a nested *bundle*, not a
     /// loose directory: codesign refuses to seal an app that contains an
     /// unsigned tree of plain files, and a helper .app carries its own seal.
@@ -111,6 +111,127 @@ struct PackagedMemorySyncRunner: MemorySyncRunning {
         return Self.summary(from: reply["freshness"], source: source)
     }
 
+
+    // MARK: - Daily Summary
+
+    func prepare(
+        source: MemorySource,
+        start: Date,
+        end: Date,
+        messageLimit: Int
+    ) async -> DailySummaryOutcome {
+        var request = baseRequest(op: "summary_input")
+        request["message_source"] = source.rawValue
+        request["start"] = start.timeIntervalSince1970
+        request["end"] = end.timeIntervalSince1970
+        request["message_limit"] = messageLimit
+
+        switch invoke(request) {
+        case .failure(let failure):
+            return .failed(dailySummaryFailure(fromLocal: failure))
+        case .success(let reply):
+            guard reply["ok"] as? Bool == true else {
+                return .failed(dailySummaryFailure(from: reply))
+            }
+            guard let replySourceRaw = reply["source"] as? String,
+                  let replySource = MemorySource(rawValue: replySourceRaw),
+                  replySource == source,
+                  let window = reply["window"] as? [String: Any],
+                  let startSeconds = window["start"] as? Double,
+                  let endSeconds = window["end"] as? Double,
+                  abs(startSeconds - start.timeIntervalSince1970) < 0.001,
+                  abs(endSeconds - end.timeIntervalSince1970) < 0.001,
+                  let counts = reply["counts"] as? [String: Any],
+                  let coverageRoot = reply["coverage"] as? [String: Any],
+                  let coverageStatus = coverageRoot["status"] as? String,
+                  let trustworthyEmpty = coverageRoot["trustworthy_empty"] as? Bool,
+                  let caveats = coverageRoot["caveats"] as? [String],
+                  let conversationRows = reply["conversations"] as? [[String: Any]],
+                  let senderRows = reply["senders"] as? [[String: Any]],
+                  let messageRows = reply["messages"] as? [[String: Any]]
+            else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let conversations = conversationRows.compactMap { row -> DailySummaryConversation? in
+                guard let index = row["index"] as? Int,
+                      let label = row["label"] as? String,
+                      let messageCount = row["message_count"] as? Int,
+                      let senderCount = row["sender_count"] as? Int,
+                      let firstAt = row["first_at"] as? Double,
+                      let lastAt = row["last_at"] as? Double
+                else { return nil }
+                return DailySummaryConversation(
+                    id: index,
+                    label: label,
+                    messageCount: messageCount,
+                    senderCount: senderCount,
+                    firstAt: Date(timeIntervalSince1970: firstAt),
+                    lastAt: Date(timeIntervalSince1970: lastAt)
+                )
+            }
+            guard conversations.count == conversationRows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let senders = senderRows.compactMap { row -> DailySummarySenderCount? in
+                guard let sender = row["sender"] as? String,
+                      let count = row["count"] as? Int else { return nil }
+                return DailySummarySenderCount(sender: sender, count: count)
+            }
+            guard senders.count == senderRows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let messages = messageRows.compactMap { row -> DailySummaryMessage? in
+                guard let ordinal = row["ordinal"] as? Int,
+                      let conversationIndex = row["conversation_index"] as? Int,
+                      let sourceRaw = row["source"] as? String,
+                      let messageSource = MemorySource(rawValue: sourceRaw),
+                      let timestamp = row["timestamp"] as? Double,
+                      let timestampKind = row["timestamp_kind"] as? String,
+                      let kind = row["kind"] as? String,
+                      let text = row["text"] as? String,
+                      let textTruncated = row["text_truncated"] as? Bool
+                else { return nil }
+                return DailySummaryMessage(
+                    id: ordinal,
+                    conversationIndex: conversationIndex,
+                    source: messageSource,
+                    timestamp: Date(timeIntervalSince1970: timestamp),
+                    timestampKind: timestampKind,
+                    sender: row["sender"] as? String,
+                    kind: kind,
+                    text: text,
+                    textTruncated: textTruncated
+                )
+            }
+            guard messages.count == messageRows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            return .ready(DailySummarySnapshot(
+                source: source,
+                start: Date(timeIntervalSince1970: startSeconds),
+                end: Date(timeIntervalSince1970: endSeconds),
+                returnedMessages: counts["returned_messages"] as? Int ?? messages.count,
+                returnedConversations: counts["returned_conversations"] as? Int ?? conversations.count,
+                returnedSenders: counts["returned_senders"] as? Int ?? senders.count,
+                textTruncatedCount: counts["text_truncated"] as? Int ?? 0,
+                truncated: reply["truncated"] as? Bool ?? false,
+                coverage: DailySummaryCoverage(
+                    status: coverageStatus,
+                    trustworthyEmpty: trustworthyEmpty,
+                    caveats: caveats
+                ),
+                freshness: Self.summary(from: reply["freshness"], source: source),
+                conversations: conversations,
+                senders: senders,
+                messages: messages
+            ))
+        }
+    }
+
     // MARK: - Protocol
 
     private func baseRequest(op: String) -> [String: Any] {
@@ -128,6 +249,32 @@ struct PackagedMemorySyncRunner: MemorySyncRunning {
             return .consentWithheld
         }
         return .ingestionFailed(state: state)
+    }
+
+
+    private func dailySummaryFailure(from reply: [String: Any]) -> DailySummaryFailure {
+        let state = reply["state"] as? String ?? "unknown"
+        if state == "consent_withheld" || state == "consent_state_missing"
+            || state == "consent_state_malformed" || state == "consent_unobservable" {
+            return .consentWithheld
+        }
+        if state.hasPrefix("memory_") {
+            return .memoryUnavailable(state: state)
+        }
+        return .workerFailed(state: state)
+    }
+
+    private func dailySummaryFailure(fromLocal failure: MemorySyncFailure) -> DailySummaryFailure {
+        switch failure {
+        case .consentWithheld:
+            return .consentWithheld
+        case .runnerUnavailable:
+            return .runnerUnavailable
+        case .sourceUnavailable(let state):
+            return .memoryUnavailable(state: state)
+        case .ingestionFailed(let state):
+            return .workerFailed(state: state)
+        }
     }
 
     private func invoke(_ request: [String: Any]) -> Result<[String: Any], MemorySyncFailure> {
