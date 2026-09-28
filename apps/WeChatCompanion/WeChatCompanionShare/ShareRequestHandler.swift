@@ -63,10 +63,7 @@ private enum ShareRequestProcessor {
                 // Provider filenames are deliberately not treated as WeChat
                 // conversation identity. The main app derives identity only
                 // from evidence inside the validated archive.
-                try inbox.enqueueCopy(
-                    from: url,
-                    suggestedConversationName: nil
-                )
+                try inbox.enqueueCopy(from: url)
             } catch {
                 cancel(contextBox.value, code: Failure.handoffFailed)
                 return

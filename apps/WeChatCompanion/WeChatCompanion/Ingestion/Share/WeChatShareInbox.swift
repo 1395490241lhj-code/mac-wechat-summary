@@ -1,5 +1,20 @@
 import Foundation
 
+enum WeChatShareInboxSignal {
+    static let didChange = Notification.Name(
+        "com.lianghongjing.WeChatCompanion.shareInbox.didChange"
+    )
+
+    static func post() {
+        DistributedNotificationCenter.default().postNotificationName(
+            didChange,
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+}
+
 enum WeChatShareInboxError: Error, Equatable {
     case appGroupUnavailable
     case archiveTooLarge
@@ -10,7 +25,6 @@ struct WeChatShareInboxItem: Equatable, Sendable {
     let directoryURL: URL
     let archiveURL: URL
     let createdAt: Date
-    let suggestedConversationName: String?
 }
 
 struct WeChatShareInbox: Sendable {
@@ -25,23 +39,53 @@ struct WeChatShareInbox: Sendable {
     private static let manifestName = "handoff.json"
 
     let rootURL: URL
-    init(rootURL: URL) {
+    private let signalChange: @Sendable () -> Void
+
+    init(
+        rootURL: URL,
+        signalChange: @escaping @Sendable () -> Void = {}
+    ) {
         self.rootURL = rootURL
+        self.signalChange = signalChange
     }
 
     static func appGroup() -> WeChatShareInbox? {
-        guard let container = FileManager.default.containerURL(
+        let manager = FileManager.default
+        let container: URL
+        if let systemContainer = manager.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else { return nil }
+        ) {
+            container = systemContainer
+        } else {
+#if os(macOS)
+            // The shipped main app is deliberately not sandboxed, while the
+            // Share Extension is. On that host shape Foundation may not vend
+            // the App Group URL even though the signed extension uses it.
+            // A non-sandboxed macOS app can safely address its own Team-ID
+            // group container at the standard per-user location.
+            container = fallbackGroupContainerURL(
+                homeDirectory: manager.homeDirectoryForCurrentUser
+            )
+#else
+            return nil
+#endif
+        }
         return WeChatShareInbox(
-            rootURL: container.appendingPathComponent(directoryName, isDirectory: true)
+            rootURL: container.appendingPathComponent(directoryName, isDirectory: true),
+            signalChange: WeChatShareInboxSignal.post
         )
+    }
+
+    static func fallbackGroupContainerURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Group Containers", isDirectory: true)
+            .appendingPathComponent(appGroupIdentifier, isDirectory: true)
     }
 
     @discardableResult
     func enqueueCopy(
         from sourceURL: URL,
-        suggestedConversationName: String?,
         now: Date = Date()
     ) throws -> WeChatShareInboxItem {
         try ensureRoot()
@@ -73,8 +117,7 @@ struct WeChatShareInbox: Sendable {
         let manifest = Manifest(
             version: 1,
             id: id,
-            createdAt: now,
-            suggestedConversationName: normalizedSuggestion(suggestedConversationName)
+            createdAt: now
         )
         let manifestURL = staging.appendingPathComponent(Self.manifestName)
         try Self.encoder.encode(manifest).write(to: manifestURL, options: .atomic)
@@ -82,12 +125,12 @@ struct WeChatShareInbox: Sendable {
 
         try FileManager.default.moveItem(at: staging, to: pending)
         committed = true
+        signalChange()
         return WeChatShareInboxItem(
             id: id,
             directoryURL: pending,
             archiveURL: pending.appendingPathComponent(Self.archiveName),
-            createdAt: now,
-            suggestedConversationName: manifest.suggestedConversationName
+            createdAt: now
         )
     }
 
@@ -187,8 +230,7 @@ struct WeChatShareInbox: Sendable {
             id: manifest.id,
             directoryURL: directory,
             archiveURL: archiveURL,
-            createdAt: manifest.createdAt,
-            suggestedConversationName: manifest.suggestedConversationName
+            createdAt: manifest.createdAt
         )
     }
 
@@ -205,12 +247,6 @@ struct WeChatShareInbox: Sendable {
         guard values.isRegularFile == true else { return Int64.max }
         return Int64(values.fileSize ?? 0)
     }
-    private func normalizedSuggestion(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     private func applyDirectoryPermissions(_ url: URL) throws {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o700],
@@ -229,7 +265,6 @@ struct WeChatShareInbox: Sendable {
         let version: Int
         let id: String
         let createdAt: Date
-        let suggestedConversationName: String?
     }
 
     private static let encoder: JSONEncoder = {

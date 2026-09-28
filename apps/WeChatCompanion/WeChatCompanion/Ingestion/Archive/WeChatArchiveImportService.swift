@@ -1,10 +1,6 @@
 import CryptoKit
 import Foundation
 
-enum WeChatArchiveImportError: Error, Equatable, Sendable {
-    case conversationIdentityUnavailable
-}
-
 struct WeChatArchiveImportOutcome: Sendable, Equatable {
     let persistence: ArchivePersistenceResult
     let transcriptShape: String
@@ -13,21 +9,36 @@ struct WeChatArchiveImportOutcome: Sendable, Equatable {
 
 enum ArchiveConversationIdentityResolver {
     private static let domain = "wechat-native-archive-conversation-key-v1"
+    private static let anonymousSeedKey = ArchiveConversationKey(
+        "native-anonymous-import-seed-v1"
+    )
 
-    static func resolve(
-        archive: WeChatNativeArchive,
-        suggestedConversationName: String?
-    ) throws -> ArchiveConversationKey {
+    static func resolve(archive: WeChatNativeArchive) -> ArchiveConversationKey {
         if let topLevel = topLevelDirectory(of: archive.transcriptEntryName) {
-            return opaqueKey(kind: "archive-directory", value: topLevel)
+            return opaqueKey(
+                kind: "archive-directory",
+                value: topLevel,
+                prefix: "native-v1:"
+            )
         }
 
-        if let suggestedConversationName,
-           let normalized = normalizedSuggestedName(suggestedConversationName) {
-            return opaqueKey(kind: "share-suggested-name", value: normalized)
-        }
-
-        throw WeChatArchiveImportError.conversationIdentityUnavailable
+        // Real WeChat 4.1.x merged-forward exports can contain only a root-level
+        // transcript, with no source-authored conversation identifier at all.
+        // Do not guess from participants, message text, or provider filenames.
+        //
+        // Instead, give that exact parsed export an opaque import-scoped bucket.
+        // The same transcript resolves to the same key, so re-import stays
+        // idempotent. Different exports remain separate until a later linkage
+        // phase has trustworthy identity evidence.
+        let transcriptFingerprint = ArchiveImportFingerprint.fingerprint(
+            of: archive.transcript,
+            conversationKey: anonymousSeedKey
+        )
+        return opaqueKey(
+            kind: "anonymous-import",
+            value: transcriptFingerprint,
+            prefix: "native-anonymous-v1:"
+        )
     }
 
     private static func topLevelDirectory(of entryName: String) -> String? {
@@ -37,17 +48,11 @@ enum ArchiveConversationIdentityResolver {
         return value.isEmpty ? nil : value
     }
 
-    private static func normalizedSuggestedName(_ value: String) -> String? {
-        var name = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return nil }
-        if name.lowercased().hasSuffix(".zip") {
-            name.removeLast(4)
-            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return name.isEmpty ? nil : name
-    }
-
-    private static func opaqueKey(kind: String, value: String) -> ArchiveConversationKey {
+    private static func opaqueKey(
+        kind: String,
+        value: String,
+        prefix: String
+    ) -> ArchiveConversationKey {
         var digest = SHA256()
         digest.update(data: Data(domain.utf8))
         digest.update(data: Data([0]))
@@ -55,7 +60,7 @@ enum ArchiveConversationIdentityResolver {
         digest.update(data: Data([0]))
         digest.update(data: Data(value.utf8))
         let hex = digest.finalize().map { String(format: "%02x", $0) }.joined()
-        return ArchiveConversationKey("native-v1:" + hex)
+        return ArchiveConversationKey(prefix + hex)
     }
 }
 
@@ -67,7 +72,6 @@ struct WeChatArchiveImportService: Sendable {
 
     func importArchive(
         contentsOf url: URL,
-        suggestedConversationName: String? = nil,
         importedAt: Date = Date()
     ) async throws -> WeChatArchiveImportOutcome {
         let didAccess = url.startAccessingSecurityScopedResource()
@@ -76,9 +80,8 @@ struct WeChatArchiveImportService: Sendable {
         }
 
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
-        let conversationKey = try ArchiveConversationIdentityResolver.resolve(
-            archive: archive,
-            suggestedConversationName: suggestedConversationName
+        let conversationKey = ArchiveConversationIdentityResolver.resolve(
+            archive: archive
         )
         let persistence = try await history.persistArchiveEvidence(
             transcript: archive.transcript,

@@ -1133,14 +1133,8 @@ struct WeChatArchiveImportIdentityTests {
         }
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
 
-        let a = try ArchiveConversationIdentityResolver.resolve(
-            archive: archive,
-            suggestedConversationName: "different.zip"
-        )
-        let b = try ArchiveConversationIdentityResolver.resolve(
-            archive: archive,
-            suggestedConversationName: nil
-        )
+        let a = ArchiveConversationIdentityResolver.resolve(archive: archive)
+        let b = ArchiveConversationIdentityResolver.resolve(archive: archive)
 
         #expect(a == b)
         #expect(a.rawValue.hasPrefix("native-v1:"))
@@ -1148,41 +1142,48 @@ struct WeChatArchiveImportIdentityTests {
     }
 
     @Test
-    func suggestedNameIsFallbackWhenArchiveHasNoDirectory() throws {
-        let scratch = try Scratch()
-        let url = try scratch.zip {
+    func rootLevelTranscriptGetsAnonymousImportScopedIdentity() throws {
+        let firstScratch = try Scratch()
+        let secondScratch = try Scratch()
+        let changedScratch = try Scratch()
+        let firstURL = try firstScratch.zip {
             $0.add("聊天记录.txt", transcript([("张三", m35, "x")]))
         }
-        let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        let secondURL = try secondScratch.zip {
+            $0.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+        }
+        let changedURL = try changedScratch.zip {
+            $0.add("聊天记录.txt", transcript([("张三", m35, "y")]))
+        }
 
-        let a = try ArchiveConversationIdentityResolver.resolve(
-            archive: archive,
-            suggestedConversationName: "家庭群.zip"
+        let first = ArchiveConversationIdentityResolver.resolve(
+            archive: try WeChatNativeArchiveReader.read(contentsOf: firstURL)
+        )
+        let second = ArchiveConversationIdentityResolver.resolve(
+            archive: try WeChatNativeArchiveReader.read(contentsOf: secondURL)
+        )
+        let changed = ArchiveConversationIdentityResolver.resolve(
+            archive: try WeChatNativeArchiveReader.read(contentsOf: changedURL)
         )
 
-        let b = try ArchiveConversationIdentityResolver.resolve(
-            archive: archive,
-            suggestedConversationName: "家庭群"
-        )
-
-        #expect(a == b)
-        #expect(!a.rawValue.contains("家庭群"))
+        #expect(first == second)
+        #expect(first != changed)
+        #expect(first.rawValue.hasPrefix("native-anonymous-v1:"))
+        #expect(!first.rawValue.contains("张三"))
+        #expect(!first.rawValue.contains("x"))
     }
 
     @Test
-    func missingConversationIdentityFailsClosed() throws {
+    func rootLevelUnattributedTranscriptAlsoGetsAnonymousIdentity() throws {
         let scratch = try Scratch()
         let url = try scratch.zip {
             $0.add("聊天记录.txt", unattributed(["x"]))
         }
         let archive = try WeChatNativeArchiveReader.read(contentsOf: url)
+        let key = ArchiveConversationIdentityResolver.resolve(archive: archive)
 
-        #expect(throws: WeChatArchiveImportError.conversationIdentityUnavailable) {
-            _ = try ArchiveConversationIdentityResolver.resolve(
-                archive: archive,
-                suggestedConversationName: nil
-            )
-        }
+        #expect(key.rawValue.hasPrefix("native-anonymous-v1:"))
+        #expect(!key.rawValue.contains("x"))
     }
 }
 
@@ -1207,7 +1208,7 @@ struct WeChatArchiveImportServiceTests {
     func importPersistsParsedEvidenceWithoutKeepingTheArchive() async throws {
         let scratch = try Scratch()
         let url = try scratch.zip {
-            $0.add("家庭群/聊天记录.txt", transcript([
+            $0.add("聊天记录.txt", transcript([
                 ("张三", m35, "x"), ("李四", m36, "y"),
             ]))
         }
@@ -1265,7 +1266,7 @@ struct WeChatShareInboxAppModelTests {
             $0.add("家庭群/聊天记录.txt", transcript([("张三", m35, "x")]))
         }
         let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
-        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let queued = try inbox.enqueueCopy(from: source)
         let (storedDefaults, suite) = defaults()
         defer { storedDefaults.removePersistentDomain(forName: suite) }
         let history = LocalMessageHistory(url: nil)
@@ -1288,7 +1289,7 @@ struct WeChatShareInboxAppModelTests {
             ]))
         }
         let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
-        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let queued = try inbox.enqueueCopy(from: source)
         let (storedDefaults, suite) = defaults()
         defer { storedDefaults.removePersistentDomain(forName: suite) }
         let history = LocalMessageHistory(url: nil)
@@ -1311,7 +1312,7 @@ struct WeChatShareInboxAppModelTests {
         let source = scratch.url.appendingPathComponent("invalid.zip")
         try Data("not a zip".utf8).write(to: source)
         let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
-        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let queued = try inbox.enqueueCopy(from: source)
         let (storedDefaults, suite) = defaults()
         defer { storedDefaults.removePersistentDomain(forName: suite) }
         let history = LocalMessageHistory(url: nil)
@@ -1325,13 +1326,13 @@ struct WeChatShareInboxAppModelTests {
     }
 
     @Test
-    func validArchiveWithoutSourceIdentityStaysPending() async throws {
+    func rootLevelWeChatArchiveImportsAndDeletesTransport() async throws {
         let scratch = try Scratch()
         let source = try scratch.zip {
             $0.add("聊天记录.txt", transcript([("张三", m35, "x")]))
         }
         let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
-        let queued = try inbox.enqueueCopy(from: source, suggestedConversationName: nil)
+        let queued = try inbox.enqueueCopy(from: source)
         let (storedDefaults, suite) = defaults()
         defer { storedDefaults.removePersistentDomain(forName: suite) }
         let history = LocalMessageHistory(url: nil)
@@ -1339,9 +1340,12 @@ struct WeChatShareInboxAppModelTests {
 
         await app.setAllowsLocalPersistence(true)
 
-        #expect(app.archiveImportStatus == .conversationIdentityUnavailable)
-        #expect(FileManager.default.fileExists(atPath: queued.archiveURL.path))
-        #expect(try inbox.pendingItems().map(\.id) == [queued.id])
+        #expect(app.archiveImportStatus == .imported(
+            recordCount: 1,
+            transcriptShape: "attributed"
+        ))
+        #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
+        #expect(try inbox.pendingItems().isEmpty)
     }
 }
 

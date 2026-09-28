@@ -1,7 +1,13 @@
 import CryptoKit
 import Foundation
 
-/// Identity of the conversation **as the export source expresses it**.
+/// Opaque storage bucket for one archive source.
+///
+/// When the export carries a source-authored conversation identifier, the key
+/// is derived from that evidence. Real WeChat merged-forward exports may carry
+/// no conversation identifier at all; in that case the importer uses an
+/// anonymous import-scoped key derived from the parsed transcript. That fallback
+/// does **not** assert that two different exports came from the same chat.
 ///
 /// This is deliberately not a `conversations.id`. Whether an archive came from
 /// the same WeChat conversation as something the visual path captured is an

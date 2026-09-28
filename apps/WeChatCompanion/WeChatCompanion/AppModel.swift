@@ -64,6 +64,7 @@ final class AppModel {
     /// still finish after capture is paused, and Chats must show that result.
     @ObservationIgnored private var extractionPollingTask: Task<Void, Never>?
     @ObservationIgnored private var isConsumingShareInbox = false
+    @ObservationIgnored private var shareInboxObserver: NSObjectProtocol?
     @ObservationIgnored private var didBootstrap = false
 
     init(
@@ -292,14 +293,8 @@ final class AppModel {
         await refreshCaptureLedger()
     }
 
-    func importWeChatArchive(
-        from url: URL,
-        suggestedConversationName: String? = nil
-    ) async {
-        _ = await performArchiveImport(
-            from: url,
-            suggestedConversationName: suggestedConversationName
-        )
+    func importWeChatArchive(from url: URL) async {
+        _ = await performArchiveImport(from: url)
     }
 
     func consumePendingShareArchives() async {
@@ -317,19 +312,13 @@ final class AppModel {
         selectedDestination = .chats
 
         for item in items {
-            let terminal = await performArchiveImport(
-                from: item.archiveURL,
-                suggestedConversationName: item.suggestedConversationName
-            )
+            let terminal = await performArchiveImport(from: item.archiveURL)
             guard terminal else { return }
             shareInbox.remove(item)
         }
     }
 
-    private func performArchiveImport(
-        from url: URL,
-        suggestedConversationName: String?
-    ) async -> Bool {
+    private func performArchiveImport(from url: URL) async -> Bool {
         guard allowsLocalPersistence else {
             archiveImportStatus = .localPersistenceConsentRequired
             return false
@@ -342,10 +331,7 @@ final class AppModel {
         archiveImportStatus = .importing
         do {
             let outcome = try await WeChatArchiveImportService(history: messageHistory)
-                .importArchive(
-                    contentsOf: url,
-                    suggestedConversationName: suggestedConversationName
-                )
+                .importArchive(contentsOf: url)
             switch outcome.persistence {
             case .inserted:
                 archiveImportStatus = .imported(
@@ -362,9 +348,6 @@ final class AppModel {
             return false
         } catch ArchivePersistenceError.localStoreUnavailable {
             archiveImportStatus = .localStoreUnavailable
-            return false
-        } catch WeChatArchiveImportError.conversationIdentityUnavailable {
-            archiveImportStatus = .conversationIdentityUnavailable
             return false
         } catch {
             archiveImportStatus = .invalidArchive
@@ -421,6 +404,22 @@ final class AppModel {
         captureMetrics.state == .needsWindowSelection || captureMetrics.state == .selectionLost
     }
 
+    private func startShareInboxObservation() {
+        guard shareInbox != nil,
+              shareInboxObserver == nil,
+              !RuntimeEnvironment.isUnderTestHost else { return }
+
+        shareInboxObserver = DistributedNotificationCenter.default().addObserver(
+            forName: WeChatShareInboxSignal.didChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                await self?.consumePendingShareArchives()
+            }
+        }
+    }
+
     func bootstrap(autoRunDiagnostics: Bool, runObserverValidation: Bool) async {
         guard !didBootstrap else { return }
         didBootstrap = true
@@ -431,6 +430,7 @@ final class AppModel {
         await messageHistory.setRetention(retentionPolicy)
         await messageHistory.setEnabled(allowsLocalPersistence)
         await applyExtractionConfiguration()
+        startShareInboxObservation()
         await consumePendingShareArchives()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()
@@ -769,7 +769,6 @@ enum ArchiveImportStatus: Equatable {
     case alreadyImported
     case localPersistenceConsentRequired
     case localStoreUnavailable
-    case conversationIdentityUnavailable
     case invalidArchive
 
     var message: String {
@@ -786,8 +785,6 @@ enum ArchiveImportStatus: Equatable {
             "Local message storage is off. Enable it in Settings before importing."
         case .localStoreUnavailable:
             "Local history is unavailable. The archive was not imported."
-        case .conversationIdentityUnavailable:
-            "The archive is valid, but its conversation identity could not be established."
         case .invalidArchive:
             "The file could not be imported as a supported WeChat archive."
         }
