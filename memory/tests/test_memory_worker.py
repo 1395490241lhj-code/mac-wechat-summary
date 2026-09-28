@@ -118,6 +118,9 @@ def test_paths_answers_without_consent_and_without_an_absolute_path():
     ({"op": "summary_input", "message_source": "visual"}, "invalid_request"),
     ({"op": "summary_input", "message_source": "visual", "start": 2, "end": 1}, "invalid_request"),
     ({"op": "summary_input", "message_source": "carrier-pigeon", "start": 1, "end": 2}, "invalid_request"),
+    ({"op": "reminder_candidates", "message_source": "visual"}, "invalid_request"),
+    ({"op": "reminder_candidates", "message_source": "visual", "start": 2, "end": 1}, "invalid_request"),
+    ({"op": "reminder_candidates", "message_source": "carrier-pigeon", "start": 1, "end": 2}, "invalid_request"),
 ])
 def test_an_unusable_request_is_refused_with_exit_two(request_body, state):
     reply, code = run(request_body)
@@ -137,7 +140,9 @@ def test_an_oversized_request_is_refused_before_being_parsed():
 
 
 def test_there_is_no_operation_that_deletes_or_runs_arbitrary_commands():
-    assert worker.OPERATIONS == {"sync", "status", "paths", "summary_input"}
+    assert worker.OPERATIONS == {
+        "sync", "status", "paths", "summary_input", "reminder_candidates",
+    }
 
 
 # --- consent --------------------------------------------------------------------
@@ -247,6 +252,103 @@ def test_summary_input_does_not_turn_not_observed_into_empty(tmp_path, synthetic
     assert reply["coverage"]["trustworthy_empty"] is False
     assert reply["coverage"]["status"] != "complete"
 
+
+
+
+def test_reminder_candidates_require_explicit_action_language(tmp_path, monkeypatch):
+    store = paths.canonical_store_path(tmp_path)
+    source = FakeSource([
+        visual_message(1, 7, "明天开会"),
+        visual_message(2, 7, "麻烦明天确认一下报价"),
+        visual_message(3, 7, "好的"),
+        visual_message(4, 7, "我会明天跟进这个事情"),
+    ])
+    monkeypatch.setattr(worker, "build_selected_source", lambda: source)
+    run({"op": "sync", "store_path": str(store)})
+
+    reply, code = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_699_999_000.0,
+        "end": 1_700_001_000.0,
+        "message_limit": 200,
+        "candidate_limit": 50,
+    })
+
+    assert (reply["ok"], code) == (True, 0)
+    assert reply["source"] == SOURCE_VISUAL
+    assert reply["counts"]["scanned_messages"] == 4
+    assert reply["counts"]["returned_candidates"] == 2
+    texts = [item["text"] for item in reply["candidates"]]
+    assert "明天开会" not in texts
+    assert "麻烦明天确认一下报价" in texts
+    assert "我会明天跟进这个事情" in texts
+
+    request_candidate = next(
+        item for item in reply["candidates"]
+        if item["text"] == "麻烦明天确认一下报价"
+    )
+    assert "explicit_request" in request_candidate["reasons"]
+    assert "explicit_follow_up" in request_candidate["reasons"]
+    assert "time_reference" in request_candidate["reasons"]
+
+    commitment = next(
+        item for item in reply["candidates"]
+        if item["text"] == "我会明天跟进这个事情"
+    )
+    assert "explicit_commitment" in commitment["reasons"]
+    assert "time_reference" in commitment["reasons"]
+
+    blob = json.dumps(reply, ensure_ascii=False)
+    assert "canonical_message_id" not in blob
+    assert "canonical_conversation_id" not in blob
+    assert str(tmp_path) not in blob
+
+
+def test_reminder_candidates_are_bounded_and_keep_coverage(tmp_path, monkeypatch):
+    store = paths.canonical_store_path(tmp_path)
+    source = FakeSource([
+        visual_message(1, 7, "请确认A"),
+        visual_message(2, 7, "请确认B"),
+        visual_message(3, 7, "请确认C"),
+    ])
+    monkeypatch.setattr(worker, "build_selected_source", lambda: source)
+    run({"op": "sync", "store_path": str(store)})
+
+    reply, code = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_699_999_000.0,
+        "end": 1_700_001_000.0,
+        "candidate_limit": 1,
+    })
+
+    assert (reply["ok"], code) == (True, 0)
+    assert reply["counts"]["returned_candidates"] == 1
+    assert reply["candidates"][0]["text"] == "请确认C"
+    assert reply["truncated"] is True
+    assert "coverage" in reply
+    assert "trustworthy_empty" in reply["coverage"]
+
+
+def test_reminder_candidates_do_not_turn_not_observed_into_nothing_to_do(tmp_path, synthetic):
+    store = paths.canonical_store_path(tmp_path)
+    run({"op": "sync", "store_path": str(store)})
+
+    reply, code = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_800_000_000.0,
+        "end": 1_800_003_600.0,
+    })
+
+    assert (reply["ok"], code) == (True, 0)
+    assert reply["candidates"] == []
+    assert reply["coverage"]["trustworthy_empty"] is False
+    assert reply["coverage"]["status"] != "complete"
 
 def test_freshness_advances_and_keeps_its_parts_distinct(tmp_path, synthetic):
     store = paths.canonical_store_path(tmp_path)
@@ -412,7 +514,7 @@ def test_the_frozen_worker_is_self_contained_and_syncs_end_to_end(tmp_path):
         " sequence INTEGER, sender TEXT, ownership TEXT, visible_time TEXT, text TEXT,"
         " kind TEXT, confidence REAL, first_observed_at REAL);"
         "INSERT INTO conversations VALUES (1, '项目组', 1.0, 2.0);"
-        "INSERT INTO messages VALUES (1, 1, 1, '林晓', 'other', '今天', '明天开会',"
+        "INSERT INTO messages VALUES (1, 1, 1, '林晓', 'other', '今天', '麻烦明天确认一下报价',"
         " 'text', 0.9, 2.0);")
     connection.commit(); connection.close()
 
@@ -450,6 +552,26 @@ def test_the_frozen_worker_is_self_contained_and_syncs_end_to_end(tmp_path):
     assert summary["conversations"][0]["label"] == "项目组"
     assert summary["messages"][0]["timestamp_kind"] == "first_observed"
     assert str(tmp_path) not in json.dumps(summary)
+
+    reminders, reminder_code = invoke(
+        [str(FROZEN)],
+        {
+            "op": "reminder_candidates",
+            "store_path": str(store),
+            "message_source": SOURCE_VISUAL,
+            "start": 1.0,
+            "end": 3.0,
+            "message_limit": 200,
+            "candidate_limit": 50,
+        },
+        env,
+    )
+    assert (reminders["ok"], reminder_code) == (True, 0), reminders
+    assert reminders["counts"]["returned_candidates"] == 1
+    assert reminders["conversations"][0]["label"] == "项目组"
+    assert "explicit_request" in reminders["candidates"][0]["reasons"]
+    assert reminders["candidates"][0]["timestamp_kind"] == "first_observed"
+    assert str(tmp_path) not in json.dumps(reminders)
 
 
 @pytest.mark.skipif(not FROZEN.exists(),
@@ -501,7 +623,7 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
         INSERT INTO archive_imports VALUES (1, 1, 'attributed', 1000.0);
         INSERT INTO archive_imports VALUES (2, 2, 'unattributed', 2000.0);
         INSERT INTO archive_attributed_records
-            VALUES (1, 0, '林晓', 100.0, '昨天 10:00', '归档消息');
+            VALUES (1, 0, '林晓', 100.0, '昨天 10:00', '麻烦确认归档报价');
         INSERT INTO archive_unattributed_records
             VALUES (2, 0, '不应进入 Memory');
         """
@@ -552,6 +674,24 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert summary["conversations"][0]["label"] == "Imported archive export"
     assert summary["messages"][0]["timestamp_kind"] == "source_created"
     assert "不应进入 Memory" not in json.dumps(summary, ensure_ascii=False)
+
+    reminders, reminder_code = invoke(
+        [str(FROZEN)],
+        {
+            "op": "reminder_candidates",
+            "store_path": str(store),
+            "message_source": SOURCE_ARCHIVE,
+            "start": 50.0,
+            "end": 150.0,
+        },
+        env,
+    )
+    assert (reminders["ok"], reminder_code) == (True, 0), reminders
+    assert reminders["source"] == SOURCE_ARCHIVE
+    assert reminders["counts"]["returned_candidates"] == 1
+    assert reminders["conversations"][0]["label"] == "Imported archive export"
+    assert reminders["candidates"][0]["timestamp_kind"] == "source_created"
+    assert "不应进入 Memory" not in json.dumps(reminders, ensure_ascii=False)
 
 
 # --- canonical activation (M2.2e) --------------------------------------------

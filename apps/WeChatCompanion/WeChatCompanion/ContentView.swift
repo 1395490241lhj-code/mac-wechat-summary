@@ -21,6 +21,8 @@ struct ContentView: View {
                 ChatsView(model: model)
             case .dailySummary:
                 DailySummaryView(model: model)
+            case .reminders:
+                RemindersView(model: model)
             case .settings:
                 SettingsView(model: model)
             case .diagnostics:
@@ -2000,6 +2002,454 @@ private struct DailySummaryConversationSection: View {
                 }
                 .padding(.vertical, 4)
             }
+        }
+    }
+}
+
+
+
+private struct RemindersView: View {
+    @Bindable var model: AppModel
+    @State private var candidateToSave: FollowUpCandidate?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Reminders")
+                        .font(.largeTitle.bold())
+                    Text("Local follow-ups grounded in Memory evidence. No due date is inferred and no notification is scheduled in this phase.")
+                        .foregroundStyle(.secondary)
+                }
+
+                savedFollowUps
+
+                GroupBox("Find Follow-Up Candidates") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("Source")
+                            Spacer()
+                            Menu(model.followUpSource.label) {
+                                ForEach(MemorySource.appSelectable, id: \.rawValue) { source in
+                                    Button {
+                                        model.setFollowUpSource(source)
+                                    } label: {
+                                        if source == model.followUpSource {
+                                            Label(source.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(source.label)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(model.followUpPhase.isRunning)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text("Window")
+                            Spacer()
+                            Menu(model.followUpWindow.label) {
+                                ForEach(FollowUpWindow.allCases) { window in
+                                    Button {
+                                        model.setFollowUpWindow(window)
+                                    } label: {
+                                        if window == model.followUpWindow {
+                                            Label(window.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(window.label)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(model.followUpPhase.isRunning)
+                        }
+
+                        Divider()
+
+                        HStack {
+                            Text("Scans already-synced Memory only. It never syncs Memory automatically.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(model.followUpSnapshot == nil ? "Scan Candidates" : "Scan Again") {
+                                Task { await model.scanFollowUps() }
+                            }
+                            .disabled(!model.canScanFollowUps)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+
+                if !model.allowsLocalPersistence {
+                    ContentUnavailableView(
+                        "Local Storage Is Off",
+                        systemImage: "externaldrive.badge.xmark",
+                        description: Text("Enable local message storage in Settings before Reminders can read Memory or save follow-ups.")
+                    )
+                } else {
+                    candidateState
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 920, alignment: .leading)
+        }
+        .navigationTitle("Reminders")
+        .task {
+            await model.refreshSavedFollowUps()
+        }
+        .confirmationDialog(
+            "Save this follow-up locally?",
+            isPresented: Binding(
+                get: { candidateToSave != nil },
+                set: { if !$0 { candidateToSave = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let candidateToSave {
+                Button("Save Follow-Up") {
+                    let id = candidateToSave.id
+                    self.candidateToSave = nil
+                    Task { await model.saveFollowUpCandidate(id) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                candidateToSave = nil
+            }
+        } message: {
+            Text("This saves the selected evidence as a local follow-up. It does not create a due date, notification, or system reminder.")
+        }
+    }
+
+    @ViewBuilder
+    private var savedFollowUps: some View {
+        GroupBox("Saved Follow-Ups") {
+            VStack(alignment: .leading, spacing: 12) {
+                if let error = model.reminderStoreError {
+                    Label(reminderStoreMessage(error), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.secondary)
+                } else if model.savedFollowUps.isEmpty {
+                    Text("No confirmed follow-ups yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.savedFollowUps) { reminder in
+                        SavedFollowUpRow(reminder: reminder, model: model)
+                        if reminder.id != model.savedFollowUps.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private var candidateState: some View {
+        switch model.followUpPhase {
+        case .idle:
+            ContentUnavailableView(
+                "Ready to Scan",
+                systemImage: "checklist",
+                description: Text("The conservative local rules look only for explicit requests, commitments, follow-up actions, and action questions.")
+            )
+        case .running:
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Scanning Memory evidence…")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+        case .failed(let failure):
+            ContentUnavailableView(
+                "Follow-Up Candidates Unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text(failure.message)
+            )
+        case .ready:
+            if let snapshot = model.followUpSnapshot {
+                FollowUpSnapshotView(
+                    snapshot: snapshot,
+                    candidateToSave: $candidateToSave
+                )
+            }
+        }
+    }
+
+    private func reminderStoreMessage(_ error: ReminderStoreError) -> String {
+        switch error {
+        case .unsupportedVersion:
+            "The saved follow-up file was written by an unsupported version and was left untouched."
+        case .malformed:
+            "The saved follow-up file could not be read and was left untouched."
+        case .unavailable:
+            "Saved follow-ups are temporarily unavailable."
+        }
+    }
+}
+
+private struct SavedFollowUpRow: View {
+    let reminder: SavedFollowUp
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(
+                    reminder.status == .completed ? "Completed" : "Pending",
+                    systemImage: reminder.status == .completed ? "checkmark.circle.fill" : "circle"
+                )
+                .font(.caption.weight(.semibold))
+                Spacer()
+                Text(reminder.savedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(reminder.text)
+                .strikethrough(reminder.status == .completed)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(provenanceText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button(reminder.status == .completed ? "Reopen" : "Mark Done") {
+                    Task {
+                        await model.setSavedFollowUpStatus(
+                            reminder.id,
+                            status: reminder.status == .completed ? .pending : .completed
+                        )
+                    }
+                }
+                Button("Delete", role: .destructive) {
+                    Task { await model.deleteSavedFollowUp(reminder.id) }
+                }
+                Spacer()
+                Text("No due date · no notification")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var provenanceText: String {
+        let sender = reminder.sender ?? "Unknown sender"
+        return "\(reminder.source.label) · \(reminder.conversationLabel) · \(sender) · "
+            + reminder.evidenceTimestamp.formatted(date: .abbreviated, time: .shortened)
+            + " · Coverage: "
+            + reminder.coverageStatus.replacingOccurrences(of: "_", with: " ").capitalized
+            + " · Scan: "
+            + reminder.scanWindowStart.formatted(date: .abbreviated, time: .shortened)
+            + " – "
+            + reminder.scanWindowEnd.formatted(date: .abbreviated, time: .shortened)
+            + " · Timestamp: "
+            + reminder.evidenceTimestampKind.replacingOccurrences(of: "_", with: " ")
+    }
+}
+
+private struct FollowUpSnapshotView: View {
+    let snapshot: FollowUpCandidateSnapshot
+    @Binding var candidateToSave: FollowUpCandidate?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            GroupBox("Evidence Status") {
+                VStack(spacing: 0) {
+                    summaryRow("Source", snapshot.source.label)
+                    Divider()
+                    summaryRow("Window", windowText)
+                    Divider()
+                    summaryRow("Coverage", coverageLabel)
+                    Divider()
+                    summaryRow("Messages scanned", String(snapshot.scannedMessages))
+                    Divider()
+                    summaryRow("Candidates", String(snapshot.returnedCandidates))
+                    if let lastSync = snapshot.freshness?.lastSuccessfulSync {
+                        Divider()
+                        summaryRow(
+                            "Last Memory sync",
+                            lastSync.formatted(date: .abbreviated, time: .shortened)
+                        )
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
+            if snapshot.truncated || snapshot.textTruncatedCount > 0 || !snapshot.coverage.caveats.isEmpty {
+                GroupBox("Caveats") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if snapshot.truncated {
+                            Label(
+                                "The scan is bounded to the newest 200 messages and at most 50 candidates.",
+                                systemImage: "ellipsis.circle"
+                            )
+                        }
+                        if snapshot.textTruncatedCount > 0 {
+                            Label(
+                                "\(snapshot.textTruncatedCount) long candidate(s) were clipped and cannot be saved in this MVP.",
+                                systemImage: "text.badge.ellipsis"
+                            )
+                        }
+                        ForEach(snapshot.coverage.caveats, id: \.self) { caveat in
+                            Label(caveat, systemImage: "info.circle")
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+                }
+            }
+
+            candidates
+        }
+    }
+
+    @ViewBuilder
+    private var candidates: some View {
+        if snapshot.candidates.isEmpty {
+            if snapshot.coverage.trustworthyEmpty {
+                ContentUnavailableView(
+                    "No Explicit Follow-Up Candidates",
+                    systemImage: "checkmark.circle",
+                    description: Text("Memory reports complete coverage for this window, but no stored message matched the conservative explicit request/commitment rules.")
+                )
+            } else {
+                ContentUnavailableView(
+                    "Insufficient Stored Evidence",
+                    systemImage: "questionmark.circle",
+                    description: Text("Coverage is incomplete, so an empty candidate list cannot be interpreted as “nothing needs follow-up.”")
+                )
+            }
+        } else {
+            GroupBox("Candidate Follow-Ups") {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(snapshot.candidates) { candidate in
+                        FollowUpCandidateRow(
+                            candidate: candidate,
+                            conversationLabel: conversationLabel(for: candidate),
+                            coverageStatus: snapshot.coverage.status,
+                            scanWindowStart: snapshot.start,
+                            scanWindowEnd: snapshot.end,
+                            save: { candidateToSave = candidate }
+                        )
+                        if candidate.id != snapshot.candidates.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+    }
+
+    private func conversationLabel(for candidate: FollowUpCandidate) -> String {
+        snapshot.conversations.first(where: { $0.id == candidate.conversationIndex })?.label
+            ?? "Conversation"
+    }
+
+    private var coverageLabel: String {
+        switch snapshot.coverage.status {
+        case "complete": "Complete"
+        case "partial": "Partial"
+        case "unavailable": "Unavailable"
+        case "not_observed": "Not observed"
+        default: snapshot.coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    private var windowText: String {
+        snapshot.start.formatted(date: .abbreviated, time: .shortened)
+            + " – "
+            + snapshot.end.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func summaryRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct FollowUpCandidateRow: View {
+    let candidate: FollowUpCandidate
+    let conversationLabel: String
+    let coverageStatus: String
+    let scanWindowStart: Date
+    let scanWindowEnd: Date
+    let save: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(conversationLabel)
+                    .font(.headline)
+                Spacer()
+                Text(candidate.timestamp.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(candidate.sender ?? "Unknown sender")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            Text(reasonText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(candidateProvenanceText)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            Text(candidate.text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack {
+                if candidate.textTruncated {
+                    Label("Clipped evidence cannot be saved", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Save Follow-Up", action: save)
+                    .disabled(candidate.textTruncated)
+            }
+        }
+        .padding(.vertical, 10)
+    }
+
+    private var reasonText: String {
+        candidate.reasons.map(reasonLabel).joined(separator: " · ")
+    }
+
+    private var candidateProvenanceText: String {
+        "Coverage: \(coverageStatus.replacingOccurrences(of: "_", with: " ").capitalized)"
+            + " · Scan: "
+            + scanWindowStart.formatted(date: .abbreviated, time: .shortened)
+            + " – "
+            + scanWindowEnd.formatted(date: .abbreviated, time: .shortened)
+            + " · Timestamp: "
+            + candidate.timestampKind.replacingOccurrences(of: "_", with: " ")
+    }
+
+    private func reasonLabel(_ reason: String) -> String {
+        switch reason {
+        case "explicit_request": "Explicit request"
+        case "explicit_follow_up": "Follow-up action"
+        case "explicit_commitment": "Explicit commitment"
+        case "action_question": "Action question"
+        case "time_reference": "Time reference (not a due date)"
+        default: reason.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
 }

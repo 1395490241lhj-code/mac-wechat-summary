@@ -84,6 +84,31 @@ private let dailySummaryReply = """
                "text_truncated": false}]}
 """
 
+
+
+private let followUpReply = """
+{"ok": true, "op": "reminder_candidates", "state": "ready", "source": "archive",
+ "window": {"start": 1700000000.0, "end": 1700003600.0},
+ "counts": {"scanned_messages": 4, "returned_candidates": 1,
+            "returned_conversations": 1, "text_truncated": 0},
+ "truncated": false,
+ "coverage": {"status": "partial", "trustworthy_empty": false,
+              "required_sources": ["archive"], "supplemental_sources": [],
+              "complete_sources": [], "per_source": {}, "caveats": ["archive:partial"]},
+ "freshness": {"generated_at": 1700004000.0, "participating_sources": ["archive"],
+   "sources": {"archive": {"source": "archive", "runs_total": 1,
+     "last_attempted_at": 1700000000.0, "last_attempt_state": "succeeded",
+     "last_attempt_failure_state": null, "last_succeeded_at": 1700000000.0,
+     "observed_through": 1700003000.0, "complete_through": null,
+     "latest_message_at": 1700002000.0, "latest_message_timestamp_kind": "source_created",
+     "stored_messages": 4}}},
+ "conversations": [{"index": 0, "label": "Imported archive export"}],
+ "candidates": [{"ordinal": 0, "conversation_index": 0, "source": "archive",
+                 "timestamp": 1700001200.0, "timestamp_kind": "source_created",
+                 "sender": "A", "text": "麻烦明天确认一下报价", "text_truncated": false,
+                 "reasons": ["explicit_request", "explicit_follow_up", "time_reference"]}]}
+"""
+
 struct PackagedMemorySyncRunnerTests {
     // MARK: - Resolution
 
@@ -98,6 +123,8 @@ struct PackagedMemorySyncRunnerTests {
         #expect(PackagedMemorySyncRunner.bundled() == nil)
         #expect(AppModel.defaultMemorySyncRunner() is UnavailableMemorySyncRunner)
         #expect(AppModel.defaultDailySummaryRunner() is UnavailableDailySummaryRunner)
+        #expect(AppModel.defaultFollowUpRunner() is UnavailableFollowUpRunner)
+        #expect(AppModel.defaultReminderStore() is VolatileReminderStore)
         // Proven without reading the user's store: only its absence-or-not is
         // observed, and nothing here opens or creates it.
         #expect(!FileManager.default.fileExists(
@@ -343,6 +370,111 @@ struct PackagedMemorySyncRunnerTests {
             messageLimit: 200
         )
 
+        #expect(outcome == .failed(.memoryUnavailable(state: "memory_store_missing")))
+    }
+
+
+
+    @Test
+    func followUpRequestPinsScopeAndMapsCandidates() async throws {
+        let stub = try StubWorker(replying: followUpReply)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let messages = store.deletingLastPathComponent().appendingPathComponent("messages.sqlite")
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: messages
+        )
+
+        let outcome = await runner.scan(
+            source: .archive,
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200,
+            candidateLimit: 50
+        )
+
+        guard case .ready(let snapshot) = outcome else {
+            Issue.record("expected Follow-Up success, got \(outcome)")
+            return
+        }
+        #expect(snapshot.source == .archive)
+        #expect(snapshot.coverage.status == "partial")
+        #expect(snapshot.coverage.trustworthyEmpty == false)
+        #expect(snapshot.scannedMessages == 4)
+        #expect(snapshot.returnedCandidates == 1)
+        #expect(snapshot.conversations.first?.label == "Imported archive export")
+        #expect(snapshot.candidates.first?.timestampKind == "source_created")
+        #expect(snapshot.candidates.first?.reasons == [
+            "explicit_request", "explicit_follow_up", "time_reference"
+        ])
+        #expect(snapshot.freshness?.source == .archive)
+
+        let sent = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: stub.requestDump)
+        ) as! [String: Any]
+        #expect(sent["op"] as? String == "reminder_candidates")
+        #expect(sent["message_source"] as? String == "archive")
+        #expect(sent["start"] as? Double == 1_700_000_000)
+        #expect(sent["end"] as? Double == 1_700_003_600)
+        #expect(sent["message_limit"] as? Int == 200)
+        #expect(sent["candidate_limit"] as? Int == 50)
+        #expect(sent["store_path"] as? String == store.path)
+        #expect(sent["message_store_path"] as? String == messages.path)
+    }
+
+    @Test
+    func followUpFailsClosedWhenWorkerReturnsADifferentSourceOrWindow() async throws {
+        for body in [
+            followUpReply.replacingOccurrences(
+                of: #""source": "archive""#,
+                with: #""source": "visual""#
+            ),
+            followUpReply.replacingOccurrences(
+                of: #""end": 1700003600.0"#,
+                with: #""end": 1700003601.0"#
+            ),
+        ] {
+            let stub = try StubWorker(replying: body)
+            defer { stub.cleanup() }
+            let runner = PackagedMemorySyncRunner(
+                workerURL: stub.executable,
+                storeURL: temporaryStore(),
+                messageStoreURL: temporaryStore()
+            )
+
+            let outcome = await runner.scan(
+                source: .archive,
+                start: Date(timeIntervalSince1970: 1_700_000_000),
+                end: Date(timeIntervalSince1970: 1_700_003_600),
+                messageLimit: 200,
+                candidateLimit: 50
+            )
+            #expect(outcome == .failed(.workerFailed(state: "worker_response_malformed")))
+        }
+    }
+
+    @Test
+    func followUpMapsMissingMemoryToAnExplicitReadFailure() async throws {
+        let stub = try StubWorker(
+            replying: #"{"ok": false, "op": "reminder_candidates", "state": "memory_store_missing", "detail": "x"}"#,
+            exitCode: 1
+        )
+        defer { stub.cleanup() }
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: temporaryStore(),
+            messageStoreURL: temporaryStore()
+        )
+
+        let outcome = await runner.scan(
+            source: .visual,
+            start: Date(timeIntervalSince1970: 1),
+            end: Date(timeIntervalSince1970: 2),
+            messageLimit: 200,
+            candidateLimit: 50
+        )
         #expect(outcome == .failed(.memoryUnavailable(state: "memory_store_missing")))
     }
 

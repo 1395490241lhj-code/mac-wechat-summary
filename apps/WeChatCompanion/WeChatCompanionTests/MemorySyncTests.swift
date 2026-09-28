@@ -95,6 +95,85 @@ private func dailySnapshot(source: MemorySource = .archive) -> DailySummarySnaps
     )
 }
 
+
+
+private final class FakeFollowUpRunner: FollowUpCandidateRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        let source: MemorySource
+        let start: Date
+        let end: Date
+        let messageLimit: Int
+        let candidateLimit: Int
+    }
+
+    var outcomes: [FollowUpOutcome]
+    private(set) var calls: [Call] = []
+
+    init(outcomes: [FollowUpOutcome]) {
+        self.outcomes = outcomes
+    }
+
+    func scan(
+        source: MemorySource,
+        start: Date,
+        end: Date,
+        messageLimit: Int,
+        candidateLimit: Int
+    ) async -> FollowUpOutcome {
+        calls.append(.init(
+            source: source,
+            start: start,
+            end: end,
+            messageLimit: messageLimit,
+            candidateLimit: candidateLimit
+        ))
+        return outcomes.isEmpty ? .failed(.runnerUnavailable) : outcomes.removeFirst()
+    }
+}
+
+private func followUpSnapshot(
+    source: MemorySource = .archive,
+    textTruncated: Bool = false,
+    coverageStatus: String = "partial"
+) -> FollowUpCandidateSnapshot {
+    let start = Date(timeIntervalSince1970: 1_700_000_000)
+    let end = Date(timeIntervalSince1970: 1_700_003_600)
+    return FollowUpCandidateSnapshot(
+        source: source,
+        start: start,
+        end: end,
+        scannedMessages: 4,
+        returnedCandidates: 1,
+        textTruncatedCount: textTruncated ? 1 : 0,
+        truncated: false,
+        coverage: FollowUpCoverage(
+            status: coverageStatus,
+            trustworthyEmpty: coverageStatus == "complete",
+            caveats: coverageStatus == "complete" ? [] : ["archive:partial"]
+        ),
+        freshness: freshness(source: source, coverage: coverageStatus),
+        conversations: [
+            FollowUpConversation(
+                id: 0,
+                label: source == .archive ? "Imported archive export" : "Captured chat"
+            ),
+        ],
+        candidates: [
+            FollowUpCandidate(
+                id: 0,
+                conversationIndex: 0,
+                source: source,
+                timestamp: Date(timeIntervalSince1970: 1_700_001_200),
+                timestampKind: source == .archive ? "source_created" : "first_observed",
+                sender: "A",
+                text: "麻烦明天确认一下报价",
+                textTruncated: textTruncated,
+                reasons: ["explicit_request", "explicit_follow_up", "time_reference"]
+            ),
+        ]
+    )
+}
+
 private func makeDefaults() -> UserDefaults {
     let suite = "WeChatCompanionTests-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
@@ -335,6 +414,195 @@ struct MemorySyncTests {
         await model.setAllowsLocalPersistence(false)
         #expect(model.dailySummarySnapshot == nil)
         #expect(model.dailySummaryPhase == .idle)
+    }
+
+
+
+    @Test @MainActor
+    func followUpScanningRequiresConsentAndNeverReachesTheRunner() async {
+        let runner = FakeFollowUpRunner(outcomes: [.ready(followUpSnapshot())])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: FakeMemorySyncRunner(outcomes: []),
+            followUpCandidates: runner,
+            reminderStore: VolatileReminderStore()
+        )
+
+        await model.scanFollowUps()
+
+        #expect(model.followUpPhase == .failed(.consentWithheld))
+        #expect(model.followUpSnapshot == nil)
+        #expect(runner.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func followUpScanningIsBoundedIndependentAndNeverSyncsMemory() async {
+        let syncRunner = FakeMemorySyncRunner(outcomes: [])
+        let runner = FakeFollowUpRunner(outcomes: [.ready(followUpSnapshot(source: .archive))])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: syncRunner,
+            followUpCandidates: runner,
+            reminderStore: VolatileReminderStore()
+        )
+        await model.setAllowsLocalPersistence(true)
+        model.setFollowUpSource(.archive)
+        model.setFollowUpWindow(.last24Hours)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+        await model.scanFollowUps(now: now)
+
+        #expect(model.followUpPhase == .ready)
+        #expect(model.followUpSnapshot == followUpSnapshot(source: .archive))
+        #expect(syncRunner.syncCalls.isEmpty)
+        #expect(runner.calls == [
+            .init(
+                source: .archive,
+                start: now.addingTimeInterval(-24 * 60 * 60),
+                end: now,
+                messageLimit: 200,
+                candidateLimit: 50
+            ),
+        ])
+        model.setFollowUpSource(.database)
+        #expect(model.followUpSource == .archive)
+    }
+
+    @Test @MainActor
+    func savingAFollowUpPersistsEvidenceCoverageAndRequiresUnclippedEvidence() async {
+        let reminderStore = VolatileReminderStore()
+        let runner = FakeFollowUpRunner(outcomes: [
+            .ready(followUpSnapshot(source: .archive, coverageStatus: "partial")),
+            .ready(followUpSnapshot(source: .archive, textTruncated: true)),
+        ])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: FakeMemorySyncRunner(outcomes: []),
+            followUpCandidates: runner,
+            reminderStore: reminderStore
+        )
+        await model.setAllowsLocalPersistence(true)
+        model.setFollowUpSource(.archive)
+
+        await model.scanFollowUps(now: Date(timeIntervalSince1970: 1_800_000_000))
+        await model.saveFollowUpCandidate(0, now: Date(timeIntervalSince1970: 1_800_000_100))
+
+        #expect(model.savedFollowUps.count == 1)
+        let saved = try! #require(model.savedFollowUps.first)
+        #expect(saved.source == .archive)
+        #expect(saved.conversationLabel == "Imported archive export")
+        #expect(saved.evidenceTimestampKind == "source_created")
+        #expect(saved.scanWindowStart == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(saved.scanWindowEnd == Date(timeIntervalSince1970: 1_700_003_600))
+        #expect(saved.coverageStatus == "partial")
+        #expect(saved.coverageCaveats == ["archive:partial"])
+        #expect(saved.reasons.contains("time_reference"))
+        #expect(saved.status == .pending)
+
+        await model.scanFollowUps(now: Date(timeIntervalSince1970: 1_800_000_000))
+        await model.saveFollowUpCandidate(0)
+        #expect(model.savedFollowUps.count == 1)
+    }
+
+    @Test @MainActor
+    func savedFollowUpsCanBeCompletedReopenedDeletedAndSurviveConsentWithdrawal() async {
+        let reminderStore = VolatileReminderStore()
+        let runner = FakeFollowUpRunner(outcomes: [.ready(followUpSnapshot(source: .visual))])
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            consentDefaults: makeDefaults(),
+            memorySync: FakeMemorySyncRunner(outcomes: []),
+            followUpCandidates: runner,
+            reminderStore: reminderStore
+        )
+        await model.setAllowsLocalPersistence(true)
+        await model.scanFollowUps(now: Date(timeIntervalSince1970: 1_800_000_000))
+        await model.saveFollowUpCandidate(0)
+        let id = try! #require(model.savedFollowUps.first?.id)
+
+        await model.setSavedFollowUpStatus(id, status: .completed)
+        #expect(model.savedFollowUps.first?.status == .completed)
+        await model.setSavedFollowUpStatus(id, status: .pending)
+        #expect(model.savedFollowUps.first?.status == .pending)
+
+        await model.setAllowsLocalPersistence(false)
+        #expect(model.savedFollowUps.isEmpty)
+        await model.setAllowsLocalPersistence(true)
+        #expect(model.savedFollowUps.count == 1)
+
+        await model.deleteSavedFollowUp(id)
+        #expect(model.savedFollowUps.isEmpty)
+    }
+
+    @Test
+    func localReminderStoreIsAtomicPrivateVersionedAndIdempotent() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreTests-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("reminders.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = LocalReminderStore(url: url)
+        let reminder = SavedFollowUp(
+            id: UUID(),
+            source: .archive,
+            conversationLabel: "Imported archive export",
+            sender: "A",
+            evidenceTimestamp: Date(timeIntervalSince1970: 1_700_001_200),
+            evidenceTimestampKind: "source_created",
+            scanWindowStart: Date(timeIntervalSince1970: 1_700_000_000),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_700_003_600),
+            coverageStatus: "partial",
+            coverageCaveats: ["archive:partial"],
+            savedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            text: "麻烦明天确认一下报价",
+            reasons: ["explicit_request", "time_reference"],
+            status: .pending
+        )
+
+        #expect(try await store.load().isEmpty)
+        #expect(try await store.add(reminder).count == 1)
+        #expect(try await store.add(reminder).count == 1)
+        #expect(try await store.load() == [reminder])
+
+        let directoryMode = try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions] as? NSNumber
+        let fileMode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        #expect(directoryMode?.intValue == 0o700)
+        #expect(fileMode?.intValue == 0o600)
+
+        let raw = try Data(contentsOf: url)
+        let object = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
+        #expect(object?["version"] as? Int == 1)
+
+        let completed = try await store.setStatus(id: reminder.id, status: .completed)
+        #expect(completed.first?.status == .completed)
+        #expect(try await store.delete(id: reminder.id).isEmpty)
+    }
+
+    @Test
+    func localReminderStoreRefusesUnsupportedOrMalformedFilesWithoutRewritingThem() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreRefusal-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("reminders.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let unsupported = Data(#"{"version":99,"reminders":[]}"#.utf8)
+        try unsupported.write(to: url)
+        let store = LocalReminderStore(url: url)
+        await #expect(throws: ReminderStoreError.unsupportedVersion) {
+            _ = try await store.load()
+        }
+        #expect(try Data(contentsOf: url) == unsupported)
+
+        let malformed = Data("not json".utf8)
+        try malformed.write(to: url)
+        await #expect(throws: ReminderStoreError.malformed) {
+            _ = try await store.load()
+        }
+        #expect(try Data(contentsOf: url) == malformed)
     }
 
     @Test @MainActor

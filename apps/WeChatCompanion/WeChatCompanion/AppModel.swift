@@ -65,6 +65,8 @@ final class AppModel {
     @ObservationIgnored private let consentDefaults: UserDefaults
     @ObservationIgnored private let memorySync: any MemorySyncRunning
     @ObservationIgnored private let dailySummary: any DailySummaryRunning
+    @ObservationIgnored private let followUpCandidates: any FollowUpCandidateRunning
+    @ObservationIgnored private let reminderStore: any ReminderStoring
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     /// Independent of capture polling: an extraction already in flight can
     /// still finish after capture is paused, and Chats must show that result.
@@ -85,7 +87,9 @@ final class AppModel {
         geminiTransport: any GeminiTransporting = GeminiFrameExtractor.productionTransport,
         consentDefaults: UserDefaults = .standard,
         memorySync: any MemorySyncRunning = AppModel.defaultMemorySyncRunner(),
-        dailySummary: any DailySummaryRunning = AppModel.defaultDailySummaryRunner()
+        dailySummary: any DailySummaryRunning = AppModel.defaultDailySummaryRunner(),
+        followUpCandidates: any FollowUpCandidateRunning = AppModel.defaultFollowUpRunner(),
+        reminderStore: any ReminderStoring = AppModel.defaultReminderStore()
     ) {
         self.service = service
         self.store = store
@@ -99,6 +103,8 @@ final class AppModel {
         self.consentDefaults = consentDefaults
         self.memorySync = memorySync
         self.dailySummary = dailySummary
+        self.followUpCandidates = followUpCandidates
+        self.reminderStore = reminderStore
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
         )
@@ -229,6 +235,20 @@ final class AppModel {
         return PackagedMemorySyncRunner.bundled() ?? UnavailableDailySummaryRunner()
     }
 
+    static func defaultFollowUpRunner() -> any FollowUpCandidateRunning {
+        guard !PackagedMemorySyncRunner.isUnderTestHost else {
+            return UnavailableFollowUpRunner()
+        }
+        return PackagedMemorySyncRunner.bundled() ?? UnavailableFollowUpRunner()
+    }
+
+    static func defaultReminderStore() -> any ReminderStoring {
+        if RuntimeEnvironment.isUnderTestHost {
+            return VolatileReminderStore()
+        }
+        return LocalReminderStore.applicationSupport
+    }
+
 
     /// The app offers only sources it owns locally: visual capture and
     /// imported archive evidence. The external database reader remains an
@@ -340,6 +360,142 @@ final class AppModel {
     }
 
 
+
+    // MARK: - Reminders / follow-up
+
+    private(set) var followUpSource: MemorySource = .visual
+    private(set) var followUpWindow: FollowUpWindow = .today
+    private(set) var followUpPhase: FollowUpPhase = .idle
+    private(set) var followUpSnapshot: FollowUpCandidateSnapshot?
+    private(set) var savedFollowUps: [SavedFollowUp] = []
+    private(set) var reminderStoreError: ReminderStoreError?
+
+    var canScanFollowUps: Bool {
+        allowsLocalPersistence && !followUpPhase.isRunning
+    }
+
+    func setFollowUpSource(_ source: MemorySource) {
+        guard MemorySource.appSelectable.contains(source),
+              source != followUpSource,
+              !followUpPhase.isRunning else { return }
+        followUpSource = source
+        followUpSnapshot = nil
+        followUpPhase = .idle
+    }
+
+    func setFollowUpWindow(_ window: FollowUpWindow) {
+        guard window != followUpWindow,
+              !followUpPhase.isRunning else { return }
+        followUpWindow = window
+        followUpSnapshot = nil
+        followUpPhase = .idle
+    }
+
+    func scanFollowUps(now: Date = Date()) async {
+        guard allowsLocalPersistence else {
+            followUpSnapshot = nil
+            followUpPhase = .failed(.consentWithheld)
+            return
+        }
+        guard !followUpPhase.isRunning else { return }
+
+        let bounds = followUpWindow.bounds(now: now)
+        followUpPhase = .running
+        switch await followUpCandidates.scan(
+            source: followUpSource,
+            start: bounds.start,
+            end: bounds.end,
+            messageLimit: 200,
+            candidateLimit: 50
+        ) {
+        case .ready(let snapshot):
+            followUpSnapshot = snapshot
+            followUpPhase = .ready
+        case .failed(let failure):
+            followUpSnapshot = nil
+            followUpPhase = .failed(failure)
+        }
+    }
+
+    func refreshSavedFollowUps() async {
+        guard allowsLocalPersistence else {
+            savedFollowUps = []
+            reminderStoreError = nil
+            return
+        }
+        do {
+            savedFollowUps = try await reminderStore.load()
+            reminderStoreError = nil
+        } catch let error as ReminderStoreError {
+            savedFollowUps = []
+            reminderStoreError = error
+        } catch {
+            savedFollowUps = []
+            reminderStoreError = .unavailable
+        }
+    }
+
+
+    func saveFollowUpCandidate(_ candidateID: Int, now: Date = Date()) async {
+        guard allowsLocalPersistence,
+              let snapshot = followUpSnapshot,
+              let candidate = snapshot.candidates.first(where: { $0.id == candidateID }),
+              candidate.textTruncated == false,
+              let conversation = snapshot.conversations.first(
+                where: { $0.id == candidate.conversationIndex }
+              )
+        else { return }
+
+        let reminder = SavedFollowUp(
+            id: UUID(),
+            source: candidate.source,
+            conversationLabel: conversation.label,
+            sender: candidate.sender,
+            evidenceTimestamp: candidate.timestamp,
+            evidenceTimestampKind: candidate.timestampKind,
+            scanWindowStart: snapshot.start,
+            scanWindowEnd: snapshot.end,
+            coverageStatus: snapshot.coverage.status,
+            coverageCaveats: snapshot.coverage.caveats,
+            savedAt: now,
+            text: candidate.text,
+            reasons: candidate.reasons,
+            status: .pending
+        )
+        do {
+            savedFollowUps = try await reminderStore.add(reminder)
+            reminderStoreError = nil
+        } catch let error as ReminderStoreError {
+            reminderStoreError = error
+        } catch {
+            reminderStoreError = .unavailable
+        }
+    }
+
+    func setSavedFollowUpStatus(_ id: UUID, status: SavedFollowUpStatus) async {
+        guard allowsLocalPersistence else { return }
+        do {
+            savedFollowUps = try await reminderStore.setStatus(id: id, status: status)
+            reminderStoreError = nil
+        } catch let error as ReminderStoreError {
+            reminderStoreError = error
+        } catch {
+            reminderStoreError = .unavailable
+        }
+    }
+
+    func deleteSavedFollowUp(_ id: UUID) async {
+        guard allowsLocalPersistence else { return }
+        do {
+            savedFollowUps = try await reminderStore.delete(id: id)
+            reminderStoreError = nil
+        } catch let error as ReminderStoreError {
+            reminderStoreError = error
+        } catch {
+            reminderStoreError = .unavailable
+        }
+    }
+
     // MARK: - Local persistence settings
 
     /// Turning this on opens (and if needed creates) the local database.
@@ -357,6 +513,10 @@ final class AppModel {
             memorySyncPhase = .idle
             dailySummarySnapshot = nil
             dailySummaryPhase = .idle
+            followUpSnapshot = nil
+            followUpPhase = .idle
+            savedFollowUps = []
+            reminderStoreError = nil
         }
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
@@ -364,6 +524,7 @@ final class AppModel {
         await refreshArchiveEvidence()
         if isAllowed {
             await consumePendingShareArchives()
+            await refreshSavedFollowUps()
         }
     }
 
@@ -595,6 +756,7 @@ final class AppModel {
         startShareInboxObservation()
         await consumePendingShareArchives()
         await refreshArchiveEvidence()
+        await refreshSavedFollowUps()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()
         startExtractionPolling()

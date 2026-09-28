@@ -17,6 +17,9 @@ operation that is not in :data:`OPERATIONS`::
     {"op": "status",        "store_path": "<optional>"}
     {"op": "summary_input", "store_path": "<optional>", "message_source": "visual",
                             "start": 1700000000.0, "end": 1700086400.0, "message_limit": 200}
+    {"op": "reminder_candidates", "store_path": "<optional>", "message_source": "visual",
+                            "start": 1700000000.0, "end": 1700086400.0,
+                            "message_limit": 200, "candidate_limit": 50}
     {"op": "paths"}
 
     {"ok": true,  "op": "sync", "state": "synced", "counts": {...}, "freshness": {...}}
@@ -109,7 +112,9 @@ except ImportError:  # pragma: no cover - source checkout, run by path
 ALLOW_READ_ENV: str = "WECHAT_COMPANION_ALLOW_AGENT_READ"
 DB_PATH_ENV: str = "WECHAT_COMPANION_DB_PATH"
 
-OPERATIONS: frozenset[str] = frozenset({"sync", "status", "paths", "summary_input"})
+OPERATIONS: frozenset[str] = frozenset({
+    "sync", "status", "paths", "summary_input", "reminder_candidates",
+})
 MEMORY_SOURCE_NAMES: frozenset[str] = SOURCE_NAMES | frozenset({SOURCE_ARCHIVE})
 
 #: Largest request accepted. A request is a handful of fields; anything larger
@@ -120,6 +125,30 @@ MAX_CONVERSATION_LIMIT: int = 500
 MAX_MESSAGE_LIMIT: int = 2_000
 MAX_SUMMARY_MESSAGES: int = 200
 MAX_SUMMARY_TEXT_CHARS: int = 2_000
+MAX_FOLLOW_UP_CANDIDATES: int = 50
+
+FOLLOW_UP_REQUEST_MARKERS: tuple[str, ...] = (
+    "请", "麻烦", "能不能", "能否", "可以帮", "记得", "别忘",
+    "please", "can you", "could you", "would you", "need you to",
+)
+FOLLOW_UP_ACTION_MARKERS: tuple[str, ...] = (
+    "跟进", "确认", "回复", "发给我", "告诉我", "看一下", "查一下",
+    "处理一下", "安排一下", "更新一下", "联系一下", "回我",
+    "follow up", "let me know", "send me", "reply", "confirm", "check",
+)
+FOLLOW_UP_COMMITMENT_MARKERS: tuple[str, ...] = (
+    "我会", "我来", "我去", "我等下", "我稍后", "我明天",
+    "i'll", "i will", "let me", "i can",
+)
+FOLLOW_UP_QUESTION_MARKERS: tuple[str, ...] = (
+    "可以", "能", "能否", "是否可以", "can you", "could you", "would you", "will you",
+)
+FOLLOW_UP_TIME_MARKERS: tuple[str, ...] = (
+    "今天", "明天", "后天", "今晚", "上午", "下午", "晚上", "下周", "月底",
+    "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+    "today", "tomorrow", "tonight", "next week", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday",
+)
 
 EXIT_OK: int = 0
 EXIT_REFUSED: int = 1
@@ -169,6 +198,49 @@ def _summary_parameters(
         raise BadRequest("end must be greater than start.")
     limit = _limit(request, "message_limit", MAX_SUMMARY_MESSAGES, MAX_SUMMARY_MESSAGES)
     return source, start, end, limit
+
+
+
+
+def _follow_up_parameters(
+    request: dict[str, Any],
+) -> tuple[str, float, float, int, int]:
+    source = _summary_source(request)
+    start = _timestamp(request, "start")
+    end = _timestamp(request, "end")
+    if end <= start:
+        raise BadRequest("end must be greater than start.")
+    message_limit = _limit(
+        request, "message_limit", MAX_SUMMARY_MESSAGES, MAX_SUMMARY_MESSAGES
+    )
+    candidate_limit = _limit(
+        request, "candidate_limit", MAX_FOLLOW_UP_CANDIDATES, MAX_FOLLOW_UP_CANDIDATES
+    )
+    return source, start, end, message_limit, candidate_limit
+
+
+def _follow_up_reasons(text: str) -> list[str]:
+    normalized = text.casefold().strip()
+    if not normalized:
+        return []
+
+    reasons: list[str] = []
+    if any(marker in normalized for marker in FOLLOW_UP_REQUEST_MARKERS):
+        reasons.append("explicit_request")
+    if any(marker in normalized for marker in FOLLOW_UP_ACTION_MARKERS):
+        reasons.append("explicit_follow_up")
+    if any(marker in normalized for marker in FOLLOW_UP_COMMITMENT_MARKERS):
+        reasons.append("explicit_commitment")
+    if normalized.endswith(("?", "？")) and any(
+        marker in normalized for marker in FOLLOW_UP_QUESTION_MARKERS
+    ):
+        reasons.append("action_question")
+
+    # A time reference is not enough to make a candidate. It only annotates a
+    # message already selected for an explicit request/commitment/follow-up.
+    if reasons and any(marker in normalized for marker in FOLLOW_UP_TIME_MARKERS):
+        reasons.append("time_reference")
+    return reasons
 
 
 def _store_path(request: dict[str, Any]) -> str:
@@ -347,6 +419,95 @@ def _summary_input(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any
     }
 
 
+
+
+def _reminder_candidates(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
+    source, start, end, message_limit, candidate_limit = _follow_up_parameters(request)
+    service = MemoryQueryService(store)
+    result = service.recent_context(
+        since=start,
+        until=end,
+        limit=message_limit,
+        order="oldest",
+        source=source,
+    )
+
+    discovery = service.conversations(limit=MAX_CONVERSATION_LIMIT)
+    labels: dict[str, str | None] = {}
+    for conversation in discovery.items:
+        for observation in conversation.observations:
+            labels[observation.canonical_conversation_id] = observation.display_name
+
+    matched: list[tuple[Any, list[str]]] = []
+    for item in result.items:
+        text = item.text or ""
+        reasons = _follow_up_reasons(text)
+        if reasons:
+            matched.append((item, reasons))
+
+    candidate_truncated = len(matched) > candidate_limit
+    # recent_context(order="oldest") returns the newest bounded message set in
+    # chronological order. If candidate count is itself bounded, keep the most
+    # recent candidates, then preserve chronological display order.
+    selected = matched[-candidate_limit:]
+    conversation_indexes: dict[str, int] = {}
+    conversations: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    clipped_count = 0
+
+    for ordinal, (item, reasons) in enumerate(selected):
+        conversation_id = item.citation.canonical_conversation_id
+        if conversation_id not in conversation_indexes:
+            index = len(conversation_indexes)
+            conversation_indexes[conversation_id] = index
+            label = labels.get(conversation_id)
+            if not label:
+                label = (
+                    "Imported archive export"
+                    if source == SOURCE_ARCHIVE
+                    else "Captured conversation"
+                )
+            conversations.append({"index": index, "label": label})
+        index = conversation_indexes[conversation_id]
+
+        text = item.text or ""
+        text_was_clipped = len(text) > MAX_SUMMARY_TEXT_CHARS
+        if text_was_clipped:
+            text = text[:MAX_SUMMARY_TEXT_CHARS]
+            clipped_count += 1
+
+        candidates.append({
+            "ordinal": ordinal,
+            "conversation_index": index,
+            "source": source,
+            "timestamp": item.timestamp,
+            "timestamp_kind": item.citation.timestamp_kind,
+            "sender": item.sender,
+            "text": text,
+            "text_truncated": text_was_clipped,
+            "reasons": reasons,
+        })
+
+    return {
+        "ok": True,
+        "op": "reminder_candidates",
+        "state": "ready",
+        "source": source,
+        "window": {"start": start, "end": end},
+        "counts": {
+            "scanned_messages": len(result.items),
+            "returned_candidates": len(candidates),
+            "returned_conversations": len(conversations),
+            "text_truncated": clipped_count,
+        },
+        "truncated": bool(result.truncated or candidate_truncated),
+        "coverage": result.coverage.as_dict(),
+        "freshness": result.freshness.as_dict(),
+        "conversations": conversations,
+        "candidates": candidates,
+    }
+
+
 def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dict[str, Any], int]:
     """Runs one operation and returns its response and exit code."""
     op = request.get("op")
@@ -361,13 +522,15 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
 
     if op == "summary_input":
         _summary_parameters(request)
+    elif op == "reminder_candidates":
+        _follow_up_parameters(request)
 
     store_path = _store_path(request)
     decision = consent.resolve_consent(_activation(store_path), reader)
     if not decision.allowed:
         return _refusal(op, decision.state, decision.detail), EXIT_REFUSED
 
-    if op in {"status", "summary_input"}:
+    if op in {"status", "summary_input", "reminder_candidates"}:
         try:
             store = MemoryStore.open_read_only(decision)
         except MemoryStoreError as error:
@@ -385,7 +548,9 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
                     "freshness": fresh,
                 }, EXIT_OK
             try:
-                return _summary_input(store, request), EXIT_OK
+                if op == "summary_input":
+                    return _summary_input(store, request), EXIT_OK
+                return _reminder_candidates(store, request), EXIT_OK
             except MemoryStoreError as error:
                 return _refusal(op, error.state, error.detail), EXIT_REFUSED
         finally:

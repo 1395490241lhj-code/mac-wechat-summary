@@ -27,7 +27,7 @@ private final class Expiry: @unchecked Sendable {
     var fired = false
 }
 
-struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning {
+struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowUpCandidateRunning {
     /// Where the worker sits inside the bundle. It is a nested *bundle*, not a
     /// loose directory: codesign refuses to seal an app that contains an
     /// unsigned tree of plain files, and a helper .app carries its own seal.
@@ -232,6 +232,107 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning {
         }
     }
 
+
+    // MARK: - Follow-up candidates
+
+    func scan(
+        source: MemorySource,
+        start: Date,
+        end: Date,
+        messageLimit: Int,
+        candidateLimit: Int
+    ) async -> FollowUpOutcome {
+        var request = baseRequest(op: "reminder_candidates")
+        request["message_source"] = source.rawValue
+        request["start"] = start.timeIntervalSince1970
+        request["end"] = end.timeIntervalSince1970
+        request["message_limit"] = messageLimit
+        request["candidate_limit"] = candidateLimit
+
+        switch invoke(request) {
+        case .failure(let failure):
+            return .failed(followUpFailure(fromLocal: failure))
+        case .success(let reply):
+            guard reply["ok"] as? Bool == true else {
+                return .failed(followUpFailure(from: reply))
+            }
+            guard let replySourceRaw = reply["source"] as? String,
+                  let replySource = MemorySource(rawValue: replySourceRaw),
+                  replySource == source,
+                  let window = reply["window"] as? [String: Any],
+                  let startSeconds = window["start"] as? Double,
+                  let endSeconds = window["end"] as? Double,
+                  abs(startSeconds - start.timeIntervalSince1970) < 0.001,
+                  abs(endSeconds - end.timeIntervalSince1970) < 0.001,
+                  let counts = reply["counts"] as? [String: Any],
+                  let coverageRoot = reply["coverage"] as? [String: Any],
+                  let coverageStatus = coverageRoot["status"] as? String,
+                  let trustworthyEmpty = coverageRoot["trustworthy_empty"] as? Bool,
+                  let caveats = coverageRoot["caveats"] as? [String],
+                  let conversationRows = reply["conversations"] as? [[String: Any]],
+                  let candidateRows = reply["candidates"] as? [[String: Any]]
+            else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let conversations = conversationRows.compactMap { row -> FollowUpConversation? in
+                guard let index = row["index"] as? Int,
+                      let label = row["label"] as? String
+                else { return nil }
+                return FollowUpConversation(id: index, label: label)
+            }
+            guard conversations.count == conversationRows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let candidates = candidateRows.compactMap { row -> FollowUpCandidate? in
+                guard let ordinal = row["ordinal"] as? Int,
+                      let conversationIndex = row["conversation_index"] as? Int,
+                      let sourceRaw = row["source"] as? String,
+                      let candidateSource = MemorySource(rawValue: sourceRaw),
+                      candidateSource == source,
+                      let timestamp = row["timestamp"] as? Double,
+                      let timestampKind = row["timestamp_kind"] as? String,
+                      let text = row["text"] as? String,
+                      let textTruncated = row["text_truncated"] as? Bool,
+                      let reasons = row["reasons"] as? [String]
+                else { return nil }
+                return FollowUpCandidate(
+                    id: ordinal,
+                    conversationIndex: conversationIndex,
+                    source: candidateSource,
+                    timestamp: Date(timeIntervalSince1970: timestamp),
+                    timestampKind: timestampKind,
+                    sender: row["sender"] as? String,
+                    text: text,
+                    textTruncated: textTruncated,
+                    reasons: reasons
+                )
+            }
+            guard candidates.count == candidateRows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            return .ready(FollowUpCandidateSnapshot(
+                source: source,
+                start: Date(timeIntervalSince1970: startSeconds),
+                end: Date(timeIntervalSince1970: endSeconds),
+                scannedMessages: counts["scanned_messages"] as? Int ?? 0,
+                returnedCandidates: counts["returned_candidates"] as? Int ?? candidates.count,
+                textTruncatedCount: counts["text_truncated"] as? Int ?? 0,
+                truncated: reply["truncated"] as? Bool ?? false,
+                coverage: FollowUpCoverage(
+                    status: coverageStatus,
+                    trustworthyEmpty: trustworthyEmpty,
+                    caveats: caveats
+                ),
+                freshness: Self.summary(from: reply["freshness"], source: source),
+                conversations: conversations,
+                candidates: candidates
+            ))
+        }
+    }
+
     // MARK: - Protocol
 
     private func baseRequest(op: String) -> [String: Any] {
@@ -265,6 +366,32 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning {
     }
 
     private func dailySummaryFailure(fromLocal failure: MemorySyncFailure) -> DailySummaryFailure {
+        switch failure {
+        case .consentWithheld:
+            return .consentWithheld
+        case .runnerUnavailable:
+            return .runnerUnavailable
+        case .sourceUnavailable(let state):
+            return .memoryUnavailable(state: state)
+        case .ingestionFailed(let state):
+            return .workerFailed(state: state)
+        }
+    }
+
+
+    private func followUpFailure(from reply: [String: Any]) -> FollowUpFailure {
+        let state = reply["state"] as? String ?? "unknown"
+        if state == "consent_withheld" || state == "consent_state_missing"
+            || state == "consent_state_malformed" || state == "consent_unobservable" {
+            return .consentWithheld
+        }
+        if state.hasPrefix("memory_") {
+            return .memoryUnavailable(state: state)
+        }
+        return .workerFailed(state: state)
+    }
+
+    private func followUpFailure(fromLocal failure: MemorySyncFailure) -> FollowUpFailure {
         switch failure {
         case .consentWithheld:
             return .consentWithheld
