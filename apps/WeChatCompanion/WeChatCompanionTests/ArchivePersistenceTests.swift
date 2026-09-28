@@ -918,3 +918,97 @@ struct LocalHistoryLifecycleTests {
         }
     }
 }
+
+
+// MARK: - B3 read-only archive retrieval
+
+struct ArchiveEvidenceQueryTests {
+    @Test
+    func summariesAreNewestFirstAndReduceIdentityToAnonymousFlag() async throws {
+        let store = try MessageStore(url: nil)
+        _ = try await store.persistArchiveEvidence(
+            transcript: try attributed([("张三", m35, "one"), ("李四", m36, "two")]),
+            conversationKey: ArchiveConversationKey("native-anonymous-v1:secret"),
+            importedAt: Date(timeIntervalSince1970: 100)
+        )
+        _ = try await store.persistArchiveEvidence(
+            transcript: try unattributed(["three"]),
+            conversationKey: ArchiveConversationKey("source-authored-key"),
+            importedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        let summaries = try await store.archiveImportSummaries()
+
+        #expect(summaries.count == 2)
+        #expect(summaries.map(\.importedAt) == [
+            Date(timeIntervalSince1970: 200),
+            Date(timeIntervalSince1970: 100),
+        ])
+        #expect(summaries[0].shape == .unattributed)
+        #expect(summaries[0].recordCount == 1)
+        #expect(summaries[0].firstSentAt == nil)
+        #expect(summaries[0].lastSentAt == nil)
+        #expect(!summaries[0].isAnonymous)
+
+        #expect(summaries[1].shape == .attributed)
+        #expect(summaries[1].recordCount == 2)
+        #expect(summaries[1].firstSentAt != nil)
+        #expect(summaries[1].lastSentAt != nil)
+        #expect(summaries[1].isAnonymous)
+    }
+
+    @Test
+    func recordsPreserveShapeSequenceAndAttribution() async throws {
+        let store = try MessageStore(url: nil)
+        let result = try await store.persistArchiveEvidence(
+            transcript: try attributed([("张三", m35, "alpha"), ("李四", m36, "beta")]),
+            conversationKey: ArchiveConversationKey("k"),
+            importedAt: Date(timeIntervalSince1970: 300)
+        )
+        guard case .inserted(let importID, _) = result else {
+            Issue.record("expected inserted import")
+            return
+        }
+
+        let records = try await store.archiveRecords(importID: importID)
+
+        #expect(records.map(\.sequence) == [0, 1])
+        #expect(records.map(\.sender) == ["张三", "李四"])
+        #expect(records.map(\.text) == ["alpha", "beta"])
+        #expect(records.allSatisfy { $0.shape == .attributed })
+        #expect(records.allSatisfy { $0.sentAt != nil && $0.sentAtText != nil })
+        #expect(records.allSatisfy { $0.importedAt == Date(timeIntervalSince1970: 300) })
+    }
+
+    @Test
+    func searchUsesLiteralSubstringAcrossBothShapes() async throws {
+        let store = try MessageStore(url: nil)
+        _ = try await store.persistArchiveEvidence(
+            transcript: try attributed([("张%三", m35, "budget_2026")]),
+            conversationKey: ArchiveConversationKey("one"),
+            importedAt: Date(timeIntervalSince1970: 100)
+        )
+        _ = try await store.persistArchiveEvidence(
+            transcript: try unattributed(["literal % and _ marker"]),
+            conversationKey: ArchiveConversationKey("two"),
+            importedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        let percent = try await store.searchArchiveEvidence("%")
+        #expect(percent.count == 2)
+
+        let underscore = try await store.searchArchiveEvidence("_")
+        #expect(underscore.count == 2)
+
+        let sender = try await store.searchArchiveEvidence("张%")
+        #expect(sender.count == 1)
+        #expect(sender.first?.sender == "张%三")
+
+        let time = try await store.searchArchiveEvidence(m35)
+        #expect(time.count == 1)
+        #expect(time.first?.shape == .attributed)
+
+        #expect(try await store.searchArchiveEvidence("   ").isEmpty)
+        #expect(try await store.searchArchiveEvidence("%", limit: 1).count == 1)
+    }
+}

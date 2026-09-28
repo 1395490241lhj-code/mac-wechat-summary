@@ -1346,6 +1346,11 @@ struct WeChatShareInboxAppModelTests {
         ))
         #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
         #expect(try inbox.pendingItems().isEmpty)
+        #expect(app.archiveEvidence.storeState == .ready)
+        #expect(app.archiveEvidence.imports.count == 1)
+        #expect(app.archiveEvidence.imports.first?.recordCount == 1)
+        #expect(app.selectedArchiveImportID == app.archiveEvidence.imports.first?.id)
+        #expect(app.selectedArchiveRecords.map(\.text) == ["x"])
     }
 }
 

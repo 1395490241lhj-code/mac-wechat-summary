@@ -71,6 +71,25 @@ actor LocalMessageHistory {
         return CaptureLedger(storeState: state, conversations: conversations, health: health)
     }
 
+    func archiveEvidenceSnapshot() async -> ArchiveEvidenceSnapshot {
+        let state = storeState
+        guard state == .ready, let store else {
+            return .unavailable(state)
+        }
+        let imports = (try? await store.archiveImportSummaries()) ?? []
+        return ArchiveEvidenceSnapshot(storeState: state, imports: imports)
+    }
+
+    func archiveRecords(importID: Int64, limit: Int = 500) async -> [ArchiveEvidenceRecord] {
+        guard storeState == .ready, let store else { return [] }
+        return (try? await store.archiveRecords(importID: importID, limit: limit)) ?? []
+    }
+
+    func searchArchiveEvidence(_ query: String, limit: Int = 100) async -> [ArchiveEvidenceRecord] {
+        guard storeState == .ready, let store else { return [] }
+        return (try? await store.searchArchiveEvidence(query, limit: limit)) ?? []
+    }
+
     /// Why the last open attempt failed, kept for diagnostics. Cleared on a
     /// successful open and when consent is turned off, so it never lingers as
     /// a stale explanation for a state that has since changed.

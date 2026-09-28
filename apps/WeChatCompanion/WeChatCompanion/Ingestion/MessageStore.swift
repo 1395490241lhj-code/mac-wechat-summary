@@ -454,6 +454,119 @@ actor MessageStore {
         }
     }
 
+    /// Read-only B3 summary of every persisted archive import, newest first.
+    /// Internal source keys are reduced to one boolean and never leave storage.
+    func archiveImportSummaries() throws -> [ArchiveEvidenceImportSummary] {
+        try query(
+            """
+            SELECT i.id, i.transcript_shape, i.imported_at,
+                   CASE i.transcript_shape
+                     WHEN 'attributed' THEN (SELECT COUNT(*) FROM archive_attributed_records a WHERE a.import_id = i.id)
+                     ELSE (SELECT COUNT(*) FROM archive_unattributed_records u WHERE u.import_id = i.id)
+                   END,
+                   (SELECT MIN(sent_at) FROM archive_attributed_records a WHERE a.import_id = i.id),
+                   (SELECT MAX(sent_at) FROM archive_attributed_records a WHERE a.import_id = i.id),
+                   c.source_conversation_key
+            FROM archive_imports i
+            JOIN archive_conversations c ON c.id = i.archive_conversation_id
+            ORDER BY i.imported_at DESC, i.id DESC;
+            """
+        ) { statement in
+            let key = Self.string(statement, 6) ?? ""
+            return ArchiveEvidenceImportSummary(
+                id: sqlite3_column_int64(statement, 0),
+                shape: ArchiveEvidenceShape(rawValue: Self.string(statement, 1) ?? "") ?? .unattributed,
+                importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                recordCount: Int(sqlite3_column_int64(statement, 3)),
+                firstSentAt: Self.optionalDate(statement, 4),
+                lastSentAt: Self.optionalDate(statement, 5),
+                isAnonymous: key.hasPrefix("native-anonymous-v1:")
+            )
+        }
+    }
+
+    /// Ordered rows for one import. The result is bounded so a large export
+    /// cannot accidentally materialize unbounded UI state.
+    func archiveRecords(importID: Int64, limit: Int = 500) throws -> [ArchiveEvidenceRecord] {
+        let boundedLimit = max(1, min(limit, 2_000))
+        return try query(
+            """
+            SELECT i.id, i.imported_at, i.transcript_shape,
+                   a.sequence, a.sender, a.sent_at, a.sent_at_text, a.text
+            FROM archive_imports i
+            JOIN archive_attributed_records a ON a.import_id = i.id
+            WHERE i.id = ?
+            UNION ALL
+            SELECT i.id, i.imported_at, i.transcript_shape,
+                   u.sequence, NULL, NULL, NULL, u.record_text
+            FROM archive_imports i
+            JOIN archive_unattributed_records u ON u.import_id = i.id
+            WHERE i.id = ?
+            ORDER BY sequence ASC
+            LIMIT ?;
+            """,
+            bind: { statement in
+                sqlite3_bind_int64(statement, 1, importID)
+                sqlite3_bind_int64(statement, 2, importID)
+                sqlite3_bind_int64(statement, 3, Int64(boundedLimit))
+            },
+            row: Self.archiveEvidenceRecord
+        )
+    }
+
+    /// Literal substring search across archive evidence. This is intentionally
+    /// not FTS: B3 adds a small read surface without changing schema v2.
+    func searchArchiveEvidence(_ queryText: String, limit: Int = 100) throws -> [ArchiveEvidenceRecord] {
+        let needle = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        let boundedLimit = max(1, min(limit, 500))
+        return try query(
+            """
+            SELECT i.id, i.imported_at, i.transcript_shape,
+                   a.sequence, a.sender, a.sent_at, a.sent_at_text, a.text
+            FROM archive_imports i
+            JOIN archive_attributed_records a ON a.import_id = i.id
+            WHERE instr(a.sender, ?) > 0
+               OR instr(a.sent_at_text, ?) > 0
+               OR instr(a.text, ?) > 0
+            UNION ALL
+            SELECT i.id, i.imported_at, i.transcript_shape,
+                   u.sequence, NULL, NULL, NULL, u.record_text
+            FROM archive_imports i
+            JOIN archive_unattributed_records u ON u.import_id = i.id
+            WHERE instr(u.record_text, ?) > 0
+            ORDER BY 2 DESC, 1 DESC, 4 ASC
+            LIMIT ?;
+            """,
+            bind: { statement in
+                Self.bind(statement, 1, needle)
+                Self.bind(statement, 2, needle)
+                Self.bind(statement, 3, needle)
+                Self.bind(statement, 4, needle)
+                sqlite3_bind_int64(statement, 5, Int64(boundedLimit))
+            },
+            row: Self.archiveEvidenceRecord
+        )
+    }
+
+    private static func archiveEvidenceRecord(_ statement: OpaquePointer) -> ArchiveEvidenceRecord {
+        ArchiveEvidenceRecord(
+            importID: sqlite3_column_int64(statement, 0),
+            importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 1)),
+            shape: ArchiveEvidenceShape(rawValue: string(statement, 2) ?? "") ?? .unattributed,
+            sequence: Int(sqlite3_column_int64(statement, 3)),
+            sender: string(statement, 4),
+            sentAt: optionalDate(statement, 5),
+            sentAtText: string(statement, 6),
+            text: string(statement, 7) ?? ""
+        )
+    }
+
+    private static func optionalDate(_ statement: OpaquePointer, _ index: Int32) -> Date? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(statement, index))
+    }
+
     // MARK: - Writes
 
     /// Finds or creates the conversation and refreshes when it was last seen.

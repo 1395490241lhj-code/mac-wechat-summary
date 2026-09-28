@@ -708,6 +708,7 @@ private struct DiagnosticMetric: View {
 private struct ChatsView: View {
     @Bindable var model: AppModel
     @State private var isChoosingArchive = false
+    @State private var archiveSearchText = ""
 
     var body: some View {
         ScrollView {
@@ -807,6 +808,11 @@ private struct ChatsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
+                ArchiveEvidenceBrowser(
+                    model: model,
+                    searchText: $archiveSearchText
+                )
+
                 CaptureLedgerSection(ledger: model.captureLedger)
 
                 if let failure = model.extractionMetrics.lastFailure {
@@ -877,6 +883,237 @@ private struct ChatsView: View {
             guard case .success(let urls) = result, let url = urls.first else { return }
             Task { await model.importWeChatArchive(from: url) }
         }
+    }
+}
+
+private struct ArchiveEvidenceBrowser: View {
+    @Bindable var model: AppModel
+    @Binding var searchText: String
+    @State private var hasSubmittedSearch = false
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        GroupBox("Imported WeChat Archives") {
+            VStack(alignment: .leading, spacing: 12) {
+                switch model.archiveEvidence.storeState {
+                case .disabled:
+                    Text("Local message storage is off. Imported archives stay unavailable until storage is enabled.")
+                        .foregroundStyle(.secondary)
+                case .unavailable:
+                    Text("Local history is unavailable, so imported archive evidence cannot be read.")
+                        .foregroundStyle(.secondary)
+                case .ready:
+                    readyContent
+                }
+            }
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var readyContent: some View {
+        if model.archiveEvidence.imports.isEmpty {
+            Text("No imported WeChat archives yet.")
+                .foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 8) {
+                TextField("Search imported messages", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { submitSearch() }
+                Button("Search") { submitSearch() }
+                    .disabled(trimmedSearch.isEmpty)
+                if hasSubmittedSearch {
+                    Button("Clear") { clearSearch() }
+                }
+            }
+
+            if hasSubmittedSearch {
+                searchResults
+            } else {
+                importsAndRecords
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var searchResults: some View {
+        Divider()
+        if model.archiveSearchResults.isEmpty {
+            Text("No imported messages match “\(trimmedSearch)”.")
+                .foregroundStyle(.secondary)
+        } else {
+            Text("\(model.archiveSearchResults.count) matching imported messages")
+                .font(.callout.weight(.medium))
+            ForEach(model.archiveSearchResults) { record in
+                ArchiveEvidenceRecordRow(record: record, showsImportDate: true) {
+                    Task { @MainActor in
+                        await model.selectArchiveImport(record.importID)
+                        searchText = ""
+                        await model.searchArchiveEvidence("")
+                        hasSubmittedSearch = false
+                    }
+                }
+                Divider()
+            }
+            if model.archiveSearchResults.count == 100 {
+                Text("Showing the first 100 matches.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var importsAndRecords: some View {
+        Text("Imports")
+            .font(.callout.weight(.medium))
+        ForEach(model.archiveEvidence.imports) { summary in
+            ArchiveImportRow(
+                summary: summary,
+                isSelected: summary.id == model.selectedArchiveImportID
+            ) {
+                Task { await model.selectArchiveImport(summary.id) }
+            }
+        }
+
+        if let selected = model.archiveEvidence.imports.first(where: {
+            $0.id == model.selectedArchiveImportID
+        }) {
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Messages")
+                    .font(.callout.weight(.medium))
+                Text(importSubtitle(selected))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if model.selectedArchiveRecords.isEmpty {
+                Text("This import contains no readable records.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.selectedArchiveRecords) { record in
+                    ArchiveEvidenceRecordRow(record: record, showsImportDate: false)
+                    Divider()
+                }
+                if selected.recordCount > model.selectedArchiveRecords.count {
+                    Text("Showing the first \(model.selectedArchiveRecords.count) of \(selected.recordCount) records.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func submitSearch() {
+        guard !trimmedSearch.isEmpty else { return }
+        let query = trimmedSearch
+        Task { @MainActor in
+            await model.searchArchiveEvidence(query)
+            hasSubmittedSearch = true
+        }
+    }
+
+    private func clearSearch() {
+        Task { @MainActor in
+            searchText = ""
+            await model.searchArchiveEvidence("")
+            hasSubmittedSearch = false
+        }
+    }
+
+    private func importSubtitle(_ summary: ArchiveEvidenceImportSummary) -> String {
+        var parts = [
+            summary.importedAt.formatted(date: .abbreviated, time: .shortened),
+            "\(summary.recordCount) records",
+            summary.shape.label,
+        ]
+        if summary.isAnonymous { parts.append("Unlinked export") }
+        if let first = summary.firstSentAt, let last = summary.lastSentAt {
+            parts.append(
+                first.formatted(date: .abbreviated, time: .shortened)
+                    + " – "
+                    + last.formatted(date: .abbreviated, time: .shortened)
+            )
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+private struct ArchiveImportRow: View {
+    let summary: ArchiveEvidenceImportSummary
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(summary.importedAt.formatted(date: .abbreviated, time: .shortened))
+                        .fontWeight(.medium)
+                    Text("\(summary.recordCount) records · \(summary.shape.label)"
+                        + (summary.isAnonymous ? " · Unlinked export" : ""))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ArchiveEvidenceRecordRow: View {
+    let record: ArchiveEvidenceRecord
+    var showsImportDate = false
+    var action: (() -> Void)?
+
+    var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { content }
+                    .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(record.sender ?? (record.shape == .attributed ? "Unknown sender" : "Unattributed record"))
+                    .font(.callout.weight(.medium))
+                Spacer(minLength: 12)
+                if let sentAtText = record.sentAtText {
+                    Text(sentAtText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if showsImportDate {
+                    Text(record.importedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(record.text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if showsImportDate, record.sentAtText != nil {
+                Text("Imported \(record.importedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
     }
 }
 

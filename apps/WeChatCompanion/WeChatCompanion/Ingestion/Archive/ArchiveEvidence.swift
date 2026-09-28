@@ -141,3 +141,57 @@ enum ArchiveImportFingerprint {
 enum ArchiveSourceType: String, Sendable {
     case weChatNativeArchive = "wechat_native_archive"
 }
+
+
+enum ArchiveEvidenceShape: String, Sendable, Equatable {
+    case attributed
+    case unattributed
+
+    var label: String {
+        switch self {
+        case .attributed: "Attributed"
+        case .unattributed: "Unattributed"
+        }
+    }
+}
+
+struct ArchiveEvidenceImportSummary: Identifiable, Sendable, Equatable {
+    let id: Int64
+    let shape: ArchiveEvidenceShape
+    let importedAt: Date
+    let recordCount: Int
+    let firstSentAt: Date?
+    let lastSentAt: Date?
+    let isAnonymous: Bool
+}
+
+
+struct ArchiveEvidenceRecordID: Hashable, Sendable {
+    let importID: Int64
+    let sequence: Int
+}
+
+struct ArchiveEvidenceRecord: Identifiable, Sendable, Equatable {
+    let importID: Int64
+    let importedAt: Date
+    let shape: ArchiveEvidenceShape
+    let sequence: Int
+    let sender: String?
+    let sentAt: Date?
+    let sentAtText: String?
+    let text: String
+
+    var id: ArchiveEvidenceRecordID {
+        ArchiveEvidenceRecordID(importID: importID, sequence: sequence)
+    }
+}
+
+
+struct ArchiveEvidenceSnapshot: Sendable, Equatable {
+    let storeState: LocalHistoryStoreState
+    let imports: [ArchiveEvidenceImportSummary]
+
+    static func unavailable(_ state: LocalHistoryStoreState) -> ArchiveEvidenceSnapshot {
+        ArchiveEvidenceSnapshot(storeState: state, imports: [])
+    }
+}

@@ -32,6 +32,10 @@ final class AppModel {
     private(set) var selectedGeminiModel = GeminiModel.provisionalDefault
     private(set) var credentialErrorOccurred = false
     private(set) var archiveImportStatus = ArchiveImportStatus.idle
+    private(set) var archiveEvidence = ArchiveEvidenceSnapshot.unavailable(.disabled)
+    private(set) var selectedArchiveImportID: Int64?
+    private(set) var selectedArchiveRecords: [ArchiveEvidenceRecord] = []
+    private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
 #if DEBUG
     private(set) var visualQualityGateMode = VisualQualityGateMode.normal
     var visualQualityGateIsActive: Bool { visualQualityGateMode != .normal }
@@ -277,6 +281,7 @@ final class AppModel {
         await messageHistory.setEnabled(isAllowed)
         await applyExtractionConfiguration()
         await refreshCaptureLedger()
+        await refreshArchiveEvidence()
         if isAllowed {
             await consumePendingShareArchives()
         }
@@ -291,6 +296,42 @@ final class AppModel {
         await messageHistory.setRetention(policy)
         // The sweep may have just removed messages the ledger is counting.
         await refreshCaptureLedger()
+        await refreshArchiveEvidence()
+    }
+
+    func refreshArchiveEvidence() async {
+        let snapshot = await messageHistory.archiveEvidenceSnapshot()
+        archiveEvidence = snapshot
+
+        guard snapshot.storeState == .ready else {
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            archiveSearchResults = []
+            return
+        }
+
+        let availableIDs = Set(snapshot.imports.map(\.id))
+        if let selectedArchiveImportID, availableIDs.contains(selectedArchiveImportID) {
+            selectedArchiveRecords = await messageHistory.archiveRecords(
+                importID: selectedArchiveImportID
+            )
+        } else if let first = snapshot.imports.first {
+            selectedArchiveImportID = first.id
+            selectedArchiveRecords = await messageHistory.archiveRecords(importID: first.id)
+        } else {
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+        }
+    }
+
+    func selectArchiveImport(_ importID: Int64) async {
+        guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
+        selectedArchiveImportID = importID
+        selectedArchiveRecords = await messageHistory.archiveRecords(importID: importID)
+    }
+
+    func searchArchiveEvidence(_ query: String) async {
+        archiveSearchResults = await messageHistory.searchArchiveEvidence(query)
     }
 
     func importWeChatArchive(from url: URL) async {
@@ -342,6 +383,7 @@ final class AppModel {
                 archiveImportStatus = .alreadyImported
             }
             await refreshCaptureLedger()
+            await refreshArchiveEvidence()
             return true
         } catch ArchivePersistenceError.localPersistenceConsentRequired {
             archiveImportStatus = .localPersistenceConsentRequired
@@ -365,6 +407,7 @@ final class AppModel {
         await messageHistory.deleteAllHistory()
         await applyExtractionConfiguration()
         await refreshCaptureLedger()
+        await refreshArchiveEvidence()
     }
 
     private func applyExtractionConfiguration() async {
@@ -432,6 +475,7 @@ final class AppModel {
         await applyExtractionConfiguration()
         startShareInboxObservation()
         await consumePendingShareArchives()
+        await refreshArchiveEvidence()
         await extractionCoordinator.start(frames: await session.meaningfulFrames())
         await refreshCaptureMetrics()
         startExtractionPolling()
