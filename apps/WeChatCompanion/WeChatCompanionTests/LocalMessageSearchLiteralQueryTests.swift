@@ -218,6 +218,7 @@ struct LocalMessageSearchUIWiringTests {
     func theResultReadModelCarriesNoPathOrHash() {
         let result = LocalSearchResult(
             id: "visual:1",
+            target: .visualConversation(1),
             source: .visual,
             provenance: .visualCaptured,
             conversationLabel: "Group A",
@@ -227,7 +228,7 @@ struct LocalMessageSearchUIWiringTests {
             linkState: nil
         )
         let names = Mirror(reflecting: result).children.compactMap { $0.label }
-        #expect(names.count == 8)
+        #expect(names.count == 9)
         for forbidden in ["path", "hash", "sha", "relative", "storage"] {
             #expect(
                 !names.contains { $0.lowercased().contains(forbidden) },
@@ -256,14 +257,13 @@ struct LocalMessageSearchUIWiringTests {
         #expect(LocalSearchSource.archiveUnattributed.label == "Archive")
     }
 
-    /// First phase deliberately stops short of exact-row navigation: a result
-    /// carries no import id, conversation id or message id for a view to push a
-    /// destination with, so the fragile scroll-and-highlight approach is not
-    /// merely unbuilt but unbuildable from this type.
+    /// Navigation is scoped to conversation/import identity; no message anchor
+    /// or provider-derived identity is exposed.
     @Test
-    func resultsExposeNoNavigationTarget() {
+    func resultsExposeOnlyContextNavigationTarget() {
         let result = LocalSearchResult(
             id: "visual:1",
+            target: .visualConversation(3),
             source: .visual,
             provenance: .visualCaptured,
             conversationLabel: "Group A",
@@ -276,8 +276,7 @@ struct LocalMessageSearchUIWiringTests {
         for forbidden in ["importID", "conversationID", "messageID", "sequence"] {
             #expect(!names.contains(forbidden))
         }
-        // The one identifier-shaped field is a composite display key for
-        // SwiftUI's ForEach, not a primary key the app could resolve to a row.
+        #expect(result.target == .visualConversation(3))
         #expect(result.id == "visual:1")
     }
 

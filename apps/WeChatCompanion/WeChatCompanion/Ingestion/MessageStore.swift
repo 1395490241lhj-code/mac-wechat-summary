@@ -588,6 +588,18 @@ actor MessageStore {
         try messageRows(conversationID: id, order: "DESC", limit: limit).reversed()
     }
 
+    /// Nil means the conversation is gone; an empty array means it exists but
+    /// currently has no retained messages. Both reads are on this store actor.
+    func recentMessagesIfConversationExists(id: Int64, limit: Int) throws -> [PersistedMessage]? {
+        let exists = try query(
+            "SELECT 1 FROM conversations WHERE id = ? LIMIT 1;",
+            bind: { sqlite3_bind_int64($0, 1, id) },
+            row: { _ in true }
+        ).first != nil
+        guard exists else { return nil }
+        return try recentMessages(inConversation: id, limit: limit)
+    }
+
     func messageCount(inConversation id: Int64) throws -> Int {
         try query("SELECT COUNT(*) FROM messages WHERE conversation_id = ?;", bind: { statement in
             sqlite3_bind_int64(statement, 1, id)

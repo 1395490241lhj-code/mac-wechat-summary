@@ -85,6 +85,11 @@ actor LocalMessageHistory {
         return CaptureLedger(storeState: state, conversations: conversations, health: health)
     }
 
+    func recentVisualMessages(conversationID: Int64) async -> [PersistedMessage]? {
+        guard storeState == .ready, let store else { return nil }
+        return try? await store.recentMessagesIfConversationExists(id: conversationID, limit: 100)
+    }
+
     func archiveEvidenceSnapshot() async -> ArchiveEvidenceSnapshot {
         let state = storeState
         guard state == .ready, let store else {

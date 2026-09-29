@@ -150,6 +150,8 @@ struct LocalMessageSearchSourceTests {
         #expect(result.provenance == .visualCaptured)
         #expect(result.conversationLabel == "Group A")
         #expect(result.timestamp != nil)
+        let conversation = try #require(await history.captureLedger().conversations.first)
+        #expect(result.target == .visualConversation(conversation.id))
     }
 
     @Test
@@ -179,6 +181,8 @@ struct LocalMessageSearchSourceTests {
         #expect(byBody.results.count == 1)
         #expect(byBody.results.first?.provenance == .archiveAttributed)
         #expect(byBody.results.first?.sender == "zqxmarker")
+        let imported = try #require(await history.archiveEvidenceSnapshot().imports.first)
+        #expect(byBody.results.first?.target == .archiveImport(imported.id))
 
         let bySender = await history.searchLocalMessages("someone")
         #expect(bySender.results.count == 1)
@@ -581,5 +585,101 @@ struct LocalMessageSearchConsentTests {
         #expect(visual.results.first?.source == .visual)
         #expect(archive.results.count == 1)
         #expect(archive.results.first?.source == .archiveAttributed)
+    }
+
+    @Test @MainActor
+    func searchResultsOpenTheirOwnCanonicalContexts() async throws {
+        let visualBody = String(repeating: "prefix ", count: 80) + "zqxmarker visual"
+        let history = await makeHistory(
+            conversations: ["Group A": [visualMessage(visualBody)]]
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: try attributed([("sender", "20:35", "zqxmarker archive")]),
+            conversationKey: ArchiveConversationKey("chat-navigation"),
+            importedAt: Date()
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        let visual = try #require(await history.searchLocalMessages("zqxmarker", filter: .visual).results.first)
+        await app.openSearchResult(visual)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.contextNavigationTarget == visual.target)
+        #expect(app.selectedVisualMessages.map(\.text) == [visualBody])
+        #expect(visual.excerpt != visualBody)
+
+        let archive = try #require(await history.searchLocalMessages("zqxmarker", filter: .archive).results.first)
+        await app.openSearchResult(archive)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.contextNavigationTarget == archive.target)
+        #expect(app.archiveEvidence.imports.contains(where: { $0.id == app.selectedArchiveImportID }))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["zqxmarker archive"])
+    }
+
+    @Test @MainActor
+    func visualAndArchiveSelectionsAreMutuallyExclusive() async throws {
+        let history = await makeHistory(
+            conversations: ["Group A": [visualMessage("visual context")]]
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: try attributed([("sender", "20:35", "archive context")]),
+            conversationKey: ArchiveConversationKey("chat-selection"),
+            importedAt: Date()
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.refreshCaptureLedger()
+        await app.refreshArchiveEvidence()
+        let visualID = try #require(app.captureLedger.conversations.first?.id)
+        let importID = try #require(app.archiveEvidence.imports.first?.id)
+
+        await app.selectVisualConversation(visualID)
+        #expect(app.selectedVisualConversationID == visualID)
+        #expect(app.contextNavigationTarget == .visualConversation(visualID))
+        #expect(app.selectedArchiveImportID == nil)
+
+        await app.selectArchiveImport(importID)
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.contextNavigationTarget == .archiveImport(importID))
+        #expect(app.selectedVisualConversationID == nil)
+        #expect(app.archiveEvidence.imports.first?.link == nil)
+    }
+
+    @Test @MainActor
+    func directVisualBrowseReadsNewestHundredCanonicalRowsInOrder() async throws {
+        let history = await makeHistory(
+            conversations: ["Group A": [visualMessage("message 000")]]
+        )
+        let store = try #require(await history.openStore())
+        let conversation = try #require(await store.conversation(titled: "Group A"))
+        try await store.append(
+            (1...105).map { visualMessage(String(format: "message %03d", $0)) },
+            conversationID: conversation.id,
+            observedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.selectVisualConversation(conversation.id)
+        #expect(app.selectedVisualMessages.count == 100)
+        #expect(app.selectedVisualMessages.first?.text == "message 006")
+        #expect(app.selectedVisualMessages.last?.text == "message 105")
+        #expect(app.selectedVisualMessages.map(\.sequence)
+            == app.selectedVisualMessages.map(\.sequence).sorted())
+    }
+
+    @Test @MainActor
+    func vanishedVisualConversationDoesNotOpenStaleContext() async throws {
+        let history = await makeHistory(
+            conversations: ["Group A": [visualMessage("vanishing context")]]
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.refreshCaptureLedger()
+        let id = try #require(app.captureLedger.conversations.first?.id)
+        let hit = try #require(await history.searchLocalMessages("vanishing context").results.first)
+        await history.deleteAllHistory()
+        await app.selectVisualConversation(id)
+        #expect(app.selectedVisualConversationID == nil)
+        #expect(app.selectedVisualMessages.isEmpty)
+        #expect(app.visualContextUnavailable)
+        await app.openSearchResult(hit)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.selectedVisualConversationID == nil)
+        #expect(app.visualContextUnavailable)
     }
 }

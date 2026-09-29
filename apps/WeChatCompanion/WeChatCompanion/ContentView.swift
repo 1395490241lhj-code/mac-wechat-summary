@@ -717,6 +717,7 @@ private struct ChatsView: View {
     @State private var archiveSearchText = ""
 
     var body: some View {
+        ScrollViewReader { scroll in
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Chats")
@@ -826,8 +827,10 @@ private struct ChatsView: View {
                     model: model,
                     searchText: $archiveSearchText
                 )
+                .id("archives")
 
-                CaptureLedgerSection(ledger: model.captureLedger)
+                CaptureLedgerSection(model: model)
+                    .id("captured")
 
                 if let failure = model.extractionMetrics.lastFailure {
                     GroupBox("Last Failure Diagnosis") {
@@ -889,6 +892,23 @@ private struct ChatsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Chats")
+        .onAppear {
+            switch model.contextNavigationTarget {
+            case .archiveImport: scroll.scrollTo("archives", anchor: .top)
+            case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
+            case nil: break
+            }
+        }
+        .onChange(of: model.contextNavigationTarget) { _, target in
+            switch target {
+            case .archiveImport: scroll.scrollTo("archives", anchor: .top)
+            case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
+            case nil: break
+            }
+        }
+        .onChange(of: model.visualContextUnavailable) { _, unavailable in
+            if unavailable { scroll.scrollTo("visual-context", anchor: .top) }
+        }
         .fileImporter(
             isPresented: $isChoosingArchive,
             allowedContentTypes: [.zip],
@@ -896,6 +916,7 @@ private struct ChatsView: View {
         ) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }
             Task { await model.importWeChatArchive(from: url) }
+        }
         }
     }
 }
@@ -1421,14 +1442,14 @@ private struct ArchiveEvidenceRecordRow: View {
 /// Which conversations have actually been captured, how much of each is still
 /// kept, and whether capture has obvious gaps.
 ///
-/// Aggregates only. No message text, no preview and no navigation into a
-/// conversation: this section answers "did capture work, and on what", which
-/// needs counts and times, not content.
+/// The ledger stays aggregate-only; selecting a row opens bounded retained
+/// text from that captured conversation.
 private struct CaptureLedgerSection: View {
-    let ledger: CaptureLedger
+    @Bindable var model: AppModel
+    @State private var hoveredConversationID: Int64?
 
     private var presentation: CaptureLedgerPresentation {
-        CaptureLedgerPresentation(ledger: ledger)
+        CaptureLedgerPresentation(ledger: model.captureLedger)
     }
 
     var body: some View {
@@ -1444,11 +1465,74 @@ private struct CaptureLedgerSection: View {
                 } else {
                     ForEach(Array(shown.conversations.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { Divider() }
-                        CapturedConversationRow(row: row)
+                        Button {
+                            Task { await model.selectVisualConversation(row.id) }
+                        } label: {
+                            CapturedConversationRow(row: row)
+                                .padding(.horizontal, 8)
+                                .background(
+                                    hoveredConversationID == row.id
+                                        || model.selectedVisualConversationID == row.id
+                                        ? Color.accentColor.opacity(0.12) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 6)
+                                )
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open captured conversation \(row.title), \(row.retainedCount)")
+                        .accessibilityHint("Shows retained Visual capture messages")
+                        .onHover { hovering in
+                            hoveredConversationID = hovering ? row.id : nil
+                            let cursor = hovering ? NSCursor.pointingHand : NSCursor.arrow
+                            cursor.set()
+                        }
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        if model.visualContextUnavailable {
+            GroupBox("Captured conversation") {
+                Text("This captured conversation is no longer available in local history.")
+                    .foregroundStyle(.secondary)
+            }
+            .id("visual-context")
+        } else if let selected = model.captureLedger.conversations.first(where: {
+            $0.id == model.selectedVisualConversationID
+        }) {
+            GroupBox("Captured conversation · \(selected.title)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Visual capture · Read-only retained context")
+                        .font(.caption.weight(.medium))
+                    Text("Showing the newest \(model.selectedVisualMessages.count) retained messages. Times are first observed, not sent times.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.selectedVisualMessages.isEmpty {
+                        Text("No retained Visual messages in this conversation.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.selectedVisualMessages) { message in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(message.sender ?? "Sender unknown")
+                                .font(.caption.weight(.medium))
+                            if let visibleTime = message.visibleTime, !visibleTime.isEmpty {
+                                Text("WeChat showed: \(visibleTime)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(message.text ?? "[No text retained]")
+                                .textSelection(.enabled)
+                            Text("First observed \(message.firstObservedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Divider()
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .id("visual-context")
         }
 
         if let note = shown.retentionNote {
@@ -1493,6 +1577,9 @@ private struct CapturedConversationRow: View {
                 Spacer(minLength: 12)
                 Text(row.retainedCount)
                     .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
             Text("First captured \(row.firstCaptured) · Last captured \(row.lastCaptured)")
                 .font(.caption)
@@ -2808,7 +2895,12 @@ private struct SearchView: View {
                 Text("\(count) matches")
                     .font(.callout.weight(.medium))
                 ForEach(model.localSearch.results) { result in
-                    LocalSearchResultRow(result: result)
+                    Button {
+                        Task { await model.openSearchResult(result) }
+                    } label: {
+                        LocalSearchResultRow(result: result)
+                    }
+                    .buttonStyle(.plain)
                     Divider()
                 }
                 if model.localSearch.results.count

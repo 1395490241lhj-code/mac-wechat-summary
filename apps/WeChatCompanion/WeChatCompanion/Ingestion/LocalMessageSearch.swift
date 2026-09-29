@@ -135,11 +135,16 @@ enum LocalSearchSource: String, Sendable, Equatable, CaseIterable {
 
 /// One search hit, already re-validated against the canonical store.
 ///
-/// Everything here is display-safe by construction: there is no field for a
-/// stored path, a content hash, a conversation key, or an import id. Provenance
-/// is described in words, not in storage identifiers.
+/// Navigation IDs are local canonical identities, never provider filenames or
+/// inferred links. The view displays labels and provenance, not these IDs.
 struct LocalSearchResult: Identifiable, Sendable, Equatable {
+    enum Target: Sendable, Equatable {
+        case visualConversation(Int64)
+        case archiveImport(Int64)
+    }
+
     let id: String
+    let target: Target
     let source: LocalSearchSource
     let provenance: Provenance
     /// The latest canonical presentation label, read at result time.
@@ -398,6 +403,7 @@ actor LocalMessageSearchIndex {
             else { return nil }
             return LocalSearchResult(
                 id: "visual:\(messageID)",
+                target: .visualConversation(message.conversationID),
                 source: .visual,
                 provenance: .visualCaptured,
                 conversationLabel: label,
@@ -417,6 +423,7 @@ actor LocalMessageSearchIndex {
             else { return nil }
             return LocalSearchResult(
                 id: "archive:\(importID):\(sequence)",
+                target: .archiveImport(importID),
                 source: candidate.source,
                 provenance: candidate.source == .archiveAttributed
                     ? .archiveAttributed

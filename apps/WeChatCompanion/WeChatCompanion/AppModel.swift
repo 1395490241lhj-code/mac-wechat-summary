@@ -18,6 +18,10 @@ final class AppModel {
     /// Which conversations have been captured and how much is still kept.
     /// Aggregates only -- this never carries message text.
     var captureLedger = CaptureLedger.empty
+    private(set) var selectedVisualConversationID: Int64?
+    private(set) var selectedVisualMessages: [PersistedMessage] = []
+    private(set) var visualContextUnavailable = false
+    private(set) var contextNavigationTarget: LocalSearchResult.Target?
     /// In-memory only. Cleared when the app exits; never written to disk.
     var latestExtraction: ExtractedConversationFrame?
     /// Transient text-field buffer, cleared as soon as the key reaches the Keychain.
@@ -564,6 +568,12 @@ final class AppModel {
         }
 
         let availableIDs = Set(snapshot.imports.map(\.id))
+        if selectedVisualConversationID != nil || visualContextUnavailable {
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            return
+        }
         if let selectedArchiveImportID, availableIDs.contains(selectedArchiveImportID) {
             selectedArchiveRecords = await messageHistory.archiveRecords(
                 importID: selectedArchiveImportID
@@ -584,13 +594,53 @@ final class AppModel {
         }
     }
 
+    func openSearchResult(_ result: LocalSearchResult) async {
+        switch result.target {
+        case .archiveImport(let importID):
+            await refreshArchiveEvidence()
+            guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
+            await selectArchiveImport(importID)
+        case .visualConversation(let conversationID):
+            await selectVisualConversation(conversationID)
+        }
+        selectedDestination = .chats
+    }
+
+    func selectVisualConversation(_ conversationID: Int64) async {
+        await refreshCaptureLedger()
+        selectedArchiveImportID = nil
+        selectedArchiveRecords = []
+        selectedArchiveAttachmentBatches = []
+        selectedVisualConversationID = conversationID
+        contextNavigationTarget = .visualConversation(conversationID)
+        selectedVisualMessages = []
+        visualContextUnavailable = false
+        guard let messages = await messageHistory.recentVisualMessages(conversationID: conversationID)
+        else {
+            guard selectedVisualConversationID == conversationID else { return }
+            selectedVisualConversationID = nil
+            visualContextUnavailable = true
+            return
+        }
+        guard selectedVisualConversationID == conversationID else { return }
+        selectedVisualMessages = messages
+    }
+
     func selectArchiveImport(_ importID: Int64) async {
         guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
+        selectedVisualConversationID = nil
+        selectedVisualMessages = []
+        visualContextUnavailable = false
         selectedArchiveImportID = importID
-        selectedArchiveRecords = await messageHistory.archiveRecords(importID: importID)
-        selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
+        contextNavigationTarget = .archiveImport(importID)
+        let records = await messageHistory.archiveRecords(importID: importID)
+        guard selectedArchiveImportID == importID else { return }
+        selectedArchiveRecords = records
+        let batches = await messageHistory.archiveAttachmentBatches(
             importID: importID
         )
+        guard selectedArchiveImportID == importID else { return }
+        selectedArchiveAttachmentBatches = batches
     }
 
     func searchArchiveEvidence(_ query: String) async {
@@ -1171,6 +1221,19 @@ final class AppModel {
     /// running when any of them happens.
     func refreshCaptureLedger() async {
         captureLedger = await messageHistory.captureLedger()
+        if let selectedVisualConversationID {
+            if captureLedger.conversations.contains(where: { $0.id == selectedVisualConversationID }) {
+                if let messages = await messageHistory.recentVisualMessages(
+                    conversationID: selectedVisualConversationID
+                ), self.selectedVisualConversationID == selectedVisualConversationID {
+                    selectedVisualMessages = messages
+                }
+            } else {
+                self.selectedVisualConversationID = nil
+                selectedVisualMessages = []
+                visualContextUnavailable = true
+            }
+        }
     }
 
     private func refreshCaptureMetrics() async {
