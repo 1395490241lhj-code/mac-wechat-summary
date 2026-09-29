@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 
 @MainActor
@@ -39,6 +40,9 @@ final class AppModel {
     private(set) var selectedArchiveAttachmentBatches: [ArchiveEvidenceAttachmentBatch] = []
     private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
     private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
+    /// B5.1: one attachment's status after the user asked to open it. Reset by
+    /// the next request; never carries a path or a hash into the UI.
+    private(set) var attachmentPreviewStatus = ArchiveAttachmentPreviewStatus.idle
 #if DEBUG
     private(set) var visualQualityGateMode = VisualQualityGateMode.normal
     var visualQualityGateIsActive: Bool { visualQualityGateMode != .normal }
@@ -586,6 +590,34 @@ final class AppModel {
 
     func searchArchiveEvidence(_ query: String) async {
         archiveSearchResults = await messageHistory.searchArchiveEvidence(query)
+    }
+
+    /// B5.1: open one materialized attachment in the system previewer.
+    ///
+    /// User-initiated only. Selecting an import never reaches this path. The
+    /// URL comes from the central resolver, which has already proven the file
+    /// is a regular file beneath the app-owned attachment root; when it refuses
+    /// (missing, replaced, outside the root) this reports unavailability and
+    /// opens nothing.
+    func previewArchiveAttachment(_ attachment: ArchiveEvidenceAttachment) async {
+        attachmentPreviewStatus = .opening
+        guard let url = await messageHistory.archiveAttachmentPreviewURL(attachment) else {
+            attachmentPreviewStatus = .unavailable
+            return
+        }
+        let opened = await MainActor.run { NSWorkspace.shared.open(url) }
+        attachmentPreviewStatus = opened ? .opened : .unavailable
+    }
+
+    /// B5.1: select the same file in Finder. Same resolver, same refusals.
+    func revealArchiveAttachment(_ attachment: ArchiveEvidenceAttachment) async {
+        attachmentPreviewStatus = .opening
+        guard let url = await messageHistory.archiveAttachmentPreviewURL(attachment) else {
+            attachmentPreviewStatus = .unavailable
+            return
+        }
+        await MainActor.run { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        attachmentPreviewStatus = .revealed
     }
 
     func linkArchiveImport(_ importID: Int64, toVisualConversationID visualConversationID: Int64) async {
@@ -1144,6 +1176,29 @@ enum ArchiveLinkStatus: Equatable {
             "This archive is already linked to a different captured conversation."
         case .unavailable:
             "The archive link could not be updated."
+        }
+    }
+}
+
+/// B5.1 local viewing. `unavailable` is the one state a caller must be ready
+/// for: the manifest says materialized but the file did not survive validation.
+enum ArchiveAttachmentPreviewStatus: Equatable {
+    case idle
+    case opening
+    case opened
+    case revealed
+    case unavailable
+
+    var message: String? {
+        switch self {
+        case .idle:
+            nil
+        case .opening:
+            "Opening…"
+        case .opened, .revealed:
+            nil
+        case .unavailable:
+            "This file is not available locally any more."
         }
     }
 }

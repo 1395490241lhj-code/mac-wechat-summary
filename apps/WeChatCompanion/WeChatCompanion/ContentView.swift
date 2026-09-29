@@ -1024,7 +1024,8 @@ private struct ArchiveEvidenceBrowser: View {
             if selected.attachmentCount > 0 {
                 Divider()
                 ArchiveAttachmentSection(
-                    batches: model.selectedArchiveAttachmentBatches
+                    batches: model.selectedArchiveAttachmentBatches,
+                    model: model
                 )
             }
         }
@@ -1137,6 +1138,7 @@ private struct ArchiveLinkControls: View {
 
 private struct ArchiveAttachmentSection: View {
     let batches: [ArchiveEvidenceAttachmentBatch]
+    let model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1164,7 +1166,11 @@ private struct ArchiveAttachmentSection: View {
                         }
 
                         ForEach(batch.attachments) { attachment in
-                            ArchiveAttachmentRow(attachment: attachment)
+                            ArchiveAttachmentRow(
+                                attachment: attachment,
+                                onPreview: { Task { await model.previewArchiveAttachment(attachment) } },
+                                onReveal: { Task { await model.revealArchiveAttachment(attachment) } }
+                            )
                         }
                     }
                     .padding(.vertical, 6)
@@ -1174,12 +1180,22 @@ private struct ArchiveAttachmentSection: View {
                     }
                 }
             }
+
+            if let message = model.attachmentPreviewStatus.message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
 
 private struct ArchiveAttachmentRow: View {
     let attachment: ArchiveEvidenceAttachment
+    /// Only ever reached for a `.materialized` row: the caller in
+    /// `ArchiveAttachmentSection` hides both actions for every other state.
+    let onPreview: () -> Void
+    let onReveal: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -1203,6 +1219,15 @@ private struct ArchiveAttachmentRow: View {
             ))
             .font(.caption)
             .foregroundStyle(.secondary)
+
+            if attachment.isMaterialized {
+                Button("Preview", action: onPreview)
+                    .buttonStyle(.link)
+                    .font(.caption)
+                Button("Reveal in Finder", action: onReveal)
+                    .buttonStyle(.link)
+                    .font(.caption)
+            }
         }
         .padding(.vertical, 4)
     }

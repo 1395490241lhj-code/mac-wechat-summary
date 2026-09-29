@@ -1389,6 +1389,24 @@ actor MessageStore {
         return result
     }
 
+    /// B5.1: the stored relative path for one materialized attachment.
+    ///
+    /// This is the ONLY place the relative path leaves SQLite, and it is read
+    /// on demand for one attachment the user explicitly asked to open. Nothing
+    /// here is cached into the read model, so a stored path or content hash can
+    /// never appear in the Chats UI or in any aggregate.
+    func archiveAttachmentRelativePath(attachmentID: Int64) throws -> String? {
+        try query(
+            """
+            SELECT stored_relative_path
+            FROM archive_attachments
+            WHERE id = ? AND storage_state = 'materialized';
+            """,
+            bind: { sqlite3_bind_int64($0, 1, attachmentID) },
+            row: { Self.string($0, 0) }
+        ).first ?? nil
+    }
+
     func totalMessageCount() throws -> Int {
         try query("SELECT COUNT(*) FROM messages;") { Int(sqlite3_column_int64($0, 0)) }
             .first ?? 0

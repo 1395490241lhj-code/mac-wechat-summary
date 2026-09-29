@@ -105,6 +105,21 @@ actor LocalMessageHistory {
         return (try? await store.archiveAttachmentBatches(importID: importID)) ?? []
     }
 
+    /// B5.1: the local URL for one materialized attachment, or `nil` when it
+    /// cannot be proven safe. Read-only: this opens no connection beyond the
+    /// single SELECT the read model already needs, and writes nothing.
+    func archiveAttachmentPreviewURL(_ attachment: ArchiveEvidenceAttachment) async -> URL? {
+        guard attachment.storageState == .materialized,
+              storeState == .ready,
+              let store,
+              let attachmentStore,
+              let relativePath = (try? await store.archiveAttachmentRelativePath(
+                  attachmentID: attachment.id
+              )) ?? nil
+        else { return nil }
+        return attachmentStore.previewableFileURL(relativePath: relativePath)
+    }
+
     @discardableResult
     func persistArchiveAttachmentBatch(
         importID: Int64,
@@ -522,6 +537,59 @@ struct ArchiveAttachmentStore: Sendable {
         case .oversized: .oversized
         case .budgetExceeded: .budgetExceeded
         }
+    }
+
+    // MARK: - B5.1 local viewing
+
+    /// B5.1: turn one attachment's stored relative path -- read from the
+    /// manifest by identity, never by the caller -- into a local file URL that
+    /// is safe to hand to Quick Look or Finder.
+    ///
+    /// Callers pass identity and read-model state, never a path. The path is
+    /// read from the manifest here, resolved under `rootURL`, canonicalized,
+    /// and only returned after it is proven to be a regular file that still
+    /// lives beneath the attachment root with no symlink in any component.
+    /// A refusal is a plain `nil`: nothing is repaired, moved, or deleted, and
+    /// a missing or rewritten file is simply not previewable.
+    func previewableFileURL(relativePath: String?) -> URL? {
+        guard let relativePath, !relativePath.isEmpty else { return nil }
+        // The root is the trust anchor. If it is not a real directory, or has
+        // been replaced by a symlink, nothing beneath it can be trusted.
+        guard let rootValues = try? rootURL.resourceValues(
+            forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+        ), rootValues.isDirectory == true, rootValues.isSymbolicLink != true
+        else { return nil }
+        // `standardizedFileURL` folds `.`/`..` and absolute-looking input before
+        // anything else, so the containment proof below is not doing that work.
+        let candidate = rootURL.appendingPathComponent(relativePath)
+            .standardizedFileURL
+        let root = rootURL.standardizedFileURL
+        let rootComponents = root.pathComponents
+        let targetComponents = candidate.pathComponents
+        guard targetComponents.count > rootComponents.count,
+              Array(targetComponents.prefix(rootComponents.count)) == rootComponents
+        else { return nil }
+        // A symlink anywhere -- the batch directory, an intermediate directory,
+        // or the file itself -- would let a validated path point somewhere else.
+        guard !containsSymlink(from: root, to: candidate) else { return nil }
+        guard let values = try? candidate.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ), values.isRegularFile == true, values.isSymbolicLink != true else {
+            return nil
+        }
+        return candidate
+    }
+
+    private func containsSymlink(from root: URL, to target: URL) -> Bool {
+        var current = root
+        for component in target.pathComponents.dropFirst(root.pathComponents.count) {
+            current = current.appendingPathComponent(component)
+            guard let values = try? current.resourceValues(
+                forKeys: [.isSymbolicLinkKey]
+            ) else { return true }
+            if values.isSymbolicLink == true { return true }
+        }
+        return false
     }
 
     private func isFingerprint(_ value: String) -> Bool {

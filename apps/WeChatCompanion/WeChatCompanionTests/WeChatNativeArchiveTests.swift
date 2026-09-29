@@ -229,6 +229,13 @@ private func unattributedRecords(_ t: WeChatNativeTranscript) -> [WeChatUnattrib
 /// A directory that exists only for the duration of one test.
 private struct Scratch: ~Copyable {
     let url: URL
+    /// B5.1 fixtures hand the scratch directory to a resolver that outlives
+    /// the closure which made it, so cleanup moves to an explicit call. A
+    /// noncopyable scratch cannot ride along inside a returned tuple.
+    private final class Cleanup {
+        var onDeinit = true
+    }
+    private let cleanup = Cleanup()
 
     init() throws {
         url = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -244,7 +251,11 @@ private struct Scratch: ~Copyable {
         return target
     }
 
-    deinit { try? FileManager.default.removeItem(at: url) }
+    func abandonCleanup() { cleanup.onDeinit = false }
+
+    deinit {
+        if cleanup.onDeinit { try? FileManager.default.removeItem(at: url) }
+    }
 }
 
 // MARK: - Shape A (attributed)
@@ -1493,6 +1504,288 @@ struct ArchiveAttachmentStoreTests {
 
         #expect(!FileManager.default.fileExists(atPath: rootLink.path))
         #expect(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+}
+
+/// B5.1 local viewing. The resolver is the whole security boundary here, so
+/// these tests drive it directly with hostile paths as well as a real import.
+struct ArchiveAttachmentPreviewResolverTests {
+    /// Materializes one real JPEG into a real store and returns the read model
+    /// rows plus the root, so each refusal can be built from real state.
+    private func seeded() async throws -> (
+        history: LocalMessageHistory,
+        root: URL,
+        store: ArchiveAttachmentStore,
+        batches: [ArchiveEvidenceAttachmentBatch]
+    ) {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/secret-name.jpg", tinyJPEG)
+        }
+        let root = scratch.url.appendingPathComponent("archive-attachments", isDirectory: true)
+        let history = LocalMessageHistory(
+            url: scratch.url.appendingPathComponent("messages.sqlite"),
+            attachmentRoot: root
+        )
+        await history.setEnabled(true)
+        let outcome = try await WeChatArchiveImportService(history: history)
+            .importArchive(contentsOf: source)
+        let importID: Int64
+        switch outcome.persistence {
+        case .inserted(let id, _): importID = id
+        case .alreadyImported:
+            Issue.record("expected a new import")
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let batches = await history.archiveAttachmentBatches(importID: importID)
+        scratch.abandonCleanup()
+        return (history, root, ArchiveAttachmentStore(rootURL: root), batches)
+    }
+
+    private func materializedRow(
+        _ batches: [ArchiveEvidenceAttachmentBatch]
+    ) throws -> ArchiveEvidenceAttachment {
+        let row = try #require(
+            batches.flatMap(\.attachments).first { $0.storageState == .materialized }
+        )
+        return row
+    }
+
+    @Test
+    func aValidMaterializedAttachmentResolvesToItsGeneratedFile() async throws {
+        let seeded = try await seeded()
+        let row = try materializedRow(seeded.batches)
+        let url = await seeded.history.archiveAttachmentPreviewURL(row)
+        let resolved = try #require(url)
+        #expect(resolved.path.hasSuffix(".jpg"))
+        // Generated identity only: ordinal + content hash, never the ZIP name.
+        #expect(!resolved.lastPathComponent.contains("secret-name"))
+        #expect(FileManager.default.fileExists(atPath: resolved.path))
+        // And it really is the bytes we stored, not a guess.
+        #expect(try Data(contentsOf: resolved) == tinyJPEG)
+    }
+
+    @Test
+    func aMetadataOnlyAttachmentRefusesToResolve() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip { builder in
+            builder.add("聊天记录.txt", transcript([("张三", m35, "x")]))
+            builder.add("images/fake.png", Data("not png".utf8))
+        }
+        let root = scratch.url.appendingPathComponent("archive-attachments", isDirectory: true)
+        let history = LocalMessageHistory(
+            url: scratch.url.appendingPathComponent("messages.sqlite"),
+            attachmentRoot: root
+        )
+        await history.setEnabled(true)
+        let outcome = try await WeChatArchiveImportService(history: history)
+            .importArchive(contentsOf: source)
+        let importID: Int64
+        switch outcome.persistence {
+        case .inserted(let id, _): importID = id
+        case .alreadyImported:
+            Issue.record("expected a new import")
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let batches = await history.archiveAttachmentBatches(importID: importID)
+        let metadataOnly = try #require(
+            batches.flatMap(\.attachments).first { !$0.isMaterialized }
+        )
+        #expect(await history.archiveAttachmentPreviewURL(metadataOnly) == nil)
+        // Even if someone handed the resolver a path, a metadata-only row has
+        // no stored path to resolve in the first place.
+        #expect(ArchiveAttachmentStore(rootURL: root).previewableFileURL(
+            relativePath: nil
+        ) == nil)
+    }
+
+    @Test
+    func aMissingMaterializedFileRefusesWithoutRepairing() async throws {
+        let seeded = try await seeded()
+        let row = try materializedRow(seeded.batches)
+        let url = try #require(await seeded.history.archiveAttachmentPreviewURL(row))
+        try FileManager.default.removeItem(at: url)
+        #expect(await seeded.history.archiveAttachmentPreviewURL(row) == nil)
+        // Refusing is not repairing: the evidence row is untouched.
+        let after = await seeded.history.archiveAttachmentBatches(
+            importID: try #require(seeded.batches.first?.id)
+        )
+        #expect(after.flatMap(\.attachments).contains(where: { $0.id == row.id }))
+    }
+
+    @Test
+    func aDotDotTraversalPathRefuses() throws {
+        let scratch = try Scratch()
+        let root = scratch.url.appendingPathComponent("root", isDirectory: true)
+        let store = ArchiveAttachmentStore(rootURL: root)
+        #expect(store.previewableFileURL(
+            relativePath: "import-1/batch-\(String(repeating: "a", count: 64))/../../escape.jpg"
+        ) == nil)
+        #expect(store.previewableFileURL(
+            relativePath: "../escape.jpg"
+        ) == nil)
+        #expect(store.previewableFileURL(relativePath: "") == nil)
+        #expect(store.previewableFileURL(relativePath: nil) == nil)
+    }
+
+    @Test
+    func anAbsoluteOrRootedPathRefuses() throws {
+        let scratch = try Scratch()
+        let root = scratch.url.appendingPathComponent("root", isDirectory: true)
+        let store = ArchiveAttachmentStore(rootURL: root)
+        // An absolute path must not escape just because it was appended.
+        #expect(store.previewableFileURL(relativePath: "/etc/passwd") == nil)
+    }
+
+    @Test
+    func aFinalTargetSymlinkRefuses() throws {
+        let scratch = try Scratch()
+        let outside = scratch.url.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let real = outside.appendingPathComponent("real.jpg")
+        try tinyJPEG.write(to: real)
+
+        let root = scratch.url.appendingPathComponent("root", isDirectory: true)
+        let batch = root.appendingPathComponent(
+            "import-1/batch-\(String(repeating: "b", count: 64))", isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: batch, withIntermediateDirectories: true)
+        let link = batch.appendingPathComponent("1-link.jpg")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let store = ArchiveAttachmentStore(rootURL: root)
+        #expect(store.previewableFileURL(
+            relativePath: "import-1/batch-\(String(repeating: "b", count: 64))/1-link.jpg"
+        ) == nil)
+    }
+
+    @Test
+    func anIntermediateSymlinkEscapeRefuses() throws {
+        let scratch = try Scratch()
+        let outside = scratch.url.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try tinyJPEG.write(to: outside.appendingPathComponent("real.jpg"))
+
+        let root = scratch.url.appendingPathComponent("root", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // A whole import directory redirected out of the root.
+        let importLink = root.appendingPathComponent("import-1", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: importLink, withDestinationURL: outside)
+
+        let store = ArchiveAttachmentStore(rootURL: root)
+        #expect(store.previewableFileURL(relativePath: "import-1/real.jpg") == nil)
+    }
+
+    @Test
+    func theRootItselfBeingASymlinkRefuses() throws {
+        let scratch = try Scratch()
+        let outside = scratch.url.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        try tinyJPEG.write(to: outside.appendingPathComponent("real.jpg"))
+        let rootLink = scratch.url.appendingPathComponent("root-link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: rootLink, withDestinationURL: outside)
+
+        // A root that is a symlink is a broken trust anchor, not a shortcut.
+        let store = ArchiveAttachmentStore(rootURL: rootLink)
+        #expect(store.previewableFileURL(relativePath: "real.jpg") == nil)
+    }
+
+    @Test
+    func aDirectoryInsteadOfAFileRefuses() throws {
+        let scratch = try Scratch()
+        let root = scratch.url.appendingPathComponent("root", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("import-1/thing.jpg"),
+            withIntermediateDirectories: true
+        )
+        let store = ArchiveAttachmentStore(rootURL: root)
+        #expect(store.previewableFileURL(relativePath: "import-1/thing.jpg") == nil)
+    }
+
+    @Test
+    func theReadModelNeverCarriesAPathOrAHash() async throws {
+        let seeded = try await seeded()
+        let row = try materializedRow(seeded.batches)
+        // The preview model is exactly the B5 surface: identity, type, size,
+        // kind, storage state. No path, no hash, no source filename.
+        let propertyNames = Mirror(reflecting: type(of: row)).children.compactMap {
+            ($0.label ?? "").uppercased()
+        }
+        #expect(!propertyNames.contains { $0.contains("PATH") && $0 != "PATHEXTENSION" })
+        #expect(!propertyNames.contains { $0.contains("HASH") || $0.contains("FINGERPRINT") })
+        #expect(!propertyNames.contains { $0.contains("FILENAME") || $0.contains("NAME") })
+
+        let fields = [
+            String(describing: row.id),
+            String(describing: row.sourceEntryIndex),
+            row.pathExtension,
+            String(describing: row.byteCount),
+            String(describing: row.kind),
+            String(describing: row.storageState),
+        ]
+        #expect(!fields.contains { $0.contains("import-") })
+        #expect(!fields.contains { $0.contains("batch-") })
+        #expect(!fields.contains { $0.contains("secret-name") })
+        #expect(!fields.contains { $0.count == 64 && $0.allSatisfy(\.isHexDigit) })
+
+        // Resolving for a preview does not mutate the manifest or the store.
+        let before = try await sqliteCounts(at: seeded.history)
+        _ = await seeded.history.archiveAttachmentPreviewURL(row)
+        _ = await seeded.history.archiveAttachmentPreviewURL(row)
+        #expect(try await sqliteCounts(at: seeded.history) == before)
+    }
+
+    @Test
+    func previewIsNotReachableForAnythingButMaterializedRows() async throws {
+        let seeded = try await seeded()
+        for row in seeded.batches.flatMap(\.attachments) {
+            // The UI exposes actions under `isMaterialized`; prove the resolver
+            // agrees, so a future UI change cannot widen what is openable.
+            if row.isMaterialized {
+                #expect(await seeded.history.archiveAttachmentPreviewURL(row) != nil)
+            } else {
+                #expect(await seeded.history.archiveAttachmentPreviewURL(row) == nil)
+            }
+        }
+    }
+
+    private func sqliteCounts(at history: LocalMessageHistory) async throws -> String {
+        // Counted through the read model, which is the only surface B5.1 uses.
+        let snapshot = await history.archiveEvidenceSnapshot()
+        let imports = await history.archiveAttachmentBatches(
+            importID: snapshot.imports.first?.id ?? 0
+        )
+        return "\(imports.count):\(imports.flatMap(\.attachments).count):" +
+            "\(imports.flatMap(\.attachments).map(\.byteCount).reduce(0, +))"
+    }
+
+    /// B5.1 real-data acceptance: run the production resolver over the live
+    /// app store and report only whether the row is safely previewable. It
+    /// opens nothing, decodes nothing, and never looks at the bytes.
+    @Test
+    func theRealB5AttachmentResolvesAsSafelyPreviewable() async throws {
+        let history = LocalMessageHistory.applicationSupport
+        await history.setEnabled(true)
+        let snapshot = await history.archiveEvidenceSnapshot()
+        var rows: [ArchiveEvidenceAttachment] = []
+        for entry in snapshot.imports {
+            for batch in await history.archiveAttachmentBatches(importID: entry.id) {
+                rows.append(contentsOf: batch.attachments)
+            }
+        }
+        #expect(!rows.isEmpty, "expected the B5 real attachment to still exist")
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                "Library/Application Support/WeChatCompanion/archive-attachments"
+            ).path + "/"
+        for row in rows {
+            let url = await history.archiveAttachmentPreviewURL(row)
+            print("B51-REAL state=\(row.storageState.rawValue) "
+                + "previewable=\(String(url != nil)) "
+                + "underRoot=\(String(url?.path.hasPrefix(root) ?? false))")
+            #expect((url != nil) == row.isMaterialized)
+        }
     }
 }
 
