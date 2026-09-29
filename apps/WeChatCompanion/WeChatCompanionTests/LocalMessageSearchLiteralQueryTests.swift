@@ -218,7 +218,7 @@ struct LocalMessageSearchUIWiringTests {
     func theResultReadModelCarriesNoPathOrHash() {
         let result = LocalSearchResult(
             id: "visual:1",
-            target: .visualConversation(1),
+            target: .visualMessage(conversationID: 1, messageID: 1),
             source: .visual,
             provenance: .visualCaptured,
             conversationLabel: "Group A",
@@ -257,13 +257,12 @@ struct LocalMessageSearchUIWiringTests {
         #expect(LocalSearchSource.archiveUnattributed.label == "Archive")
     }
 
-    /// Navigation is scoped to conversation/import identity; no message anchor
-    /// or provider-derived identity is exposed.
+    /// Navigation uses typed canonical identity, never the display-only id.
     @Test
-    func resultsExposeOnlyContextNavigationTarget() {
+    func resultsExposeExactCanonicalNavigationTarget() {
         let result = LocalSearchResult(
-            id: "visual:1",
-            target: .visualConversation(3),
+            id: "display-only",
+            target: .visualMessage(conversationID: 3, messageID: 17),
             source: .visual,
             provenance: .visualCaptured,
             conversationLabel: "Group A",
@@ -276,8 +275,8 @@ struct LocalMessageSearchUIWiringTests {
         for forbidden in ["importID", "conversationID", "messageID", "sequence"] {
             #expect(!names.contains(forbidden))
         }
-        #expect(result.target == .visualConversation(3))
-        #expect(result.id == "visual:1")
+        #expect(result.target == .visualMessage(conversationID: 3, messageID: 17))
+        #expect(result.id == "display-only")
     }
 
     @Test

@@ -139,8 +139,8 @@ enum LocalSearchSource: String, Sendable, Equatable, CaseIterable {
 /// inferred links. The view displays labels and provenance, not these IDs.
 struct LocalSearchResult: Identifiable, Sendable, Equatable {
     enum Target: Sendable, Equatable {
-        case visualConversation(Int64)
-        case archiveImport(Int64)
+        case visualMessage(conversationID: Int64, messageID: Int64)
+        case archiveRecord(importID: Int64, sequence: Int, provenance: Provenance)
     }
 
     let id: String
@@ -403,7 +403,7 @@ actor LocalMessageSearchIndex {
             else { return nil }
             return LocalSearchResult(
                 id: "visual:\(messageID)",
-                target: .visualConversation(message.conversationID),
+                target: .visualMessage(conversationID: message.conversationID, messageID: messageID),
                 source: .visual,
                 provenance: .visualCaptured,
                 conversationLabel: label,
@@ -423,7 +423,12 @@ actor LocalMessageSearchIndex {
             else { return nil }
             return LocalSearchResult(
                 id: "archive:\(importID):\(sequence)",
-                target: .archiveImport(importID),
+                target: .archiveRecord(
+                    importID: importID,
+                    sequence: sequence,
+                    provenance: candidate.source == .archiveAttributed
+                        ? .archiveAttributed : .archiveUnattributed
+                ),
                 source: candidate.source,
                 provenance: candidate.source == .archiveAttributed
                     ? .archiveAttributed

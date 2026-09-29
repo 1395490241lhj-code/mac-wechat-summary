@@ -2,6 +2,21 @@ import Foundation
 import AppKit
 import Observation
 
+enum ContextNavigationTarget: Equatable {
+    case visualConversation(Int64)
+    case archiveImport(Int64)
+}
+
+enum ContextRevealAnchor: Hashable {
+    case visualMessage(Int64)
+    case archiveRecord(importID: Int64, sequence: Int)
+}
+
+struct ContextRevealRequest: Equatable {
+    let generation: UInt64
+    let anchor: ContextRevealAnchor
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -21,7 +36,17 @@ final class AppModel {
     private(set) var selectedVisualConversationID: Int64?
     private(set) var selectedVisualMessages: [PersistedMessage] = []
     private(set) var visualContextUnavailable = false
-    private(set) var contextNavigationTarget: LocalSearchResult.Target?
+    private(set) var archiveContextUnavailable = false
+    private(set) var searchHitUnavailable = false
+    private(set) var contextNavigationTarget: ContextNavigationTarget?
+    private(set) var contextRevealRequest: ContextRevealRequest?
+    private(set) var directContextSelectionGeneration: UInt64 = 0
+    private(set) var selectedVisualIsHitWindow = false
+    private(set) var selectedArchiveIsHitWindow = false
+    @ObservationIgnored private var revealGeneration: UInt64 = 0
+    @ObservationIgnored private var visualWindowHitID: Int64?
+    @ObservationIgnored private var archiveWindowHitSequence: Int?
+    @ObservationIgnored private var archiveWindowHitProvenance: LocalSearchResult.Provenance?
     /// In-memory only. Cleared when the app exits; never written to disk.
     var latestExtraction: ExtractedConversationFrame?
     /// Transient text-field buffer, cleared as soon as the key reaches the Keychain.
@@ -564,6 +589,11 @@ final class AppModel {
             selectedArchiveRecords = []
             selectedArchiveAttachmentBatches = []
             archiveSearchResults = []
+            archiveWindowHitSequence = nil
+            archiveWindowHitProvenance = nil
+            selectedArchiveIsHitWindow = false
+            contextRevealRequest = nil
+            searchHitUnavailable = false
             return
         }
 
@@ -575,12 +605,47 @@ final class AppModel {
             return
         }
         if let selectedArchiveImportID, availableIDs.contains(selectedArchiveImportID) {
-            selectedArchiveRecords = await messageHistory.archiveRecords(
-                importID: selectedArchiveImportID
-            )
+            if let sequence = archiveWindowHitSequence,
+               let provenance = archiveWindowHitProvenance {
+                switch await messageHistory.archiveHitWindow(
+                    importID: selectedArchiveImportID,
+                    sequence: sequence,
+                    provenance: provenance
+                ) {
+                case .ready(let records): selectedArchiveRecords = records
+                case .hitUnavailable:
+                    selectedArchiveRecords = []
+                    archiveWindowHitSequence = nil
+                    archiveWindowHitProvenance = nil
+                    selectedArchiveIsHitWindow = false
+                    contextRevealRequest = nil
+                    searchHitUnavailable = true
+                case .contextUnavailable:
+                    self.selectedArchiveImportID = nil
+                    selectedArchiveRecords = []
+                    archiveContextUnavailable = true
+                    contextRevealRequest = nil
+                case .storageDisabled, .storeUnavailable:
+                    selectedArchiveRecords = []
+                    contextRevealRequest = nil
+                    searchHitUnavailable = false
+                }
+            } else if searchHitUnavailable {
+                selectedArchiveRecords = []
+            } else {
+                selectedArchiveRecords = await messageHistory.archiveRecords(
+                    importID: selectedArchiveImportID
+                )
+            }
             selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
                 importID: selectedArchiveImportID
             )
+        } else if selectedArchiveImportID != nil, archiveWindowHitSequence != nil {
+            self.selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            archiveContextUnavailable = true
+            contextRevealRequest = nil
         } else if let first = snapshot.imports.first {
             selectedArchiveImportID = first.id
             selectedArchiveRecords = await messageHistory.archiveRecords(importID: first.id)
@@ -595,18 +660,145 @@ final class AppModel {
     }
 
     func openSearchResult(_ result: LocalSearchResult) async {
+        revealGeneration &+= 1
+        let generation = revealGeneration
+        contextRevealRequest = nil
+        searchHitUnavailable = false
         switch result.target {
-        case .archiveImport(let importID):
+        case .visualMessage(let conversationID, let messageID):
+            let read = await messageHistory.visualHitWindow(
+                conversationID: conversationID, messageID: messageID
+            )
+            guard revealGeneration == generation else { return }
+            await refreshCaptureLedger()
+            guard revealGeneration == generation else { return }
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            archiveWindowHitSequence = nil
+            archiveWindowHitProvenance = nil
+            selectedArchiveIsHitWindow = false
+            archiveContextUnavailable = false
+            selectedVisualMessages = []
+            selectedVisualIsHitWindow = false
+            visualWindowHitID = nil
+            visualContextUnavailable = false
+            searchHitUnavailable = false
+            switch read {
+            case .ready(let messages) where messages.contains(where: { $0.id == messageID }):
+                guard captureLedger.conversations.contains(where: { $0.id == conversationID }) else {
+                    visualContextUnavailable = true
+                    contextNavigationTarget = .visualConversation(conversationID)
+                    break
+                }
+                selectedVisualConversationID = conversationID
+                selectedVisualMessages = messages
+                selectedVisualIsHitWindow = true
+                visualWindowHitID = messageID
+                contextNavigationTarget = .visualConversation(conversationID)
+                contextRevealRequest = ContextRevealRequest(
+                    generation: generation, anchor: .visualMessage(messageID)
+                )
+            case .contextUnavailable:
+                selectedVisualConversationID = nil
+                visualContextUnavailable = true
+                contextNavigationTarget = .visualConversation(conversationID)
+            case .hitUnavailable, .ready:
+                if captureLedger.conversations.contains(where: { $0.id == conversationID }) {
+                    selectedVisualConversationID = conversationID
+                    searchHitUnavailable = true
+                } else {
+                    selectedVisualConversationID = nil
+                    visualContextUnavailable = true
+                }
+                contextNavigationTarget = .visualConversation(conversationID)
+            case .storageDisabled, .storeUnavailable:
+                selectedVisualConversationID = nil
+                contextNavigationTarget = nil
+            }
+        case .archiveRecord(let importID, let sequence, let provenance):
+            let read = await messageHistory.archiveHitWindow(
+                importID: importID, sequence: sequence, provenance: provenance
+            )
+            guard revealGeneration == generation else { return }
+            selectedVisualConversationID = nil
+            selectedVisualMessages = []
+            selectedVisualIsHitWindow = false
+            visualWindowHitID = nil
+            visualContextUnavailable = false
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            archiveWindowHitSequence = nil
+            archiveWindowHitProvenance = nil
+            selectedArchiveIsHitWindow = false
+            archiveContextUnavailable = false
             await refreshArchiveEvidence()
-            guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
-            await selectArchiveImport(importID)
-        case .visualConversation(let conversationID):
-            await selectVisualConversation(conversationID)
+            guard revealGeneration == generation else { return }
+            searchHitUnavailable = false
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            switch read {
+            case .ready(let records) where records.contains(where: {
+                $0.importID == importID && $0.sequence == sequence
+                    && (($0.shape == .attributed && provenance == .archiveAttributed)
+                        || ($0.shape == .unattributed && provenance == .archiveUnattributed))
+            }):
+                guard archiveEvidence.imports.contains(where: { $0.id == importID }) else {
+                    archiveContextUnavailable = true
+                    contextNavigationTarget = .archiveImport(importID)
+                    break
+                }
+                selectedArchiveImportID = importID
+                selectedArchiveRecords = records
+                selectedArchiveIsHitWindow = true
+                archiveWindowHitSequence = sequence
+                archiveWindowHitProvenance = provenance
+                selectedArchiveAttachmentBatches = await messageHistory.archiveAttachmentBatches(
+                    importID: importID
+                )
+                guard revealGeneration == generation else { return }
+                contextNavigationTarget = .archiveImport(importID)
+                contextRevealRequest = ContextRevealRequest(
+                    generation: generation,
+                    anchor: .archiveRecord(importID: importID, sequence: sequence)
+                )
+            case .contextUnavailable:
+                selectedArchiveImportID = nil
+                archiveContextUnavailable = true
+                contextNavigationTarget = .archiveImport(importID)
+            case .hitUnavailable, .ready:
+                if archiveEvidence.imports.contains(where: { $0.id == importID }) {
+                    selectedArchiveImportID = importID
+                    searchHitUnavailable = true
+                } else {
+                    archiveContextUnavailable = true
+                }
+                contextNavigationTarget = .archiveImport(importID)
+            case .storageDisabled, .storeUnavailable:
+                selectedArchiveImportID = nil
+                contextNavigationTarget = nil
+            }
         }
         selectedDestination = .chats
     }
 
+    func consumeContextReveal(generation: UInt64) {
+        if contextRevealRequest?.generation == generation { contextRevealRequest = nil }
+    }
+
     func selectVisualConversation(_ conversationID: Int64) async {
+        revealGeneration &+= 1
+        directContextSelectionGeneration &+= 1
+        contextRevealRequest = nil
+        searchHitUnavailable = false
+        visualWindowHitID = nil
+        archiveWindowHitSequence = nil
+        archiveWindowHitProvenance = nil
+        selectedVisualIsHitWindow = false
+        selectedArchiveIsHitWindow = false
+        archiveContextUnavailable = false
         await refreshCaptureLedger()
         selectedArchiveImportID = nil
         selectedArchiveRecords = []
@@ -627,6 +819,16 @@ final class AppModel {
     }
 
     func selectArchiveImport(_ importID: Int64) async {
+        revealGeneration &+= 1
+        directContextSelectionGeneration &+= 1
+        contextRevealRequest = nil
+        searchHitUnavailable = false
+        visualWindowHitID = nil
+        archiveWindowHitSequence = nil
+        archiveWindowHitProvenance = nil
+        selectedVisualIsHitWindow = false
+        selectedArchiveIsHitWindow = false
+        archiveContextUnavailable = false
         guard archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
         selectedVisualConversationID = nil
         selectedVisualMessages = []
@@ -1221,17 +1423,54 @@ final class AppModel {
     /// running when any of them happens.
     func refreshCaptureLedger() async {
         captureLedger = await messageHistory.captureLedger()
+        guard captureLedger.storeState == .ready else {
+            selectedVisualConversationID = nil
+            selectedVisualMessages = []
+            visualWindowHitID = nil
+            selectedVisualIsHitWindow = false
+            contextRevealRequest = nil
+            searchHitUnavailable = false
+            visualContextUnavailable = false
+            return
+        }
         if let selectedVisualConversationID {
             if captureLedger.conversations.contains(where: { $0.id == selectedVisualConversationID }) {
-                if let messages = await messageHistory.recentVisualMessages(
-                    conversationID: selectedVisualConversationID
-                ), self.selectedVisualConversationID == selectedVisualConversationID {
+                if let messageID = visualWindowHitID {
+                    switch await messageHistory.visualHitWindow(
+                        conversationID: selectedVisualConversationID, messageID: messageID
+                    ) {
+                    case .ready(let messages):
+                        if self.selectedVisualConversationID == selectedVisualConversationID {
+                            selectedVisualMessages = messages
+                        }
+                    case .hitUnavailable:
+                        selectedVisualMessages = []
+                        visualWindowHitID = nil
+                        selectedVisualIsHitWindow = false
+                        contextRevealRequest = nil
+                        searchHitUnavailable = true
+                    case .contextUnavailable:
+                        self.selectedVisualConversationID = nil
+                        selectedVisualMessages = []
+                        visualContextUnavailable = true
+                        contextRevealRequest = nil
+                    case .storageDisabled, .storeUnavailable:
+                        selectedVisualMessages = []
+                        contextRevealRequest = nil
+                        searchHitUnavailable = false
+                    }
+                } else if !searchHitUnavailable,
+                          let messages = await messageHistory.recentVisualMessages(
+                            conversationID: selectedVisualConversationID
+                          ), self.selectedVisualConversationID == selectedVisualConversationID {
                     selectedVisualMessages = messages
                 }
             } else {
                 self.selectedVisualConversationID = nil
                 selectedVisualMessages = []
                 visualContextUnavailable = true
+                contextRevealRequest = nil
+                searchHitUnavailable = false
             }
         }
     }

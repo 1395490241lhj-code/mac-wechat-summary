@@ -1,5 +1,13 @@
 import Foundation
 
+enum SearchHitWindow<Row: Sendable>: Sendable {
+    case ready([Row])
+    case hitUnavailable
+    case contextUnavailable
+    case storageDisabled
+    case storeUnavailable
+}
+
 /// Owns the lifecycle of the on-device message database.
 ///
 /// The database is created lazily and ONLY while the user has turned local
@@ -88,6 +96,33 @@ actor LocalMessageHistory {
     func recentVisualMessages(conversationID: Int64) async -> [PersistedMessage]? {
         guard storeState == .ready, let store else { return nil }
         return try? await store.recentMessagesIfConversationExists(id: conversationID, limit: 100)
+    }
+
+    func visualHitWindow(conversationID: Int64, messageID: Int64) async -> SearchHitWindow<PersistedMessage> {
+        switch storeState {
+        case .disabled: return .storageDisabled
+        case .unavailable: return .storeUnavailable
+        case .ready: break
+        }
+        guard let store else { return .storeUnavailable }
+        return (try? await store.visualHitWindow(conversationID: conversationID, messageID: messageID))
+            ?? .storeUnavailable
+    }
+
+    func archiveHitWindow(
+        importID: Int64,
+        sequence: Int,
+        provenance: LocalSearchResult.Provenance
+    ) async -> SearchHitWindow<ArchiveEvidenceRecord> {
+        switch storeState {
+        case .disabled: return .storageDisabled
+        case .unavailable: return .storeUnavailable
+        case .ready: break
+        }
+        guard let store else { return .storeUnavailable }
+        return (try? await store.archiveHitWindow(
+            importID: importID, sequence: sequence, provenance: provenance
+        )) ?? .storeUnavailable
     }
 
     func archiveEvidenceSnapshot() async -> ArchiveEvidenceSnapshot {

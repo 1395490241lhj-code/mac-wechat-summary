@@ -715,6 +715,8 @@ private struct ChatsView: View {
     @Bindable var model: AppModel
     @State private var isChoosingArchive = false
     @State private var archiveSearchText = ""
+    @State private var highlightedAnchor: ContextRevealAnchor?
+    @State private var highlightGeneration: UInt64 = 0
 
     var body: some View {
         ScrollViewReader { scroll in
@@ -825,11 +827,12 @@ private struct ChatsView: View {
 
                 ArchiveEvidenceBrowser(
                     model: model,
-                    searchText: $archiveSearchText
+                    searchText: $archiveSearchText,
+                    highlightedAnchor: highlightedAnchor
                 )
                 .id("archives")
 
-                CaptureLedgerSection(model: model)
+                CaptureLedgerSection(model: model, highlightedAnchor: highlightedAnchor)
                     .id("captured")
 
                 if let failure = model.extractionMetrics.lastFailure {
@@ -893,6 +896,7 @@ private struct ChatsView: View {
         }
         .navigationTitle("Chats")
         .onAppear {
+            guard model.contextRevealRequest == nil else { return }
             switch model.contextNavigationTarget {
             case .archiveImport: scroll.scrollTo("archives", anchor: .top)
             case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
@@ -900,6 +904,7 @@ private struct ChatsView: View {
             }
         }
         .onChange(of: model.contextNavigationTarget) { _, target in
+            guard model.contextRevealRequest == nil else { return }
             switch target {
             case .archiveImport: scroll.scrollTo("archives", anchor: .top)
             case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
@@ -908,6 +913,35 @@ private struct ChatsView: View {
         }
         .onChange(of: model.visualContextUnavailable) { _, unavailable in
             if unavailable { scroll.scrollTo("visual-context", anchor: .top) }
+        }
+        .onChange(of: model.directContextSelectionGeneration) { _, _ in
+            highlightedAnchor = nil
+        }
+        .task(id: model.contextRevealRequest) {
+            guard let request = model.contextRevealRequest else { return }
+            // A task on the updated view runs after SwiftUI has installed the
+            // canonical row's typed .id in this ScrollViewReader.
+            await Task.yield()
+            guard model.contextRevealRequest == request else { return }
+            let isRendered: Bool
+            switch request.anchor {
+            case .visualMessage(let id):
+                isRendered = model.selectedVisualMessages.contains(where: { $0.id == id })
+            case .archiveRecord(let importID, let sequence):
+                isRendered = model.selectedArchiveRecords.contains(where: {
+                    $0.importID == importID && $0.sequence == sequence
+                })
+            }
+            guard isRendered else { return }
+            highlightedAnchor = request.anchor
+            highlightGeneration = request.generation
+            scroll.scrollTo(request.anchor, anchor: .center)
+            AccessibilityNotification.Announcement("Search result revealed in Chats").post()
+            model.consumeContextReveal(generation: request.generation)
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                if highlightGeneration == request.generation { highlightedAnchor = nil }
+            }
         }
         .fileImporter(
             isPresented: $isChoosingArchive,
@@ -924,6 +958,7 @@ private struct ChatsView: View {
 private struct ArchiveEvidenceBrowser: View {
     @Bindable var model: AppModel
     @Binding var searchText: String
+    let highlightedAnchor: ContextRevealAnchor?
     @State private var hasSubmittedSearch = false
 
     private var trimmedSearch: String {
@@ -933,6 +968,10 @@ private struct ArchiveEvidenceBrowser: View {
     var body: some View {
         GroupBox("Imported WeChat Archives") {
             VStack(alignment: .leading, spacing: 12) {
+                if model.archiveContextUnavailable {
+                    Text("This archive import is no longer available in local history.")
+                        .foregroundStyle(.secondary)
+                }
                 switch model.archiveEvidence.storeState {
                 case .disabled:
                     Text("Local message storage is off. Imported archives stay unavailable until storage is enabled.")
@@ -966,7 +1005,8 @@ private struct ArchiveEvidenceBrowser: View {
                 }
             }
 
-            if hasSubmittedSearch {
+            if hasSubmittedSearch && !model.searchHitUnavailable && !model.selectedArchiveIsHitWindow
+                && model.contextRevealRequest == nil {
                 searchResults
             } else {
                 importsAndRecords
@@ -1029,15 +1069,31 @@ private struct ArchiveEvidenceBrowser: View {
 
             ArchiveLinkControls(model: model, summary: selected)
 
-            if model.selectedArchiveRecords.isEmpty {
+            if model.searchHitUnavailable {
+                Text("This search result is no longer retained.")
+                    .foregroundStyle(.secondary)
+            } else if model.selectedArchiveRecords.isEmpty {
                 Text("This import contains no readable records.")
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(model.selectedArchiveRecords) { record in
                     ArchiveEvidenceRecordRow(record: record, showsImportDate: false)
+                        .id(ContextRevealAnchor.archiveRecord(
+                            importID: record.importID, sequence: record.sequence
+                        ))
+                        .background(
+                            highlightedAnchor == .archiveRecord(
+                                importID: record.importID, sequence: record.sequence
+                            ) ? Color.accentColor.opacity(0.16) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
                     Divider()
                 }
-                if selected.recordCount > model.selectedArchiveRecords.count {
+                if model.selectedArchiveIsHitWindow {
+                    Text("Showing up to 500 records around the search result.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if selected.recordCount > model.selectedArchiveRecords.count {
                     Text("Showing the first \(model.selectedArchiveRecords.count) of \(selected.recordCount) records.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1446,6 +1502,7 @@ private struct ArchiveEvidenceRecordRow: View {
 /// text from that captured conversation.
 private struct CaptureLedgerSection: View {
     @Bindable var model: AppModel
+    let highlightedAnchor: ContextRevealAnchor?
     @State private var hoveredConversationID: Int64?
 
     private var presentation: CaptureLedgerPresentation {
@@ -1505,10 +1562,15 @@ private struct CaptureLedgerSection: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Visual capture · Read-only retained context")
                         .font(.caption.weight(.medium))
-                    Text("Showing the newest \(model.selectedVisualMessages.count) retained messages. Times are first observed, not sent times.")
+                    Text(model.selectedVisualIsHitWindow
+                        ? "Showing up to 100 retained messages around the search result. Times are first observed, not sent times."
+                        : "Showing the newest \(model.selectedVisualMessages.count) retained messages. Times are first observed, not sent times.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if model.selectedVisualMessages.isEmpty {
+                    if model.searchHitUnavailable {
+                        Text("This search result is no longer retained.")
+                            .foregroundStyle(.secondary)
+                    } else if model.selectedVisualMessages.isEmpty {
                         Text("No retained Visual messages in this conversation.")
                             .foregroundStyle(.secondary)
                     }
@@ -1527,6 +1589,12 @@ private struct CaptureLedgerSection: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                        .id(ContextRevealAnchor.visualMessage(message.id))
+                        .background(
+                            highlightedAnchor == .visualMessage(message.id)
+                                ? Color.accentColor.opacity(0.16) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6)
+                        )
                         Divider()
                     }
                 }

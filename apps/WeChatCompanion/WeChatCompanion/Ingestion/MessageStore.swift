@@ -600,6 +600,51 @@ actor MessageStore {
         return try recentMessages(inConversation: id, limit: limit)
     }
 
+    /// Search navigation rechecks the exact canonical row and its owner in one
+    /// store-actor operation. The ordinary Chats read remains newest-100.
+    func visualHitWindow(
+        conversationID: Int64, messageID: Int64
+    ) throws -> SearchHitWindow<PersistedMessage> {
+        guard let recent = try recentMessagesIfConversationExists(id: conversationID, limit: 100)
+        else { return .contextUnavailable }
+        guard let hit = try persistedMessage(id: messageID), hit.conversationID == conversationID
+        else { return .hitUnavailable }
+        if recent.contains(where: { $0.id == messageID }) { return .ready(recent) }
+
+        let before = try query(
+            """
+            SELECT id, conversation_id, sequence, sender, ownership, visible_time,
+                   text, kind, confidence, first_observed_at
+            FROM messages WHERE conversation_id = ?
+              AND (sequence < ? OR (sequence = ? AND id <= ?))
+            ORDER BY sequence DESC, id DESC LIMIT 50;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, conversationID)
+                sqlite3_bind_int64($0, 2, hit.sequence)
+                sqlite3_bind_int64($0, 3, hit.sequence)
+                sqlite3_bind_int64($0, 4, messageID)
+            }, row: Self.persistedMessage
+        ).reversed()
+        let after = try query(
+            """
+            SELECT id, conversation_id, sequence, sender, ownership, visible_time,
+                   text, kind, confidence, first_observed_at
+            FROM messages WHERE conversation_id = ?
+              AND (sequence > ? OR (sequence = ? AND id > ?))
+            ORDER BY sequence ASC, id ASC LIMIT 50;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, conversationID)
+                sqlite3_bind_int64($0, 2, hit.sequence)
+                sqlite3_bind_int64($0, 3, hit.sequence)
+                sqlite3_bind_int64($0, 4, messageID)
+            }, row: Self.persistedMessage
+        )
+        let window = Array(before) + after
+        return window.contains(where: { $0.id == messageID }) ? .ready(window) : .hitUnavailable
+    }
+
     func messageCount(inConversation id: Int64) throws -> Int {
         try query("SELECT COUNT(*) FROM messages WHERE conversation_id = ?;", bind: { statement in
             sqlite3_bind_int64(statement, 1, id)
@@ -879,6 +924,52 @@ actor MessageStore {
             },
             row: Self.archiveEvidenceRecord
         )
+    }
+
+    func archiveHitWindow(
+        importID: Int64,
+        sequence: Int,
+        provenance: LocalSearchResult.Provenance
+    ) throws -> SearchHitWindow<ArchiveEvidenceRecord> {
+        guard let shape = try importShape(importID: importID) else { return .contextUnavailable }
+        let expected: ArchiveEvidenceShape
+        switch provenance {
+        case .archiveAttributed: expected = .attributed
+        case .archiveUnattributed: expected = .unattributed
+        case .visualCaptured: return .hitUnavailable
+        }
+        guard shape == expected,
+              let hit = try archiveRecord(importID: importID, sequence: sequence),
+              hit.shape == expected
+        else { return .hitUnavailable }
+
+        let ordinary = try archiveRecords(importID: importID)
+        if ordinary.contains(where: { $0.sequence == sequence }) { return .ready(ordinary) }
+
+        // Both fragments are fixed SQL chosen from the import's canonical
+        // shape. Only the import and sequence values are bound from the hit.
+        let table = shape == .attributed
+            ? "archive_attributed_records" : "archive_unattributed_records"
+        let columns = shape == .attributed
+            ? "r.sender, r.sent_at, r.sent_at_text, r.text"
+            : "NULL, NULL, NULL, r.record_text"
+        func side(_ comparison: String, _ order: String) throws -> [ArchiveEvidenceRecord] {
+            try query(
+                """
+                SELECT i.id, i.imported_at, i.transcript_shape,
+                       r.sequence, \(columns)
+                FROM archive_imports i JOIN \(table) r ON r.import_id = i.id
+                WHERE i.id = ? AND r.sequence \(comparison) ?
+                ORDER BY r.sequence \(order) LIMIT 250;
+                """,
+                bind: {
+                    sqlite3_bind_int64($0, 1, importID)
+                    sqlite3_bind_int64($0, 2, Int64(sequence))
+                }, row: Self.archiveEvidenceRecord
+            )
+        }
+        let window = Array(try side("<=", "DESC").reversed()) + (try side(">", "ASC"))
+        return window.contains(where: { $0.id == hit.id }) ? .ready(window) : .hitUnavailable
     }
 
     /// Literal substring search across archive evidence. This is intentionally

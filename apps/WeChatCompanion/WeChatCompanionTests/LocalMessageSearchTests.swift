@@ -151,7 +151,10 @@ struct LocalMessageSearchSourceTests {
         #expect(result.conversationLabel == "Group A")
         #expect(result.timestamp != nil)
         let conversation = try #require(await history.captureLedger().conversations.first)
-        #expect(result.target == .visualConversation(conversation.id))
+        let messages = try #require(await history.recentVisualMessages(conversationID: conversation.id))
+        #expect(result.target == .visualMessage(
+            conversationID: conversation.id, messageID: messages[0].id
+        ))
     }
 
     @Test
@@ -182,7 +185,9 @@ struct LocalMessageSearchSourceTests {
         #expect(byBody.results.first?.provenance == .archiveAttributed)
         #expect(byBody.results.first?.sender == "zqxmarker")
         let imported = try #require(await history.archiveEvidenceSnapshot().imports.first)
-        #expect(byBody.results.first?.target == .archiveImport(imported.id))
+        #expect(byBody.results.first?.target == .archiveRecord(
+            importID: imported.id, sequence: 0, provenance: .archiveAttributed
+        ))
 
         let bySender = await history.searchLocalMessages("someone")
         #expect(bySender.results.count == 1)
@@ -602,14 +607,18 @@ struct LocalMessageSearchConsentTests {
         let visual = try #require(await history.searchLocalMessages("zqxmarker", filter: .visual).results.first)
         await app.openSearchResult(visual)
         #expect(app.selectedDestination == .chats)
-        #expect(app.contextNavigationTarget == visual.target)
+        #expect(app.contextNavigationTarget == .visualConversation(app.selectedVisualConversationID!))
+        #expect(app.contextRevealRequest?.anchor == .visualMessage(app.selectedVisualMessages[0].id))
         #expect(app.selectedVisualMessages.map(\.text) == [visualBody])
         #expect(visual.excerpt != visualBody)
 
         let archive = try #require(await history.searchLocalMessages("zqxmarker", filter: .archive).results.first)
         await app.openSearchResult(archive)
         #expect(app.selectedDestination == .chats)
-        #expect(app.contextNavigationTarget == archive.target)
+        #expect(app.contextNavigationTarget == .archiveImport(app.selectedArchiveImportID!))
+        #expect(app.contextRevealRequest?.anchor == .archiveRecord(
+            importID: app.selectedArchiveImportID!, sequence: app.selectedArchiveRecords[0].sequence
+        ))
         #expect(app.archiveEvidence.imports.contains(where: { $0.id == app.selectedArchiveImportID }))
         #expect(app.selectedArchiveRecords.map(\.text) == ["zqxmarker archive"])
     }
@@ -681,5 +690,266 @@ struct LocalMessageSearchConsentTests {
         #expect(app.selectedDestination == .chats)
         #expect(app.selectedVisualConversationID == nil)
         #expect(app.visualContextUnavailable)
+    }
+}
+
+// MARK: - Exact hit reveal
+
+struct LocalSearchHitRevealTests {
+    @Test @MainActor
+    func olderVisualHitUsesBoundedCanonicalWindowAndCanRevealAgain() async throws {
+        let history = await makeHistory(conversations: [
+            "Group A": [visualMessage("old-only-needle")]
+        ])
+        let store = try #require(await history.openStore())
+        let conversation = try #require(try await store.conversation(titled: "Group A"))
+        let hit = try #require(await history.searchLocalMessages("old-only-needle").results.first)
+        guard case .visualMessage(let owner, let messageID) = hit.target else {
+            Issue.record("expected exact visual target")
+            return
+        }
+        #expect(owner == conversation.id)
+        try await store.append(
+            (1...120).map { visualMessage("new synthetic \($0)") },
+            conversationID: conversation.id,
+            observedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.openSearchResult(hit)
+        #expect(app.selectedVisualConversationID == owner)
+        #expect(app.selectedVisualIsHitWindow)
+        #expect(app.selectedVisualMessages.count <= 100)
+        #expect(app.selectedVisualMessages.contains(where: { $0.id == messageID }))
+        #expect(app.selectedVisualMessages.map(\.sequence)
+            == app.selectedVisualMessages.map(\.sequence).sorted())
+        await app.refreshCaptureLedger()
+        #expect(app.selectedVisualMessages.contains(where: { $0.id == messageID }))
+        let firstRequest = try #require(app.contextRevealRequest)
+        #expect(firstRequest.anchor == .visualMessage(messageID))
+        app.consumeContextReveal(generation: firstRequest.generation)
+        #expect(app.contextRevealRequest == nil)
+        await app.openSearchResult(hit)
+        #expect(app.contextRevealRequest?.generation != firstRequest.generation)
+        await app.selectVisualConversation(owner)
+        #expect(app.contextRevealRequest == nil)
+        #expect(!app.selectedVisualIsHitWindow)
+        #expect(app.selectedVisualMessages.count == 100)
+        #expect(!app.selectedVisualMessages.contains(where: { $0.id == messageID }))
+    }
+
+    @Test @MainActor
+    func visualWrongOwnerAndExpiredRowNeverReveal() async throws {
+        let history = await makeHistory(conversations: [
+            "Group A": [visualMessage("old-only-needle")],
+            "Group B": [visualMessage("other-context")]
+        ])
+        let store = try #require(await history.openStore())
+        let hit = try #require(await history.searchLocalMessages("old-only-needle").results.first)
+        guard case .visualMessage(_, let messageID) = hit.target else {
+            Issue.record("expected visual target")
+            return
+        }
+        let other = try #require(try await store.conversation(titled: "Group B"))
+        let wrongOwner = LocalSearchResult(
+            id: hit.id, target: .visualMessage(conversationID: other.id, messageID: messageID),
+            source: hit.source, provenance: hit.provenance,
+            conversationLabel: hit.conversationLabel, sender: hit.sender,
+            timestamp: hit.timestamp, excerpt: hit.excerpt, linkState: hit.linkState
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.openSearchResult(wrongOwner)
+        #expect(app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+        #expect(app.selectedVisualMessages.isEmpty)
+
+        let owner = try #require(try await store.conversation(titled: "Group A"))
+        try await store.append(
+            [visualMessage("new retained row")], conversationID: owner.id,
+            observedAt: Date(timeIntervalSince1970: 1_700_864_000)
+        )
+        try await store.applyRetention(
+            .sevenDays, now: Date(timeIntervalSince1970: 1_701_036_800)
+        )
+        await app.openSearchResult(hit)
+        #expect(app.selectedVisualConversationID == owner.id)
+        #expect(app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+        #expect(app.selectedVisualMessages.isEmpty)
+    }
+
+    @Test @MainActor
+    func missingVisualContextAndDisabledStorageAreDistinct() async throws {
+        let history = await makeHistory(conversations: [
+            "Group A": [visualMessage("vanishing-target")]
+        ])
+        let hit = try #require(await history.searchLocalMessages("vanishing-target").results.first)
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await history.setEnabled(false)
+        await app.openSearchResult(hit)
+        #expect(!app.searchHitUnavailable)
+        #expect(!app.visualContextUnavailable)
+        #expect(app.captureLedger.storeState == .disabled)
+        await history.setEnabled(true)
+        await history.deleteAllHistory()
+        await app.openSearchResult(hit)
+        #expect(app.visualContextUnavailable)
+        #expect(!app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+    }
+
+    @Test @MainActor
+    func lateArchiveHitUsesBoundedWindowAndKeepsProvenanceAndNameIndependent() async throws {
+        let history = await makeHistory()
+        let transcript = try attributed(
+            (0...510).map { ("sender", "20:35", "archive row \($0)" ) }
+        )
+        let imported = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("b62-large-import"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected archive import")
+            return
+        }
+        let hit = try #require(await history.searchLocalMessages("archive row 510").results.first)
+        guard case .archiveRecord(let owner, let sequence, let provenance) = hit.target else {
+            Issue.record("expected exact archive target")
+            return
+        }
+        #expect(owner == importID)
+        #expect(provenance == .archiveAttributed)
+        #expect(sequence >= 500)
+        try await history.setArchiveImportDisplayName(importID: importID, displayName: "Operator label")
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.openSearchResult(hit)
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.selectedArchiveIsHitWindow)
+        #expect(app.selectedArchiveRecords.count <= 500)
+        #expect(app.selectedArchiveRecords.contains(where: { $0.sequence == sequence }))
+        #expect(app.selectedArchiveRecords.map(\.sequence)
+            == app.selectedArchiveRecords.map(\.sequence).sorted())
+        await app.refreshArchiveEvidence()
+        #expect(app.selectedArchiveRecords.contains(where: { $0.sequence == sequence }))
+        #expect(app.contextRevealRequest?.anchor == .archiveRecord(
+            importID: importID, sequence: sequence
+        ))
+        #expect(app.archiveEvidence.imports.first?.displayName == "Operator label")
+        #expect(app.archiveEvidence.imports.first?.link == nil)
+        await app.selectArchiveImport(importID)
+        #expect(app.contextRevealRequest == nil)
+        #expect(!app.selectedArchiveIsHitWindow)
+        #expect(app.selectedArchiveRecords.count == 500)
+        #expect(!app.selectedArchiveRecords.contains(where: { $0.sequence == sequence }))
+    }
+
+    @Test @MainActor
+    func archiveWrongRecordOrWrongProvenanceNeverReveal() async throws {
+        let history = await makeHistory()
+        _ = try await history.persistArchiveEvidence(
+            transcript: try unattributed(["plain exact-target"]),
+            conversationKey: ArchiveConversationKey("b62-anonymous"),
+            importedAt: Date()
+        )
+        let hit = try #require(await history.searchLocalMessages("exact-target").results.first)
+        guard case .archiveRecord(let importID, let sequence, let provenance) = hit.target else {
+            Issue.record("expected archive target")
+            return
+        }
+        #expect(provenance == .archiveUnattributed)
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        let wrong = LocalSearchResult(
+            id: hit.id, target: .archiveRecord(
+                importID: importID, sequence: sequence + 1, provenance: provenance
+            ), source: hit.source, provenance: hit.provenance,
+            conversationLabel: hit.conversationLabel, sender: hit.sender,
+            timestamp: hit.timestamp, excerpt: hit.excerpt, linkState: hit.linkState
+        )
+        await app.openSearchResult(wrong)
+        #expect(app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+        let wrongProvenance = LocalSearchResult(
+            id: hit.id, target: .archiveRecord(
+                importID: importID, sequence: sequence, provenance: .archiveAttributed
+            ), source: hit.source, provenance: hit.provenance,
+            conversationLabel: hit.conversationLabel, sender: hit.sender,
+            timestamp: hit.timestamp, excerpt: hit.excerpt, linkState: hit.linkState
+        )
+        await app.openSearchResult(wrongProvenance)
+        #expect(app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+    }
+
+    @Test @MainActor
+    func expiredArchiveImportShowsUnavailableContextWithoutAutoLink() async throws {
+        let history = await makeHistory()
+        let importedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        _ = try await history.persistArchiveEvidence(
+            transcript: try attributed([("sender", "20:35", "expiring-archive-hit")]),
+            conversationKey: ArchiveConversationKey("b62-expiring"),
+            importedAt: importedAt
+        )
+        let hit = try #require(await history.searchLocalMessages("expiring-archive-hit").results.first)
+        let store = try #require(await history.openStore())
+        try await store.applyRetention(
+            .sevenDays, now: importedAt.addingTimeInterval(9 * 86_400)
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.openSearchResult(hit)
+        #expect(app.archiveContextUnavailable)
+        #expect(!app.searchHitUnavailable)
+        #expect(app.contextRevealRequest == nil)
+        #expect(app.selectedArchiveImportID == nil)
+        #expect(app.archiveEvidence.imports.isEmpty)
+    }
+
+    @Test @MainActor
+    func deletedArchiveRecordKeepsItsImportButCannotReveal() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("b62-reveal-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let history = LocalMessageHistory(
+            url: directory.appendingPathComponent("messages.sqlite"),
+            retention: .untilDeleted
+        )
+        await history.setEnabled(true)
+        let imported = try await history.persistArchiveEvidence(
+            transcript: try attributed([
+                ("sender", "20:35", "deleted-exact-needle"),
+                ("sender", "20:36", "surviving archive row")
+            ]),
+            conversationKey: ArchiveConversationKey("b62-row-retention"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected archive import")
+            return
+        }
+        let hit = try #require(await history.searchLocalMessages("deleted-exact-needle").results.first)
+        guard case .archiveRecord(_, let sequence, _) = hit.target else {
+            Issue.record("expected archive target")
+            return
+        }
+        var connection: OpaquePointer?
+        #expect(sqlite3_open_v2(
+            directory.appendingPathComponent("messages.sqlite").path,
+            &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil
+        ) == SQLITE_OK)
+        if let connection {
+            let sql = "DELETE FROM archive_attributed_records WHERE import_id = \(importID) AND sequence = \(sequence);"
+            #expect(sqlite3_exec(connection, sql, nil, nil, nil) == SQLITE_OK)
+            sqlite3_close_v2(connection)
+        }
+
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.openSearchResult(hit)
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.searchHitUnavailable)
+        #expect(!app.archiveContextUnavailable)
+        #expect(app.contextRevealRequest == nil)
+        #expect(app.selectedArchiveRecords.isEmpty)
+        await history.setEnabled(false)
     }
 }
