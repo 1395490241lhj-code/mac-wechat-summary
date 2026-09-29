@@ -157,6 +157,7 @@ enum ArchiveEvidenceShape: String, Sendable, Equatable {
 
 struct ArchiveEvidenceImportSummary: Identifiable, Sendable, Equatable {
     let id: Int64
+    let displayName: String?
     let shape: ArchiveEvidenceShape
     let importedAt: Date
     let recordCount: Int
@@ -308,4 +309,10 @@ struct ArchiveEvidenceAttachmentBatch: Identifiable, Sendable, Equatable {
     let attachmentCount: Int
     let materializedCount: Int
     let attachments: [ArchiveEvidenceAttachment]
+}
+
+
+enum ArchiveConversationDisplayNameError: Error, Equatable, Sendable {
+    case importUnknown
+    case invalidName
 }

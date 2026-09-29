@@ -179,6 +179,27 @@ actor LocalMessageHistory {
         return (try? await store.searchArchiveEvidence(query, limit: limit)) ?? []
     }
 
+
+    func setArchiveImportDisplayName(
+        importID: Int64,
+        displayName: String
+    ) async throws {
+        guard storeState == .ready, let store else {
+            throw ArchivePersistenceError.localStoreUnavailable
+        }
+        _ = try await store.setArchiveImportDisplayName(
+            importID: importID,
+            displayName: displayName
+        )
+    }
+
+    func clearArchiveImportDisplayName(importID: Int64) async throws {
+        guard storeState == .ready, let store else {
+            throw ArchivePersistenceError.localStoreUnavailable
+        }
+        try await store.clearArchiveImportDisplayName(importID: importID)
+    }
+
     func linkArchiveImport(
         importID: Int64,
         toVisualConversationID visualConversationID: Int64,

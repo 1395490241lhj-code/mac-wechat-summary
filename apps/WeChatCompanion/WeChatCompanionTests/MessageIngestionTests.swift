@@ -312,10 +312,11 @@ struct MessageIngestionTests {
         #expect(try await store.storedSchemaVersion() == MessageStore.schemaVersion)
         // v1 was visual capture only; v2 adds archive evidence; v3 adds
         // the explicit Archive ↔ Visual conversation-link relation; v4 adds
-        // import-scoped attachment manifests.
+        // import-scoped attachment manifests; v5 adds operator-confirmed
+        // archive display labels.
         // Deliberately pinned: bumping it is a contract change the bridge and
         // its `REQUIRED_TABLES_BY_VERSION` must be updated in the same breath.
-        #expect(MessageStore.schemaVersion == 4)
+        #expect(MessageStore.schemaVersion == 5)
     }
 
     // MARK: - Persistence guards

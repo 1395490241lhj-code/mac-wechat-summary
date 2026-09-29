@@ -39,6 +39,7 @@ final class AppModel {
     private(set) var selectedArchiveRecords: [ArchiveEvidenceRecord] = []
     private(set) var selectedArchiveAttachmentBatches: [ArchiveEvidenceAttachmentBatch] = []
     private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
+    private(set) var archiveDisplayNameStatus = ArchiveDisplayNameStatus.idle
     private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
     /// B5.1: one attachment's status after the user asked to open it. Reset by
     /// the next request; never carries a path or a hash into the UI.
@@ -620,6 +621,42 @@ final class AppModel {
         attachmentPreviewStatus = .revealed
     }
 
+
+    func setArchiveImportDisplayName(_ importID: Int64, displayName: String) async {
+        guard archiveEvidence.imports.contains(where: { $0.id == importID }) else {
+            archiveDisplayNameStatus = .unavailable
+            return
+        }
+        archiveDisplayNameStatus = .saving
+        do {
+            try await messageHistory.setArchiveImportDisplayName(
+                importID: importID,
+                displayName: displayName
+            )
+            archiveDisplayNameStatus = .saved
+            await refreshArchiveEvidence()
+        } catch ArchiveConversationDisplayNameError.invalidName {
+            archiveDisplayNameStatus = .invalid
+        } catch {
+            archiveDisplayNameStatus = .unavailable
+        }
+    }
+
+    func clearArchiveImportDisplayName(_ importID: Int64) async {
+        guard archiveEvidence.imports.contains(where: { $0.id == importID }) else {
+            archiveDisplayNameStatus = .unavailable
+            return
+        }
+        archiveDisplayNameStatus = .saving
+        do {
+            try await messageHistory.clearArchiveImportDisplayName(importID: importID)
+            archiveDisplayNameStatus = .cleared
+            await refreshArchiveEvidence()
+        } catch {
+            archiveDisplayNameStatus = .unavailable
+        }
+    }
+
     func linkArchiveImport(_ importID: Int64, toVisualConversationID visualConversationID: Int64) async {
         guard archiveEvidence.imports.contains(where: { $0.id == importID }),
               captureLedger.conversations.contains(where: { $0.id == visualConversationID })
@@ -1152,6 +1189,33 @@ final class AppModel {
         extractionPollingTask = nil
     }
 
+}
+
+
+enum ArchiveDisplayNameStatus: Equatable {
+    case idle
+    case saving
+    case saved
+    case cleared
+    case invalid
+    case unavailable
+
+    var message: String? {
+        switch self {
+        case .idle:
+            nil
+        case .saving:
+            "Saving display name…"
+        case .saved:
+            "Display name saved."
+        case .cleared:
+            "Display name cleared."
+        case .invalid:
+            "Use a single-line name between 1 and 120 characters."
+        case .unavailable:
+            "The display name could not be updated."
+        }
+    }
 }
 
 enum ArchiveLinkStatus: Equatable {

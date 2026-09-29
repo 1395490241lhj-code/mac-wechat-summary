@@ -997,9 +997,9 @@ private struct ArchiveEvidenceBrowser: View {
         }) {
             Divider()
             VStack(alignment: .leading, spacing: 4) {
-                Text("Messages")
+                Text(selected.displayName ?? "Imported WeChat Archive")
                     .font(.callout.weight(.medium))
-                Text(importSubtitle(selected))
+                Text("Messages · " + importSubtitle(selected))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1078,9 +1078,39 @@ private struct ArchiveEvidenceBrowser: View {
 private struct ArchiveLinkControls: View {
     @Bindable var model: AppModel
     let summary: ArchiveEvidenceImportSummary
+    @State private var isEditingDisplayName = false
+    @State private var displayNameDraft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Archive display name")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(summary.displayName ?? "Not set")
+                        .font(.callout.weight(.medium))
+                }
+                Spacer()
+                Button(summary.displayName == nil ? "Set Name…" : "Rename…") {
+                    displayNameDraft = summary.displayName ?? ""
+                    isEditingDisplayName = true
+                }
+                .disabled(model.archiveDisplayNameStatus == .saving)
+                if summary.displayName != nil {
+                    Button("Clear") {
+                        Task { await model.clearArchiveImportDisplayName(summary.id) }
+                    }
+                    .disabled(model.archiveDisplayNameStatus == .saving)
+                }
+            }
+
+            Text("Display name is a label you confirm. It does not link or merge conversations.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
             if let link = summary.link {
                 HStack {
                     Label("Linked to \(link.visualConversationTitle)", systemImage: "link")
@@ -1121,6 +1151,16 @@ private struct ArchiveLinkControls: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            if let message = model.archiveDisplayNameStatus.message {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(
+                        model.archiveDisplayNameStatus == .invalid
+                            || model.archiveDisplayNameStatus == .unavailable
+                            ? Color.red : Color.secondary
+                    )
+            }
+
             if let message = model.archiveLinkStatus.message {
                 Text(message)
                     .font(.caption)
@@ -1132,6 +1172,21 @@ private struct ArchiveLinkControls: View {
             }
         }
         .padding(.vertical, 4)
+        .alert("Archive Display Name", isPresented: $isEditingDisplayName) {
+            TextField("Group or chat name", text: $displayNameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                let value = displayNameDraft
+                Task {
+                    await model.setArchiveImportDisplayName(
+                        summary.id,
+                        displayName: value
+                    )
+                }
+            }
+        } message: {
+            Text("This name is only a display label you confirm. It will not link or merge conversations.")
+        }
     }
 }
 
@@ -1286,10 +1341,16 @@ private struct ArchiveImportRow: View {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(summary.importedAt.formatted(date: .abbreviated, time: .shortened))
-                        .fontWeight(.medium)
                     Text(
-                        "\(summary.recordCount) records · \(summary.shape.label)"
+                        summary.displayName
+                            ?? summary.importedAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                    .fontWeight(.medium)
+                    Text(
+                        (summary.displayName == nil
+                            ? ""
+                            : summary.importedAt.formatted(date: .abbreviated, time: .shortened) + " · ")
+                        + "\(summary.recordCount) records · \(summary.shape.label)"
                         + (summary.attachmentCount > 0
                             ? " · \(summary.attachmentCount) attachments"
                             : "")

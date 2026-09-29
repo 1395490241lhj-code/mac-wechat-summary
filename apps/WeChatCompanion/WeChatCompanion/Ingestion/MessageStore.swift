@@ -55,7 +55,8 @@ actor MessageStore {
     /// v2 — plus the four archive evidence tables.
     /// v3 — plus the explicit Archive ↔ Visual conversation link relation.
     /// v4 — plus import-level attachment batches and attachment manifests.
-    static let schemaVersion: Int32 = 4
+    /// v5 — plus operator-confirmed archive display labels.
+    static let schemaVersion: Int32 = 5
 
     /// Tables each published version promises. The bridge checks the same
     /// contract from the read side.
@@ -79,10 +80,18 @@ actor MessageStore {
             "archive_conversation_links",
             "archive_attachment_batches", "archive_attachments",
         ],
+        5: [
+            "conversations", "messages",
+            "archive_conversations", "archive_imports",
+            "archive_attributed_records", "archive_unattributed_records",
+            "archive_conversation_links",
+            "archive_attachment_batches", "archive_attachments",
+            "archive_conversation_labels",
+        ],
     ]
 
     private static var postV1Tables: Set<String> {
-        requiredTables[4]!.subtracting(requiredTables[1]!)
+        requiredTables[5]!.subtracting(requiredTables[1]!)
     }
 
     private static var v3Tables: Set<String> {
@@ -91,6 +100,10 @@ actor MessageStore {
 
     private static var v4Tables: Set<String> {
         requiredTables[4]!.subtracting(requiredTables[3]!)
+    }
+
+    private static var v5Tables: Set<String> {
+        requiredTables[5]!.subtracting(requiredTables[4]!)
     }
 
     private let database: DatabaseHandle
@@ -154,52 +167,66 @@ actor MessageStore {
                 throw MessageStoreError.unversionedExistingSchema
             }
             try transaction(handle) {
-                for statement in schemaV1 + schemaV2Archive + schemaV3Links + schemaV4Attachments {
+                for statement in schemaV1 + schemaV2Archive + schemaV3Links
+                    + schemaV4Attachments + schemaV5Labels {
                     try exec(handle, statement)
                 }
-                try require(tablesFor: 4, in: handle, version: 0)
-                try exec(handle, "PRAGMA user_version = 4;")
+                try require(tablesFor: 5, in: handle, version: 0)
+                try exec(handle, "PRAGMA user_version = 5;")
             }
         case 1:
             try require(tablesFor: 1, in: handle, version: 1)
-            // No post-v1 table name may already exist: adopting one with
-            // CREATE TABLE IF NOT EXISTS would bless an unknown shape.
             guard try applicationTables(handle).isDisjoint(with: postV1Tables) else {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV2Archive + schemaV3Links + schemaV4Attachments {
+                for statement in schemaV2Archive + schemaV3Links
+                    + schemaV4Attachments + schemaV5Labels {
                     try exec(handle, statement)
                 }
-                try require(tablesFor: 4, in: handle, version: 1)
-                try exec(handle, "PRAGMA user_version = 4;")
+                try require(tablesFor: 5, in: handle, version: 1)
+                try exec(handle, "PRAGMA user_version = 5;")
             }
         case 2:
             try require(tablesFor: 2, in: handle, version: 2)
             guard try applicationTables(handle).isDisjoint(
-                with: v3Tables.union(v4Tables)
+                with: v3Tables.union(v4Tables).union(v5Tables)
             ) else {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV3Links + schemaV4Attachments {
+                for statement in schemaV3Links + schemaV4Attachments + schemaV5Labels {
                     try exec(handle, statement)
                 }
-                try require(tablesFor: 4, in: handle, version: 2)
-                try exec(handle, "PRAGMA user_version = 4;")
+                try require(tablesFor: 5, in: handle, version: 2)
+                try exec(handle, "PRAGMA user_version = 5;")
             }
         case 3:
             try require(tablesFor: 3, in: handle, version: 3)
-            guard try applicationTables(handle).isDisjoint(with: v4Tables) else {
+            guard try applicationTables(handle).isDisjoint(
+                with: v4Tables.union(v5Tables)
+            ) else {
                 throw MessageStoreError.reservedTableAlreadyPresent
             }
             try transaction(handle) {
-                for statement in schemaV4Attachments { try exec(handle, statement) }
-                try require(tablesFor: 4, in: handle, version: 3)
-                try exec(handle, "PRAGMA user_version = 4;")
+                for statement in schemaV4Attachments + schemaV5Labels {
+                    try exec(handle, statement)
+                }
+                try require(tablesFor: 5, in: handle, version: 3)
+                try exec(handle, "PRAGMA user_version = 5;")
             }
         case 4:
             try require(tablesFor: 4, in: handle, version: 4)
+            guard try applicationTables(handle).isDisjoint(with: v5Tables) else {
+                throw MessageStoreError.reservedTableAlreadyPresent
+            }
+            try transaction(handle) {
+                for statement in schemaV5Labels { try exec(handle, statement) }
+                try require(tablesFor: 5, in: handle, version: 4)
+                try exec(handle, "PRAGMA user_version = 5;")
+            }
+        case 5:
+            try require(tablesFor: 5, in: handle, version: 5)
         case let future where future > schemaVersion:
             throw MessageStoreError.schemaFromFuture(version: future)
         default:
@@ -477,6 +504,22 @@ actor MessageStore {
         """,
     ]
 
+    /// B5.2 operator-confirmed display labels. This is presentation metadata,
+    /// not conversation identity and not an Archive ↔ Visual link.
+    private static let schemaV5Labels: [String] = [
+        """
+        CREATE TABLE IF NOT EXISTS archive_conversation_labels (
+            archive_conversation_id INTEGER PRIMARY KEY
+                REFERENCES archive_conversations(id) ON DELETE CASCADE,
+            display_name TEXT NOT NULL
+                CHECK (length(trim(display_name)) BETWEEN 1 AND 120),
+            basis TEXT NOT NULL DEFAULT 'operator'
+                CHECK (basis = 'operator'),
+            updated_at REAL NOT NULL
+        );
+        """,
+    ]
+
     /// The schema version recorded in the database file itself.
     func storedSchemaVersion() throws -> Int32 {
         try query("PRAGMA user_version;") { Int32(sqlite3_column_int64($0, 0)) }.first ?? 0
@@ -610,7 +653,10 @@ actor MessageStore {
                      WHERE b.import_id = i.id),
                    (SELECT COUNT(*) FROM archive_attachments a
                       JOIN archive_attachment_batches b ON b.id = a.batch_id
-                     WHERE b.import_id = i.id AND a.storage_state = 'materialized')
+                     WHERE b.import_id = i.id AND a.storage_state = 'materialized'),
+                   (SELECT display_name
+                      FROM archive_conversation_labels n
+                     WHERE n.archive_conversation_id = c.id)
             FROM archive_imports i
             JOIN archive_conversations c ON c.id = i.archive_conversation_id
             LEFT JOIN archive_conversation_links l ON l.archive_conversation_id = c.id
@@ -635,6 +681,7 @@ actor MessageStore {
             }
             return ArchiveEvidenceImportSummary(
                 id: sqlite3_column_int64(statement, 0),
+                displayName: Self.string(statement, 15),
                 shape: ArchiveEvidenceShape(rawValue: Self.string(statement, 1) ?? "") ?? .unattributed,
                 importedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
                 recordCount: Int(sqlite3_column_int64(statement, 3)),
@@ -647,6 +694,61 @@ actor MessageStore {
                 materializedAttachmentCount: Int(sqlite3_column_int64(statement, 14))
             )
         }
+    }
+
+
+    @discardableResult
+    func setArchiveImportDisplayName(
+        importID: Int64,
+        displayName: String,
+        updatedAt: Date = Date()
+    ) throws -> String {
+        let normalized = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.count <= 120,
+              normalized.rangeOfCharacter(from: .newlines) == nil,
+              normalized.rangeOfCharacter(from: .controlCharacters) == nil
+        else {
+            throw ArchiveConversationDisplayNameError.invalidName
+        }
+
+        guard let archiveConversationID = try query(
+            "SELECT archive_conversation_id FROM archive_imports WHERE id = ?;",
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { sqlite3_column_int64($0, 0) }
+        ).first else {
+            throw ArchiveConversationDisplayNameError.importUnknown
+        }
+
+        try run(
+            """
+            INSERT INTO archive_conversation_labels(
+                archive_conversation_id, display_name, basis, updated_at
+            ) VALUES (?, ?, 'operator', ?)
+            ON CONFLICT(archive_conversation_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                basis = 'operator',
+                updated_at = excluded.updated_at;
+            """
+        ) { statement in
+            sqlite3_bind_int64(statement, 1, archiveConversationID)
+            Self.bind(statement, 2, normalized)
+            sqlite3_bind_double(statement, 3, updatedAt.timeIntervalSince1970)
+        }
+        return normalized
+    }
+
+    func clearArchiveImportDisplayName(importID: Int64) throws {
+        guard let archiveConversationID = try query(
+            "SELECT archive_conversation_id FROM archive_imports WHERE id = ?;",
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { sqlite3_column_int64($0, 0) }
+        ).first else {
+            throw ArchiveConversationDisplayNameError.importUnknown
+        }
+        try run(
+            "DELETE FROM archive_conversation_labels WHERE archive_conversation_id = ?;"
+        ) { sqlite3_bind_int64($0, 1, archiveConversationID) }
     }
 
     @discardableResult

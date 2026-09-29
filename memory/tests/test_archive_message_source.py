@@ -139,6 +139,34 @@ def test_status_and_conversations_exclude_unattributed_exports(tmp_path):
     assert result.coverage.status == COVERAGE_COMPLETE
 
 
+
+
+def test_schema_v5_operator_display_labels_are_exposed_without_changing_identity(tmp_path):
+    path = tmp_path / "messages.sqlite"
+    seed_archive_store(path)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE archive_conversation_labels (
+            archive_conversation_id INTEGER PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            basis TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        INSERT INTO archive_conversation_labels
+            VALUES (3, '用户确认群名', 'operator', 5000.0);
+        PRAGMA user_version = 5;
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    result = ArchiveMessageSource(str(path)).list_conversations(10)
+
+    assert [item.id for item in result.items] == [3, 1]
+    assert result.items[0].title == "用户确认群名"
+    assert result.items[1].title is None
+
 def test_message_read_preserves_archive_attribution_and_time(tmp_path):
     path = tmp_path / "messages.sqlite"
     seed_archive_store(path)

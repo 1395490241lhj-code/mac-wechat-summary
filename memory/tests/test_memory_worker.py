@@ -588,7 +588,7 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     connection = sqlite3.connect(messages)
     connection.executescript(
         """
-        PRAGMA user_version = 4;
+        PRAGMA user_version = 5;
         CREATE TABLE conversations (
             id INTEGER PRIMARY KEY, title TEXT, first_seen_at REAL, last_seen_at REAL
         );
@@ -639,6 +639,12 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
             stored_relative_path TEXT,
             relation_scope TEXT NOT NULL
         );
+        CREATE TABLE archive_conversation_labels (
+            archive_conversation_id INTEGER PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            basis TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
         INSERT INTO archive_conversations VALUES (1, 'anonymous-a');
         INSERT INTO archive_conversations VALUES (2, 'anonymous-b');
         INSERT INTO archive_imports VALUES (1, 1, 'attributed', 1000.0);
@@ -647,6 +653,8 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
             VALUES (1, 0, '林晓', 100.0, '昨天 10:00', '麻烦确认归档报价');
         INSERT INTO archive_unattributed_records
             VALUES (2, 0, '不应进入 Memory');
+        INSERT INTO archive_conversation_labels
+            VALUES (1, '用户确认群名', 'operator', 4000.0);
         INSERT INTO archive_attachment_batches
             VALUES (1, 1, 'batch', 3000.0, 1, 1);
         INSERT INTO archive_attachments
@@ -705,7 +713,7 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert (summary["ok"], summary_code) == (True, 0), summary
     assert summary["source"] == SOURCE_ARCHIVE
     assert summary["counts"]["returned_messages"] == 1
-    assert summary["conversations"][0]["label"] == "Imported archive export"
+    assert summary["conversations"][0]["label"] == "用户确认群名"
     assert summary["messages"][0]["timestamp_kind"] == "source_created"
     summary_blob = json.dumps(summary, ensure_ascii=False)
     assert "不应进入 Memory" not in summary_blob
@@ -726,7 +734,7 @@ def test_the_frozen_worker_syncs_archive_source_end_to_end(tmp_path):
     assert (reminders["ok"], reminder_code) == (True, 0), reminders
     assert reminders["source"] == SOURCE_ARCHIVE
     assert reminders["counts"]["returned_candidates"] == 1
-    assert reminders["conversations"][0]["label"] == "Imported archive export"
+    assert reminders["conversations"][0]["label"] == "用户确认群名"
     assert reminders["candidates"][0]["timestamp_kind"] == "source_created"
     reminders_blob = json.dumps(reminders, ensure_ascii=False)
     assert "不应进入 Memory" not in reminders_blob

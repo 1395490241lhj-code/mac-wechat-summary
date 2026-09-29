@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - source checkout import path
     )
 
 SOURCE_ARCHIVE = "archive"
-_SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
 _REQUIRED_TABLES_BY_VERSION = {
     2: frozenset({
         "conversations", "messages",
@@ -56,6 +56,14 @@ _REQUIRED_TABLES_BY_VERSION = {
         "archive_attributed_records", "archive_unattributed_records",
         "archive_conversation_links",
         "archive_attachment_batches", "archive_attachments",
+    }),
+    5: frozenset({
+        "conversations", "messages",
+        "archive_conversations", "archive_imports",
+        "archive_attributed_records", "archive_unattributed_records",
+        "archive_conversation_links",
+        "archive_attachment_batches", "archive_attachments",
+        "archive_conversation_labels",
     }),
 }
 
@@ -186,18 +194,33 @@ class ArchiveMessageSource:
         bounded = max(1, int(limit))
         connection = self._connect()
         try:
-            rows = connection.execute(
-                """SELECT i.id,
-                          MIN(a.sent_at) AS first_sent_at,
-                          MAX(a.sent_at) AS last_sent_at
-                   FROM archive_imports i
-                   JOIN archive_attributed_records a ON a.import_id = i.id
-                   WHERE i.transcript_shape = 'attributed'
-                   GROUP BY i.id
-                   ORDER BY i.imported_at DESC, i.id DESC
-                   LIMIT ?;""",
-                (bounded + 1,),
-            ).fetchall()
+            version = int(connection.execute("PRAGMA user_version;").fetchone()[0])
+            if version >= 5:
+                sql = """SELECT i.id,
+                                MIN(a.sent_at) AS first_sent_at,
+                                MAX(a.sent_at) AS last_sent_at,
+                                n.display_name
+                         FROM archive_imports i
+                         JOIN archive_attributed_records a ON a.import_id = i.id
+                         JOIN archive_conversations c ON c.id = i.archive_conversation_id
+                         LEFT JOIN archive_conversation_labels n
+                                ON n.archive_conversation_id = c.id
+                         WHERE i.transcript_shape = 'attributed'
+                         GROUP BY i.id, n.display_name
+                         ORDER BY i.imported_at DESC, i.id DESC
+                         LIMIT ?;"""
+            else:
+                sql = """SELECT i.id,
+                                MIN(a.sent_at) AS first_sent_at,
+                                MAX(a.sent_at) AS last_sent_at,
+                                NULL AS display_name
+                         FROM archive_imports i
+                         JOIN archive_attributed_records a ON a.import_id = i.id
+                         WHERE i.transcript_shape = 'attributed'
+                         GROUP BY i.id
+                         ORDER BY i.imported_at DESC, i.id DESC
+                         LIMIT ?;"""
+            rows = connection.execute(sql, (bounded + 1,)).fetchall()
         finally:
             connection.close()
         truncated = len(rows) > bounded
@@ -205,7 +228,7 @@ class ArchiveMessageSource:
         items = tuple(
             NormalizedConversation(
                 id=int(row["id"]),
-                title=None,
+                title=row["display_name"],
                 first_seen_at=float(row["first_sent_at"]),
                 last_seen_at=float(row["last_sent_at"]),
                 source=self.name,

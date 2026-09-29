@@ -923,6 +923,14 @@ CREATE TABLE archive_attachments (
   relation_scope TEXT NOT NULL);
 """
 
+_V5_LABEL_TABLE = """
+CREATE TABLE archive_conversation_labels (
+  archive_conversation_id INTEGER PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  basis TEXT NOT NULL,
+  updated_at REAL NOT NULL);
+"""
+
 
 def _schema_db(tmp_path, *, version, extra=""):
     path = tmp_path / f"schema-{version}.sqlite"
@@ -996,6 +1004,34 @@ def test_complete_schema_v4_is_accepted(tmp_path):
     ) == 4
 
 
+
+
+def test_complete_schema_v5_is_accepted(tmp_path):
+    assert _verify(
+        _schema_db(
+            tmp_path,
+            version=5,
+            extra=(
+                _V2_ARCHIVE_TABLES
+                + _V3_LINK_TABLE
+                + _V4_ATTACHMENT_TABLES
+                + _V5_LABEL_TABLE
+            ),
+        )
+    ) == 5
+
+
+def test_schema_v5_missing_label_table_is_incomplete(tmp_path):
+    with pytest.raises(store_access.BridgeUnavailable) as error:
+        _verify(
+            _schema_db(
+                tmp_path,
+                version=5,
+                extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE + _V4_ATTACHMENT_TABLES,
+            )
+        )
+    assert error.value.state == "schema_incomplete"
+
 @pytest.mark.parametrize("missing", ["archive_attachment_batches", "archive_attachments"])
 def test_schema_v4_missing_attachment_table_is_incomplete(tmp_path, missing):
     statements = {
@@ -1033,8 +1069,13 @@ def test_a_future_schema_version_is_unsupported(tmp_path):
         _verify(
             _schema_db(
                 tmp_path,
-                version=5,
-                extra=_V2_ARCHIVE_TABLES + _V3_LINK_TABLE + _V4_ATTACHMENT_TABLES,
+                version=6,
+                extra=(
+                    _V2_ARCHIVE_TABLES
+                    + _V3_LINK_TABLE
+                    + _V4_ATTACHMENT_TABLES
+                    + _V5_LABEL_TABLE
+                ),
             )
         )
     assert error.value.state == "schema_unsupported"
