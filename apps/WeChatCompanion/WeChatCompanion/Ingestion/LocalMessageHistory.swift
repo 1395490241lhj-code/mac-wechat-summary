@@ -17,6 +17,9 @@ actor LocalMessageHistory {
     private let attachmentStore: ArchiveAttachmentStore?
     private var store: MessageStore?
     private var activeIngestor: MessageIngestor?
+    /// B6's session-derived full-text index. Owned here because its lifetime is
+    /// exactly the lifetime of an open, consented store, and destroyed with it.
+    private var searchIndex: LocalMessageSearchIndex?
     private var isEnabled = false
     private var retention: RetentionPolicy
 
@@ -179,6 +182,38 @@ actor LocalMessageHistory {
         return (try? await store.searchArchiveEvidence(query, limit: limit)) ?? []
     }
 
+    // MARK: - B6 local search
+
+    /// Runs one local literal search. Fails soft the way the ledger does: an
+    /// unreadable store or a runtime without FTS5 is a state to show, not a
+    /// crash. Read-only -- the index lives in memory and the canonical store is
+    /// only ever SELECTed.
+    func searchLocalMessages(
+        _ query: String,
+        filter: LocalSearchFilter = .all
+    ) async -> LocalSearchSnapshot {
+        let state = storeState
+        guard state == .ready, let index = searchIndex else {
+            return LocalSearchSnapshot(
+                status: state == .disabled ? .storageDisabled : .storeUnavailable
+            )
+        }
+        return await (try? index.search(query, filter: filter))
+            ?? LocalSearchSnapshot(status: .failed)
+    }
+
+    /// Aggregate indexed document count. Never text, never a path.
+    func localSearchDocumentCount() async -> Int {
+        guard storeState == .ready, let searchIndex else { return 0 }
+        return (try? await searchIndex.documentCount()) ?? 0
+    }
+
+    /// Drops the derived index after any canonical write that changes searchable
+    /// text. Cheap by design: the next query rebuilds from canonical state.
+    private func invalidateSearchIndex() async {
+        await searchIndex?.invalidate()
+    }
+
 
     func setArchiveImportDisplayName(
         importID: Int64,
@@ -239,6 +274,9 @@ actor LocalMessageHistory {
             await open()
         } else {
             activeIngestor = nil
+            // Consent withdrawn: the derived index holds a copy of chat text in
+            // memory, so it goes with the store rather than lingering unread.
+            searchIndex = nil
             store = nil
             lastOpenFailure = nil
         }
@@ -268,6 +306,7 @@ actor LocalMessageHistory {
     func deleteAllHistory() async {
         try? await store?.deleteAllHistory()
         activeIngestor = nil
+        searchIndex = nil
         store = nil
         lastOpenFailure = nil
         removeDatabaseFiles()
@@ -300,11 +339,14 @@ actor LocalMessageHistory {
         guard let store else {
             throw ArchivePersistenceError.localStoreUnavailable
         }
-        return try await store.persistArchiveEvidence(
+        let result = try await store.persistArchiveEvidence(
             transcript: transcript,
             conversationKey: conversationKey,
             importedAt: importedAt
         )
+        // New chat text just entered the canonical store.
+        await invalidateSearchIndex()
+        return result
     }
 
     /// Opens the store, or records why it could not be opened.
@@ -334,11 +376,16 @@ actor LocalMessageHistory {
         }
         lastOpenFailure = nil
         store = opened
+        searchIndex = LocalMessageSearchIndex(store: opened)
         let ingestor = MessageIngestor(
             store: opened,
             retention: retention,
             retentionDidSweep: { [weak self] in
                 await self?.reconcileAttachments()
+                await self?.invalidateSearchIndex()
+            },
+            textDidChange: { [weak self] in
+                await self?.invalidateSearchIndex()
             }
         )
         // Applied before the first new write, so a policy tightened while the

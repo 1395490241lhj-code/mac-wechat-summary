@@ -19,6 +19,8 @@ struct ContentView: View {
                 OverviewView(model: model)
             case .chats:
                 ChatsView(model: model)
+            case .search:
+                SearchView(model: model)
             case .dailySummary:
                 DailySummaryView(model: model)
             case .reminders:
@@ -2680,6 +2682,196 @@ private struct FollowUpCandidateRow: View {
         case "time_reference": "Time reference (not a due date)"
         default: reason.replacingOccurrences(of: "_", with: " ").capitalized
         }
+    }
+}
+
+/// B6 local search.
+///
+/// The query lives only in `@State` and in the model for the current session.
+/// Nothing here writes it to UserDefaults, the message database, or any log,
+/// so relaunching the app cannot restore a previous search. The index behind
+/// the results is derived, in-memory, and rebuilt from canonical evidence on
+/// demand -- this view only ever shows what the store still retains.
+private struct SearchView: View {
+    @Bindable var model: AppModel
+    @State private var query = ""
+    /// Session-only. Like `query` this never leaves SwiftUI state, so a
+    /// relaunch cannot restore the last search.
+    @State private var filter: LocalSearchFilter = .all
+
+    private var trimmed: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Search")
+                    .font(.largeTitle.weight(.semibold))
+
+                Text("Local only · Searches currently stored evidence")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+
+                searchField
+                sourceFilter
+
+                Divider()
+                results
+
+                Text("Search covers only evidence currently retained on this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .navigationTitle("Search")
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            TextField("Search local messages", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(submit)
+            Button("Search", action: submit)
+                .disabled(trimmed.isEmpty)
+            if !query.isEmpty {
+                Button("Clear") {
+                    query = ""
+                    filter = .all
+                    model.clearLocalSearch()
+                }
+            }
+        }
+    }
+
+    private var sourceFilter: some View {
+        Picker("Source", selection: $filter) {
+            ForEach(LocalSearchFilter.allCases, id: \.self) { option in
+                Text(option.label).tag(option)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .onChange(of: filter) { _, _ in
+            // Re-run the same query under the new source filter. The query text
+            // is unchanged, so this narrows the search rather than starting a
+            // new one.
+            if !trimmed.isEmpty { submit() }
+        }
+    }
+
+    @ViewBuilder
+    private var results: some View {
+        switch model.localSearch.status {
+        case .storageDisabled:
+            ContentUnavailableView(
+                "Local search is off",
+                systemImage: "lock",
+                description: Text(
+                    "Enable local message storage in Settings to search the evidence kept on this Mac."
+                )
+            )
+        case .storeUnavailable:
+            ContentUnavailableView(
+                "Local search is unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text("The local message store could not be opened.")
+            )
+        case .preparing:
+            HStack(spacing: 8) {
+                ProgressView()
+                Text("Preparing local search index…")
+                    .foregroundStyle(.secondary)
+            }
+        case .failed:
+            ContentUnavailableView(
+                "Search could not run",
+                systemImage: "exclamationmark.triangle",
+                description: Text("The local search index could not be prepared on this Mac.")
+            )
+        case .idle:
+            Text("Enter a few words to search the message text stored on this Mac.")
+                .foregroundStyle(.secondary)
+        case .noMatches:
+            VStack(alignment: .leading, spacing: 4) {
+                Text("No matches in currently stored local evidence.")
+                if model.localSearch.indexedDocumentCount > 0 {
+                    Text("\(model.localSearch.indexedDocumentCount) messages indexed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .results(let count):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("\(count) matches")
+                    .font(.callout.weight(.medium))
+                ForEach(model.localSearch.results) { result in
+                    LocalSearchResultRow(result: result)
+                    Divider()
+                }
+                if model.localSearch.results.count
+                    == LocalMessageSearchIndex.maximumResults
+                {
+                    Text("Showing the first \(LocalMessageSearchIndex.maximumResults) matches.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        let value = trimmed
+        guard !value.isEmpty else { return }
+        Task { @MainActor in
+            await model.searchLocalMessages(value, filter: filter)
+        }
+    }
+}
+
+/// One search result. Shows provenance in words, never an internal identifier,
+/// a stored path, or a content hash.
+private struct LocalSearchResultRow: View {
+    let result: LocalSearchResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(result.source.label)
+                    .font(.caption.weight(.semibold))
+                Text(result.conversationLabel)
+                    .font(.callout.weight(.medium))
+                if let linkState = result.linkState {
+                    Text(linkState)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 6) {
+                Text(result.provenance.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let sender = result.sender {
+                    Text(sender)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let timestamp = result.timestamp {
+                    Text(timestamp.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if !result.excerpt.isEmpty {
+                Text(result.excerpt)
+                    .font(.callout)
+                    .lineLimit(3)
+            }
+        }
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

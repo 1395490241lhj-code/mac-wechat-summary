@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		A00000000000000000000001 /* WeChatCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* WeChatCompanionApp.swift */; };
 		A00000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* ContentView.swift */; };
+		A00000000000000000000B6 /* LocalMessageSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000B6 /* LocalMessageSearch.swift */; };
+		B00000000000000000000B6 /* LocalMessageSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000B7 /* LocalMessageSearchTests.swift */; };
+		B00000000000000000000B8 /* LocalMessageSearchLiteralQueryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000B9 /* LocalMessageSearchLiteralQueryTests.swift */; };
 		A00000000000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* AppModel.swift */; };
 		A00000000000000000000004 /* DiagnosticResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000004 /* DiagnosticResult.swift */; };
 		A00000000000000000000005 /* DiagnosticsService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* DiagnosticsService.swift */; };
@@ -103,6 +106,9 @@
 /* Begin PBXFileReference section */
 		C00000000000000000000001 /* WeChatCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeChatCompanionApp.swift; sourceTree = "<group>"; };
 		C00000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C00000000000000000000B6 /* LocalMessageSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageSearch.swift; sourceTree = "<group>"; };
+		C00000000000000000000B7 /* LocalMessageSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMessageSearchTests.swift; sourceTree = "<group>"; };
+		C00000000000000000000B9 /* LocalMessageSearchLiteralQueryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalMessageSearchLiteralQueryTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		C00000000000000000000004 /* DiagnosticResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/DiagnosticResult.swift; sourceTree = "<group>"; };
 		C00000000000000000000005 /* DiagnosticsService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagnosticsService.swift; sourceTree = "<group>"; };
@@ -242,6 +248,7 @@
 				C00000000000000000000A1 /* WeChatNativeTranscriptParser.swift */,
 				C00000000000000000000A2 /* WeChatNativeArchive.swift */,
 				C00000000000000000000098 /* LocalMessageHistory.swift */,
+				C00000000000000000000B6 /* LocalMessageSearch.swift */,
 				C00000000000000000000007 /* Info.plist */,
 				C00000000000000000000AC /* WeChatCompanion.entitlements */,
 			);
@@ -272,6 +279,8 @@
 				C00000000000000000000A5 /* ArchivePersistenceTests.swift */,
 				C00000000000000000000A3 /* WeChatNativeArchiveTests.swift */,
 				C00000000000000000000A8 /* WeChatShareInboxTests.swift */,
+				C00000000000000000000B7 /* LocalMessageSearchTests.swift */,
+				C00000000000000000000B9 /* LocalMessageSearchLiteralQueryTests.swift */,
 			);
 			path = WeChatCompanionTests;
 			sourceTree = "<group>";
@@ -485,6 +494,7 @@
 				A00000000000000000000A1 /* WeChatNativeTranscriptParser.swift in Sources */,
 				A00000000000000000000A2 /* WeChatNativeArchive.swift in Sources */,
 				A00000000000000000000098 /* LocalMessageHistory.swift in Sources */,
+				A00000000000000000000B6 /* LocalMessageSearch.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -513,6 +523,8 @@
 				B00000000000000000000A5 /* ArchivePersistenceTests.swift in Sources */,
 				B00000000000000000000A3 /* WeChatNativeArchiveTests.swift in Sources */,
 				B00000000000000000000A8 /* WeChatShareInboxTests.swift in Sources */,
+				B00000000000000000000B6 /* LocalMessageSearchTests.swift in Sources */,
+				B00000000000000000000B8 /* LocalMessageSearchLiteralQueryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

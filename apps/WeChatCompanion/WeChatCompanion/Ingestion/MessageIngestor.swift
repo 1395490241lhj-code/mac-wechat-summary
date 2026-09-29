@@ -47,6 +47,11 @@ actor MessageIngestor: MessageIngesting {
 
     private let store: MessageStore
     private let retentionDidSweep: (@Sendable () async -> Void)?
+    /// Fired only when this ingest actually wrote new message rows. Display-name
+    /// and attachment-only changes deliberately do not pass through here: they do
+    /// not alter searchable text, so rebuilding the search index for them would
+    /// be pure waste.
+    private let textDidChange: (@Sendable () async -> Void)?
     private var retention: RetentionPolicy
     private var lastSweepAt: Date?
     private var metrics = IngestionMetrics()
@@ -54,11 +59,13 @@ actor MessageIngestor: MessageIngesting {
     init(
         store: MessageStore,
         retention: RetentionPolicy = .defaultPolicy,
-        retentionDidSweep: (@Sendable () async -> Void)? = nil
+        retentionDidSweep: (@Sendable () async -> Void)? = nil,
+        textDidChange: (@Sendable () async -> Void)? = nil
     ) {
         self.store = store
         self.retention = retention
         self.retentionDidSweep = retentionDidSweep
+        self.textDidChange = textDidChange
     }
 
     func snapshot() -> IngestionMetrics { metrics }
@@ -116,6 +123,7 @@ actor MessageIngestor: MessageIngesting {
             return
         }
 
+        var wroteNewText = false
         do {
             let conversationID = try await store.conversationID(
                 forTitle: title, seenAt: frame.capturedAt
@@ -140,6 +148,7 @@ actor MessageIngestor: MessageIngesting {
                     observedAt: frame.capturedAt
                 )
                 metrics.messagesAppended += range.count
+                wroteNewText = true
             case let .gap(range):
                 try await store.append(
                     Array(visible[range]),
@@ -148,6 +157,7 @@ actor MessageIngestor: MessageIngesting {
                 )
                 metrics.messagesAppended += range.count
                 metrics.continuityGaps += 1
+                wroteNewText = true
             case let .prepended(_, range):
                 try await store.prepend(
                     Array(visible[range]),
@@ -155,6 +165,7 @@ actor MessageIngestor: MessageIngesting {
                     observedAt: frame.capturedAt
                 )
                 metrics.messagesPrepended += range.count
+                wroteNewText = true
             }
             metrics.lastIngestedAt = Date()
         } catch {
@@ -162,6 +173,7 @@ actor MessageIngestor: MessageIngesting {
             // never stored or logged.
             metrics.persistenceFailures += 1
         }
+        if wroteNewText { await textDidChange?() }
     }
 
     /// A bubble is worth storing if the extractor read *something* from it.

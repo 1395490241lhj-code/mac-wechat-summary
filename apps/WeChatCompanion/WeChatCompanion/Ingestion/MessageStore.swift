@@ -922,6 +922,291 @@ actor MessageStore {
         return Date(timeIntervalSince1970: sqlite3_column_double(statement, index))
     }
 
+    // MARK: - B6 search-index read surface
+
+    /// The single visual message, by identity, for re-validating a search hit.
+    func persistedMessage(id: Int64) throws -> PersistedMessage? {
+        try query(
+            """
+            SELECT id, conversation_id, sequence, sender, ownership, visible_time,
+                   text, kind, confidence, first_observed_at
+            FROM messages WHERE id = ? LIMIT 1;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, id) },
+            row: Self.persistedMessage
+        ).first
+    }
+
+    /// The presentation title of the conversation a message belongs to, read at
+    /// result time. `nil` when the message is gone, which is exactly the case a
+    /// stale index hit must be dropped for.
+    func conversationTitle(forMessageID messageID: Int64) throws -> String? {
+        try query(
+            """
+            SELECT c.title FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.id = ? LIMIT 1;
+            """,
+            bind: { sqlite3_bind_int64($0, 1, messageID) },
+            row: { Self.string($0, 0) }
+        ).first ?? nil
+    }
+
+    func archiveRecord(importID: Int64, sequence: Int) throws -> ArchiveEvidenceRecord? {
+        let shape = try importShape(importID: importID)
+        switch shape {
+        case .attributed:
+            return try query(
+                """
+                SELECT i.id, i.imported_at, i.transcript_shape,
+                       a.sequence, a.sender, a.sent_at, a.sent_at_text, a.text
+                FROM archive_imports i
+                JOIN archive_attributed_records a ON a.import_id = i.id
+                WHERE a.import_id = ? AND a.sequence = ? LIMIT 1;
+                """,
+                bind: {
+                    sqlite3_bind_int64($0, 1, importID)
+                    sqlite3_bind_int64($0, 2, Int64(sequence))
+                },
+                row: Self.archiveEvidenceRecord
+            ).first
+        case .unattributed:
+            return try query(
+                """
+                SELECT i.id, i.imported_at, i.transcript_shape,
+                       u.sequence, NULL, NULL, NULL, u.record_text
+                FROM archive_imports i
+                JOIN archive_unattributed_records u ON u.import_id = i.id
+                WHERE u.import_id = ? AND u.sequence = ? LIMIT 1;
+                """,
+                bind: {
+                    sqlite3_bind_int64($0, 1, importID)
+                    sqlite3_bind_int64($0, 2, Int64(sequence))
+                },
+                row: Self.archiveEvidenceRecord
+            ).first
+        case nil:
+            return nil
+        }
+    }
+
+    /// One import's presentation state: operator display label and link state.
+    /// `nil` once the import is gone, which drops any stale search hit.
+    func archiveImportSummary(id: Int64) throws -> ArchiveEvidenceImportSummary? {
+        try archiveImportSummaries().first { $0.id == id }
+    }
+
+    /// Keyset page of visual messages, oldest id first, for the index build.
+    /// `afterMessageID: 0` starts at the beginning. Read-only and bounded: the
+    /// build never holds the whole corpus as one Swift array.
+    func searchableVisualMessages(
+        afterMessageID: Int64,
+        limit: Int
+    ) throws -> [SearchableVisualMessage] {
+        let boundedLimit = max(1, min(limit, 2_000))
+        return try query(
+            """
+            SELECT id, sender, text FROM messages
+            WHERE id > ? ORDER BY id ASC LIMIT ?;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, afterMessageID)
+                sqlite3_bind_int64($0, 2, Int64(boundedLimit))
+            },
+            row: { statement in
+                SearchableVisualMessage(
+                    messageID: sqlite3_column_int64(statement, 0),
+                    sender: Self.string(statement, 1),
+                    text: Self.string(statement, 2)
+                )
+            }
+        )
+    }
+
+    /// Bounded literal fallback for one and two character queries: the same
+    /// sender-or-text test trigram cannot express, run as parameterized `instr()`
+    /// against the canonical table. Read-only, local, and capped.
+    func searchableVisualMessages(
+        containing needle: String,
+        limit: Int
+    ) throws -> [SearchableVisualMessage] {
+        let trimmed = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let boundedLimit = max(1, min(limit, 100))
+        return try query(
+            """
+            SELECT id, sender, text FROM messages
+            WHERE instr(COALESCE(sender, ''), ?) > 0
+               OR instr(COALESCE(text, ''), ?) > 0
+            ORDER BY id ASC LIMIT ?;
+            """,
+            bind: {
+                Self.bind($0, 1, trimmed)
+                Self.bind($0, 2, trimmed)
+                sqlite3_bind_int64($0, 3, Int64(boundedLimit))
+            },
+            row: { statement in
+                SearchableVisualMessage(
+                    messageID: sqlite3_column_int64(statement, 0),
+                    sender: Self.string(statement, 1),
+                    text: Self.string(statement, 2)
+                )
+            }
+        )
+    }
+
+    func searchableArchiveAttributedRecords(
+        after cursor: (importID: Int64, sequence: Int),
+        limit: Int
+    ) throws -> [SearchableArchiveRecord] {
+        let boundedLimit = max(1, min(limit, 2_000))
+        return try query(
+            """
+            SELECT import_id, sequence, sender, text FROM archive_attributed_records
+            WHERE import_id > ? OR (import_id = ? AND sequence > ?)
+            ORDER BY import_id ASC, sequence ASC LIMIT ?;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, cursor.importID)
+                sqlite3_bind_int64($0, 2, cursor.importID)
+                sqlite3_bind_int64($0, 3, Int64(cursor.sequence))
+                sqlite3_bind_int64($0, 4, Int64(boundedLimit))
+            },
+            row: Self.searchableArchiveRecord
+        )
+    }
+
+    func searchableArchiveUnattributedRecords(
+        after cursor: (importID: Int64, sequence: Int),
+        limit: Int
+    ) throws -> [SearchableArchiveRecord] {
+        let boundedLimit = max(1, min(limit, 2_000))
+        return try query(
+            """
+            -- The NULL sender keeps one row shape across both archive shapes, so
+            -- the shared mapper below reads text from the same column always.
+            SELECT import_id, sequence, NULL, record_text
+            FROM archive_unattributed_records
+            WHERE import_id > ? OR (import_id = ? AND sequence > ?)
+            ORDER BY import_id ASC, sequence ASC LIMIT ?;
+            """,
+            bind: {
+                sqlite3_bind_int64($0, 1, cursor.importID)
+                sqlite3_bind_int64($0, 2, cursor.importID)
+                sqlite3_bind_int64($0, 3, Int64(cursor.sequence))
+                sqlite3_bind_int64($0, 4, Int64(boundedLimit))
+            },
+            row: Self.searchableArchiveRecord
+        )
+    }
+
+    /// The bounded literal fallback for archive records, in both shapes.
+    func searchableArchiveAttributedRecords(
+        containing needle: String,
+        limit: Int
+    ) throws -> [SearchableArchiveRecord] {
+        try archiveLiteralScan(
+            table: "archive_attributed_records",
+            textColumn: "text",
+            senderColumn: "sender",
+            needle: needle,
+            limit: limit
+        )
+    }
+
+    func searchableArchiveUnattributedRecords(
+        containing needle: String,
+        limit: Int
+    ) throws -> [SearchableArchiveRecord] {
+        try archiveLiteralScan(
+            table: "archive_unattributed_records",
+            textColumn: "record_text",
+            senderColumn: nil,
+            needle: needle,
+            limit: limit
+        )
+    }
+
+    /// `table` and `column` are literals from this file, never caller input.
+    private func archiveLiteralScan(
+        table: String,
+        textColumn: String,
+        senderColumn: String?,
+        needle: String,
+        limit: Int
+    ) throws -> [SearchableArchiveRecord] {
+        let trimmed = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let boundedLimit = max(1, min(limit, 100))
+        let senderTest = senderColumn.map { "instr(COALESCE(\($0), ''), ?) > 0 OR " } ?? ""
+        // Always four columns, so the shared mapper above reads the same
+        // positions for both shapes. Shape B has no sender column at all, so
+        // its slot is filled with an explicit NULL.
+        let senderProjection = senderColumn.map { "\($0), " } ?? "NULL, "
+        return try query(
+            """
+            SELECT import_id, sequence, \(senderProjection)
+                   \(textColumn)
+            FROM \(table)
+            WHERE \(senderTest)instr(\(textColumn), ?) > 0
+            ORDER BY import_id ASC, sequence ASC LIMIT ?;
+            """,
+            bind: {
+                var index: Int32 = 1
+                if senderColumn != nil {
+                    Self.bind($0, index, trimmed)
+                    index += 1
+                }
+                Self.bind($0, index, trimmed)
+                index += 1
+                sqlite3_bind_int64($0, index, Int64(boundedLimit))
+            },
+            row: Self.searchableArchiveRecord
+        )
+    }
+
+    private func importShape(importID: Int64) throws -> ArchiveEvidenceShape? {
+        try query(
+            "SELECT transcript_shape FROM archive_imports WHERE id = ? LIMIT 1;",
+            bind: { sqlite3_bind_int64($0, 1, importID) },
+            row: { ArchiveEvidenceShape(rawValue: Self.string($0, 0) ?? "") }
+        ).first ?? nil
+    }
+
+    private static func persistedMessage(_ statement: OpaquePointer) -> PersistedMessage {
+        PersistedMessage(
+            id: sqlite3_column_int64(statement, 0),
+            conversationID: sqlite3_column_int64(statement, 1),
+            sequence: sqlite3_column_int64(statement, 2),
+            sender: string(statement, 3),
+            ownership: MessageOwnership(rawValue: string(statement, 4) ?? "") ?? .unknown,
+            visibleTime: string(statement, 5),
+            text: string(statement, 6),
+            kind: VisibleMessageKind(rawValue: string(statement, 7) ?? "") ?? .unknown,
+            confidence: sqlite3_column_double(statement, 8),
+            firstObservedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 9))
+        )
+    }
+
+    /// Reads either shape into one row shape: an unattributed record simply
+    /// has no sender, which is the honest description of what the archive kept.
+    private static func searchableArchiveRecord(
+        _ statement: OpaquePointer
+    ) -> SearchableArchiveRecord {
+        // Both shapes select `import_id, sequence, sender, text` -- the
+        // unattributed shape fills sender with an explicit NULL. So sender is
+        // read as nullable and text always comes from column 3. Inferring the
+        // layout from whether a sender is present is what broke it: an
+        // unattributed row's NULL sender was mistaken for a missing column and
+        // text was then read from the NULL column instead.
+        return SearchableArchiveRecord(
+            importID: sqlite3_column_int64(statement, 0),
+            sequence: Int(sqlite3_column_int64(statement, 1)),
+            sender: string(statement, 2),
+            text: string(statement, 3) ?? ""
+        )
+    }
+
     // MARK: - Writes
 
     /// Finds or creates the conversation and refreshes when it was last seen.

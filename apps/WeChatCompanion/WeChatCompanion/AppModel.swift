@@ -41,6 +41,10 @@ final class AppModel {
     private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
     private(set) var archiveDisplayNameStatus = ArchiveDisplayNameStatus.idle
     private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
+    /// B6 local full-text search. The query itself is *not* stored here: it
+    /// lives in the Search view's own `@State` for the current app session, so
+    /// closing the app cannot restore it and nothing writes it to disk.
+    private(set) var localSearch = LocalSearchSnapshot()
     /// B5.1: one attachment's status after the user asked to open it. Reset by
     /// the next request; never carries a path or a hash into the UI.
     private(set) var attachmentPreviewStatus = ArchiveAttachmentPreviewStatus.idle
@@ -591,6 +595,30 @@ final class AppModel {
 
     func searchArchiveEvidence(_ query: String) async {
         archiveSearchResults = await messageHistory.searchArchiveEvidence(query)
+    }
+
+    /// B6: run one local literal search and publish the display-safe snapshot.
+    ///
+    /// A blank query never reaches the store, so an idle Search page costs
+    /// nothing and builds no index.
+    func searchLocalMessages(_ query: String, filter: LocalSearchFilter) async {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            localSearch = LocalSearchSnapshot()
+            return
+        }
+        // Published before the await so the view can actually paint the
+        // building state: the first search of a session builds the whole
+        // index, and one opaque await would otherwise freeze the page with no
+        // explanation. The index itself never publishes a partial result, so a
+        // cancelled build simply leaves this state behind.
+        localSearch = LocalSearchSnapshot(status: .preparing)
+        localSearch = await messageHistory.searchLocalMessages(query, filter: filter)
+    }
+
+    /// Clears the published snapshot. The query text is the view's own state
+    /// and is reset by the view; nothing to forget on disk either way.
+    func clearLocalSearch() {
+        localSearch = LocalSearchSnapshot()
     }
 
     /// B5.1: open one materialized attachment in the system previewer.
@@ -1322,6 +1350,7 @@ enum ArchiveImportStatus: Equatable {
 enum Destination: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case chats = "Chats"
+    case search = "Search"
     case dailySummary = "Daily Summary"
     case reminders = "Reminders"
     case agents = "Agents"
@@ -1334,6 +1363,7 @@ enum Destination: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "rectangle.grid.2x2"
         case .chats: "bubble.left.and.bubble.right"
+        case .search: "magnifyingglass"
         case .dailySummary: "text.document"
         case .reminders: "checklist"
         case .agents: "person.2"
