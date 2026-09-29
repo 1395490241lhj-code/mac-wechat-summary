@@ -1760,33 +1760,6 @@ struct ArchiveAttachmentPreviewResolverTests {
             "\(imports.flatMap(\.attachments).map(\.byteCount).reduce(0, +))"
     }
 
-    /// B5.1 real-data acceptance: run the production resolver over the live
-    /// app store and report only whether the row is safely previewable. It
-    /// opens nothing, decodes nothing, and never looks at the bytes.
-    @Test
-    func theRealB5AttachmentResolvesAsSafelyPreviewable() async throws {
-        let history = LocalMessageHistory.applicationSupport
-        await history.setEnabled(true)
-        let snapshot = await history.archiveEvidenceSnapshot()
-        var rows: [ArchiveEvidenceAttachment] = []
-        for entry in snapshot.imports {
-            for batch in await history.archiveAttachmentBatches(importID: entry.id) {
-                rows.append(contentsOf: batch.attachments)
-            }
-        }
-        #expect(!rows.isEmpty, "expected the B5 real attachment to still exist")
-        let root = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(
-                "Library/Application Support/WeChatCompanion/archive-attachments"
-            ).path + "/"
-        for row in rows {
-            let url = await history.archiveAttachmentPreviewURL(row)
-            print("B51-REAL state=\(row.storageState.rawValue) "
-                + "previewable=\(String(url != nil)) "
-                + "underRoot=\(String(url?.path.hasPrefix(root) ?? false))")
-            #expect((url != nil) == row.isMaterialized)
-        }
-    }
 }
 
 struct WeChatArchiveImportIdentityTests {

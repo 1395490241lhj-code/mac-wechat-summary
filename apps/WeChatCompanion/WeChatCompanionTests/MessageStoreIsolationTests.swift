@@ -98,6 +98,25 @@ struct MessageStoreIsolationTests {
 
     /// The rule itself, as a structural check: a test that reaches for the
     /// canonical location is the bug, so the suite should not contain one.
+
+
+    @Test
+    func noTestDirectlyOpensTheCanonicalMessageHistory() throws {
+        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let ownName = URL(fileURLWithPath: #filePath).lastPathComponent
+        let sources = try FileManager.default
+            .contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" && $0.lastPathComponent != ownName }
+
+        for source in sources {
+            let text = try String(contentsOf: source, encoding: .utf8)
+            #expect(
+                !text.contains("LocalMessageHistory.applicationSupport"),
+                "\(source.lastPathComponent) directly opens the operator's real message history"
+            )
+        }
+    }
+
     @Test
     func noTestConstructsAnAppModelWithoutInjectingAHistory() throws {
         let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
