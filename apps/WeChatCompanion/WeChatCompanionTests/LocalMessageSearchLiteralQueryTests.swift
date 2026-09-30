@@ -203,6 +203,66 @@ struct LocalMessageSearchQueryPrivacyTests {
 /// snapshot test would prove a drawing, not that the dangerous fields are
 /// absent from the type the UI actually consumes.
 struct LocalMessageSearchUIWiringTests {
+    @Test @MainActor
+    func archiveSearchHandsOffExactQueryWithoutExecutingAndIsConsumedOnce() throws {
+        let app = AppModel(messageHistory: makeTestMessageHistory(), shareInbox: nil)
+        let query = "  synthetic OR marker\n"
+        app.beginArchiveSearch(query)
+        #expect(app.selectedDestination == .search)
+        #expect(app.localSearch.status == .idle)
+        #expect(app.localSearch.results.isEmpty)
+        let request = try #require(app.archiveSearchRequest)
+        #expect(request.query == query)
+        #expect(request.filter == .archive)
+        #expect(app.consumeArchiveSearchRequest() == request)
+        #expect(app.archiveSearchRequest == nil)
+        #expect(app.consumeArchiveSearchRequest() == nil)
+    }
+
+    @Test @MainActor
+    func archiveHandoffUsesCanonicalResultsAndExactRecordReveal() async throws {
+        let history = await makeSearchTestHistory(conversations: [
+            "Group A": [makeSearchVisualMessage("handoff-marker visual")]
+        ])
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·Synthetic sender\n2026年9月7日 20:35\nhandoff-marker archive\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let insertion = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("native-anonymous-v1:handoff-fixture"),
+            importedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        guard case .inserted(let importID, _) = insertion else {
+            Issue.record("expected a fresh synthetic import")
+            return
+        }
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        app.beginArchiveSearch("  handoff-marker  ")
+        #expect(app.localSearch.status == .idle)
+        let request = try #require(app.consumeArchiveSearchRequest())
+        await app.searchLocalMessages(request.query, filter: request.filter)
+        #expect(app.localSearch.status == .results(count: 1))
+        let hit = try #require(app.localSearch.results.first)
+        #expect(hit.source == .archiveAttributed)
+        #expect(hit.provenance == .archiveAttributed)
+        #expect(hit.linkState == "Unlinked export")
+        #expect(hit.sender == "Synthetic sender")
+        #expect(hit.timestamp != nil)
+        #expect(hit.excerpt == "handoff-marker archive")
+        #expect(hit.target == .archiveRecord(
+            importID: importID, sequence: 0, provenance: .archiveAttributed
+        ))
+        await app.openSearchResult(hit)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.selectedArchiveIsHitWindow)
+        #expect(app.contextRevealRequest?.anchor == .archiveRecord(importID: importID, sequence: 0))
+        #expect(app.selectedArchiveRecords.contains { $0.importID == importID && $0.sequence == 0 })
+        #expect(!app.searchHitUnavailable)
+        #expect(app.consumeArchiveSearchRequest() == nil)
+    }
+
     @Test
     func searchIsItsOwnSidebarDestination() {
         #expect(Destination.allCases.contains(.search))

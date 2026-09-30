@@ -17,6 +17,12 @@ struct ContextRevealRequest: Equatable {
     let anchor: ContextRevealAnchor
 }
 
+/// One-shot, session-only presentation intent; Search owns execution and results.
+struct ArchiveSearchRequest: Equatable {
+    let query: String
+    let filter: LocalSearchFilter
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -67,7 +73,7 @@ final class AppModel {
     private(set) var selectedArchiveImportID: Int64?
     private(set) var selectedArchiveRecords: [ArchiveEvidenceRecord] = []
     private(set) var selectedArchiveAttachmentBatches: [ArchiveEvidenceAttachmentBatch] = []
-    private(set) var archiveSearchResults: [ArchiveEvidenceRecord] = []
+    private(set) var archiveSearchRequest: ArchiveSearchRequest?
     private(set) var archiveDisplayNameStatus = ArchiveDisplayNameStatus.idle
     private(set) var archiveLinkStatus = ArchiveLinkStatus.idle
     /// B6 local full-text search. The query itself is *not* stored here: it
@@ -588,7 +594,6 @@ final class AppModel {
             selectedArchiveImportID = nil
             selectedArchiveRecords = []
             selectedArchiveAttachmentBatches = []
-            archiveSearchResults = []
             archiveWindowHitSequence = nil
             archiveWindowHitProvenance = nil
             selectedArchiveIsHitWindow = false
@@ -845,8 +850,14 @@ final class AppModel {
         selectedArchiveAttachmentBatches = batches
     }
 
-    func searchArchiveEvidence(_ query: String) async {
-        archiveSearchResults = await messageHistory.searchArchiveEvidence(query)
+    func beginArchiveSearch(_ query: String) {
+        archiveSearchRequest = ArchiveSearchRequest(query: query, filter: .archive)
+        selectedDestination = .search
+    }
+
+    func consumeArchiveSearchRequest() -> ArchiveSearchRequest? {
+        defer { archiveSearchRequest = nil }
+        return archiveSearchRequest
     }
 
     /// B6: run one local literal search and publish the display-safe snapshot.

@@ -714,7 +714,6 @@ private struct DiagnosticMetric: View {
 private struct ChatsView: View {
     @Bindable var model: AppModel
     @State private var isChoosingArchive = false
-    @State private var archiveSearchText = ""
     @State private var highlightedAnchor: ContextRevealAnchor?
     @State private var highlightGeneration: UInt64 = 0
 
@@ -732,7 +731,6 @@ private struct ChatsView: View {
 
                 ArchiveEvidenceBrowser(
                     model: model,
-                    searchText: $archiveSearchText,
                     isChoosingArchive: $isChoosingArchive,
                     highlightedAnchor: highlightedAnchor
                 )
@@ -810,10 +808,9 @@ private struct ChatsView: View {
 
 private struct ArchiveEvidenceBrowser: View {
     @Bindable var model: AppModel
-    @Binding var searchText: String
+    @State private var searchText = ""
     @Binding var isChoosingArchive: Bool
     let highlightedAnchor: ContextRevealAnchor?
-    @State private var hasSubmittedSearch = false
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -872,45 +869,9 @@ private struct ArchiveEvidenceBrowser: View {
                     .onSubmit { submitSearch() }
                 Button("Search") { submitSearch() }
                     .disabled(trimmedSearch.isEmpty)
-                if hasSubmittedSearch {
-                    Button("Clear") { clearSearch() }
-                }
             }
 
-            if hasSubmittedSearch && !model.searchHitUnavailable && !model.selectedArchiveIsHitWindow
-                && model.contextRevealRequest == nil {
-                searchResults
-            } else {
-                importsAndRecords
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var searchResults: some View {
-        Divider()
-        if model.archiveSearchResults.isEmpty {
-            Text("No imported messages match “\(trimmedSearch)”.")
-                .foregroundStyle(.secondary)
-        } else {
-            Text("\(model.archiveSearchResults.count) matching imported messages")
-                .font(.callout.weight(.medium))
-            ForEach(model.archiveSearchResults) { record in
-                ArchiveEvidenceRecordRow(record: record, showsImportDate: true) {
-                    Task { @MainActor in
-                        await model.selectArchiveImport(record.importID)
-                        searchText = ""
-                        await model.searchArchiveEvidence("")
-                        hasSubmittedSearch = false
-                    }
-                }
-                Divider()
-            }
-            if model.archiveSearchResults.count == 100 {
-                Text("Showing the first 100 matches.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            importsAndRecords
         }
     }
 
@@ -977,19 +938,7 @@ private struct ArchiveEvidenceBrowser: View {
 
     private func submitSearch() {
         guard !trimmedSearch.isEmpty else { return }
-        let query = trimmedSearch
-        Task { @MainActor in
-            await model.searchArchiveEvidence(query)
-            hasSubmittedSearch = true
-        }
-    }
-
-    private func clearSearch() {
-        Task { @MainActor in
-            searchText = ""
-            await model.searchArchiveEvidence("")
-            hasSubmittedSearch = false
-        }
+        model.beginArchiveSearch(searchText)
     }
 
     /// The one honest thing the reader still needs to know about how much of
@@ -1309,32 +1258,6 @@ private struct ArchiveImportRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct ArchiveEvidenceRecordRow: View {
-    let record: ArchiveEvidenceRecord
-    var showsImportDate = false
-    var action: (() -> Void)?
-
-    var body: some View {
-        Group {
-            if let action {
-                Button(action: action) { content }
-                    .buttonStyle(.plain)
-            } else {
-                content
-            }
-        }
-    }
-
-    private var content: some View {
-        TranscriptRowView(
-            row: TranscriptRow(archive: record),
-            caption: showsImportDate
-                ? "Imported \(record.importedAt.formatted(date: .abbreviated, time: .shortened))"
-                : nil
-        )
     }
 }
 
@@ -3039,6 +2962,10 @@ private struct SearchView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Search")
+        .onAppear(perform: consumeArchiveSearchRequest)
+        .onChange(of: model.archiveSearchRequest) { _, _ in
+            consumeArchiveSearchRequest()
+        }
     }
 
     private var searchField: some View {
@@ -3059,19 +2986,20 @@ private struct SearchView: View {
     }
 
     private var sourceFilter: some View {
-        Picker("Source", selection: $filter) {
+        Picker("Source", selection: Binding(
+            get: { filter },
+            set: { value in
+                guard filter != value else { return }
+                filter = value
+                if !trimmed.isEmpty { submit() }
+            }
+        )) {
             ForEach(LocalSearchFilter.allCases, id: \.self) { option in
                 Text(option.label).tag(option)
             }
         }
         .pickerStyle(.segmented)
         .labelsHidden()
-        .onChange(of: filter) { _, _ in
-            // Re-run the same query under the new source filter. The query text
-            // is unchanged, so this narrows the search rather than starting a
-            // new one.
-            if !trimmed.isEmpty { submit() }
-        }
     }
 
     @ViewBuilder
@@ -3137,6 +3065,13 @@ private struct SearchView: View {
                 }
             }
         }
+    }
+
+    private func consumeArchiveSearchRequest() {
+        guard let request = model.consumeArchiveSearchRequest() else { return }
+        query = request.query
+        filter = request.filter
+        submit()
     }
 
     private func submit() {
