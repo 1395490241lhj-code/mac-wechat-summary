@@ -63,17 +63,12 @@ struct CaptureLedgerPresentation: Equatable {
 
         switch ledger.storeState {
         case .disabled:
-            emptyMessage = "Local message storage is off, so no conversation history is "
-                + "being kept. Capture and extraction still run, but nothing is written "
-                + "down. Turn on Local Message Storage in Settings to start a ledger."
+            emptyMessage = TranscriptState.storageOff.text
         case .unavailable:
-            emptyMessage = "Local message storage is on, but the message store could not "
-                + "be opened, so nothing is being kept right now."
+            emptyMessage = TranscriptState.storeUnavailable.text
         case .ready:
             emptyMessage = ledger.conversations.isEmpty
-                ? "No conversations captured yet. Share a WeChat window and keep the chat "
-                    + "name at the top of the window visible -- captured conversations "
-                    + "appear here."
+                ? TranscriptState.neverCaptured.text
                 : nil
         }
 

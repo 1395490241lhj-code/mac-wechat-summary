@@ -725,169 +725,22 @@ private struct ChatsView: View {
                 Text("Chats")
                     .font(.largeTitle.weight(.semibold))
 
-                GroupBox("Message Extraction") {
-                    VStack(spacing: 0) {
-                        StatusRow(
-                            label: "Status",
-                            value: model.extractionMetrics.status.label,
-                            isPositive: model.extractionMetrics.status == .ready
-                                || model.extractionMetrics.status == .processing
-                        )
-                        Divider()
-                        StatusRow(
-                            label: "Remote Processing",
-                            value: model.allowsRemoteProcessing ? "Enabled" : "Disabled",
-                            isPositive: model.allowsRemoteProcessing
-                        )
-                        Divider()
-                        // "Selected" on purpose: an older failure diagnosis may
-                        // belong to a previously selected model.
-                        LabeledContent("Selected Gemini Model") {
-                            Text(model.selectedGeminiModel.label)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        ExtractionMetric(
-                            label: "Meaningful Frames Received",
-                            value: model.extractionMetrics.framesReceived
-                        )
-                        Divider()
-                        ExtractionMetric(
-                            label: "Successful Extractions",
-                            value: model.extractionMetrics.extractionsSucceeded
-                        )
-                        Divider()
-                        ExtractionMetric(
-                            label: "Dropped While Busy",
-                            value: model.extractionMetrics.framesDroppedWhileBusy
-                        )
-                        Divider()
-                        ExtractionMetric(
-                            label: "Failures",
-                            value: model.extractionMetrics.extractionsFailed
-                        )
-                        Divider()
-                        // Shown separately: pausing cancels work, which is
-                        // expected lifecycle rather than an error.
-                        ExtractionMetric(
-                            label: "Cancelled",
-                            value: model.extractionMetrics.extractionsCancelled
-                        )
-                        Divider()
-                        // Makes a consent misconfiguration obvious rather than
-                        // silently looking like "nothing is happening".
-                        ExtractionMetric(
-                            label: "Withheld Pending Consent",
-                            value: model.extractionMetrics.framesWithheldPendingConsent
-                        )
-                        Divider()
-                        LabeledContent("Last Extraction") {
-                            Text(
-                                model.extractionMetrics.lastExtractionAt?
-                                    .formatted(date: .omitted, time: .standard) ?? "Never"
-                            )
-                            .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                    }
-                }
-
-                Text(
-                    model.extractionMetrics.status == .notConfigured
-                        ? "No extraction provider is configured, so no message content is read. "
-                            + "Frames are observed and released."
-                        : "Extracted message content stays in memory and is not stored yet."
-                )
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-                GroupBox("WeChat Archive") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text(model.archiveImportStatus.message)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        if let attachmentMessage = model.archiveAttachmentImportStatus.message {
-                            Text(attachmentMessage)
-                                .font(.caption)
-                                .foregroundStyle(
-                                    model.archiveAttachmentImportStatus == .unavailable
-                                        ? Color.orange : Color.secondary
-                                )
-                        }
-
-                        Button("Choose WeChat Export ZIP…") {
-                            isChoosingArchive = true
-                        }
-                        .disabled(model.archiveImportStatus == .importing)
-                    }
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                ArchiveEvidenceBrowser(
-                    model: model,
-                    searchText: $archiveSearchText,
-                    highlightedAnchor: highlightedAnchor
-                )
-                .id("archives")
+                let ledger = CaptureLedgerPresentation(ledger: model.captureLedger)
 
                 CaptureLedgerSection(model: model, highlightedAnchor: highlightedAnchor)
                     .id("captured")
 
-                if let failure = model.extractionMetrics.lastFailure {
-                    GroupBox("Last Failure Diagnosis") {
-                        VStack(spacing: 0) {
-                            LabeledContent("Category") {
-                                Text(failure.category.label).foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 10)
-                            Divider()
-                            FailureDetail("HTTP Status", failure.httpStatus.map(String.init))
-                            Divider()
-                            FailureDetail("URL Error Code", failure.urlErrorCode.map(String.init))
-                            Divider()
-                            FailureDetail("Keychain Status", failure.keychainStatus.map(String.init))
-                            Divider()
-                            FailureDetail("Finish Reason", failure.finishReason?.label)
-                            Divider()
-                            FailureDetail("Block Reason", failure.blockReason?.label)
-                            Divider()
-                            FailureDetail(
-                                "Output Characters",
-                                failure.outputCharacterCount.map(String.init)
-                            )
-                            Divider()
-                            FailureDetail(
-                                "Prompt Tokens", failure.promptTokenCount.map(String.init)
-                            )
-                            Divider()
-                            FailureDetail(
-                                "Candidate Tokens", failure.candidatesTokenCount.map(String.init)
-                            )
-                            Divider()
-                            FailureDetail(
-                                "Thinking Tokens", failure.thoughtsTokenCount.map(String.init)
-                            )
-                            Divider()
-                            FailureDetail(
-                                "Total Tokens", failure.totalTokenCount.map(String.init)
-                            )
-                            Divider()
-                            FailureDetail(
-                                "Occurred",
-                                failure.occurredAt?.formatted(date: .omitted, time: .standard)
-                            )
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    Text("Diagnosis is aggregate metadata only — no response body, "
-                        + "message text, or image data is recorded.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+                ArchiveEvidenceBrowser(
+                    model: model,
+                    searchText: $archiveSearchText,
+                    isChoosingArchive: $isChoosingArchive,
+                    highlightedAnchor: highlightedAnchor
+                )
+                .id("archives")
 
-                LatestExtractionSection(extraction: model.latestExtraction)
+                CaptureStatusDisclosure(model: model, ledger: ledger)
+
+                DiagnosticsDisclosure(model: model)
 
                 Spacer(minLength: 0)
             }
@@ -958,6 +811,7 @@ private struct ChatsView: View {
 private struct ArchiveEvidenceBrowser: View {
     @Bindable var model: AppModel
     @Binding var searchText: String
+    @Binding var isChoosingArchive: Bool
     let highlightedAnchor: ContextRevealAnchor?
     @State private var hasSubmittedSearch = false
 
@@ -966,33 +820,51 @@ private struct ArchiveEvidenceBrowser: View {
     }
 
     var body: some View {
-        GroupBox("Imported WeChat Archives") {
-            VStack(alignment: .leading, spacing: 12) {
-                if model.archiveContextUnavailable {
-                    Text("This archive import is no longer available in local history.")
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("Archive Conversations")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Button("Choose WeChat Export ZIP…") {
+                    isChoosingArchive = true
                 }
-                switch model.archiveEvidence.storeState {
-                case .disabled:
-                    Text("Local message storage is off. Imported archives stay unavailable until storage is enabled.")
-                        .foregroundStyle(.secondary)
-                case .unavailable:
-                    Text("Local history is unavailable, so imported archive evidence cannot be read.")
-                        .foregroundStyle(.secondary)
-                case .ready:
-                    readyContent
-                }
+                .disabled(model.archiveImportStatus == .importing)
             }
-            .padding(.vertical, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if model.archiveContextUnavailable {
+                TranscriptStateRow(state: .contextVanished)
+            }
+            switch model.archiveEvidence.storeState {
+            case .disabled:
+                TranscriptStateRow(state: .storageOff)
+            case .unavailable:
+                TranscriptStateRow(state: .storeUnavailable)
+            case .ready:
+                readyContent
+            }
+
+            if model.archiveEvidence.storeState == .ready {
+                Text(model.archiveImportStatus.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let attachmentMessage = model.archiveAttachmentImportStatus.message,
+                model.archiveEvidence.storeState == .ready {
+                Text(attachmentMessage)
+                    .font(.caption)
+                    .foregroundStyle(
+                        model.archiveAttachmentImportStatus == .unavailable
+                            ? Color.orange : Color.secondary
+                    )
+            }
         }
+        .padding(.top, 4)
     }
 
     @ViewBuilder
     private var readyContent: some View {
         if model.archiveEvidence.imports.isEmpty {
-            Text("No imported WeChat archives yet.")
-                .foregroundStyle(.secondary)
+            TranscriptStateRow(state: .neverCaptured)
         } else {
             HStack(spacing: 8) {
                 TextField("Search imported messages", text: $searchText)
@@ -1060,44 +932,37 @@ private struct ArchiveEvidenceBrowser: View {
         }) {
             Divider()
             VStack(alignment: .leading, spacing: 4) {
-                Text(selected.displayName ?? "Imported WeChat Archive")
-                    .font(.callout.weight(.medium))
-                Text("Messages · " + importSubtitle(selected))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                TranscriptContextHeader(
+                    title: selected.displayName ?? "Imported WeChat Archive",
+                    summary: "Archive · imported "
+                        + selected.importedAt.formatted(date: .abbreviated, time: .shortened)
+                        + " · \(selected.recordCount) records"
+                        + (selected.attachmentCount > 0
+                            ? " · \(selected.attachmentCount) attachments" : "")
+                        + (selected.isAnonymous
+                            ? (selected.link == nil ? " · Unlinked export" : " · Explicitly linked")
+                            : ""),
+                    caveat: transcriptWindowNote(summary: selected)
+                )
             }
 
-            ArchiveLinkControls(model: model, summary: selected)
+            // Naming and linking are real controls, but they are not what the
+            // reader came for. They stay one disclosure away instead of
+            // sitting between the header and the transcript at full weight.
+            DisclosureGroup("Conversation details") {
+                ArchiveLinkControls(model: model, summary: selected)
+            }
+            .font(.callout.weight(.medium))
 
             if model.searchHitUnavailable {
-                Text("This search result is no longer retained.")
-                    .foregroundStyle(.secondary)
+                TranscriptStateRow(state: .searchHitVanished)
             } else if model.selectedArchiveRecords.isEmpty {
-                Text("This import contains no readable records.")
-                    .foregroundStyle(.secondary)
+                TranscriptStateRow(state: .emptyImport)
             } else {
-                ForEach(model.selectedArchiveRecords) { record in
-                    ArchiveEvidenceRecordRow(record: record, showsImportDate: false)
-                        .id(ContextRevealAnchor.archiveRecord(
-                            importID: record.importID, sequence: record.sequence
-                        ))
-                        .background(
-                            highlightedAnchor == .archiveRecord(
-                                importID: record.importID, sequence: record.sequence
-                            ) ? Color.accentColor.opacity(0.16) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
-                    Divider()
-                }
-                if model.selectedArchiveIsHitWindow {
-                    Text("Showing up to 500 records around the search result.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if selected.recordCount > model.selectedArchiveRecords.count {
-                    Text("Showing the first \(model.selectedArchiveRecords.count) of \(selected.recordCount) records.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                TranscriptList(
+                    rows: model.selectedArchiveRecords.map(TranscriptRow.init(archive:)),
+                    highlightedAnchor: highlightedAnchor
+                )
             }
 
             if selected.attachmentCount > 0 {
@@ -1127,30 +992,18 @@ private struct ArchiveEvidenceBrowser: View {
         }
     }
 
-    private func importSubtitle(_ summary: ArchiveEvidenceImportSummary) -> String {
-        var parts = [
-            summary.importedAt.formatted(date: .abbreviated, time: .shortened),
-            "\(summary.recordCount) records",
-            summary.shape.label,
-        ]
-        if summary.attachmentCount > 0 {
-            parts.append(
-                "\(summary.attachmentCount) attachments"
-                    + (summary.materializedAttachmentCount > 0
-                        ? " (\(summary.materializedAttachmentCount) stored)" : "")
-            )
+    /// The one honest thing the reader still needs to know about how much of
+    /// the import is on screen, said once in the header instead of under every
+    /// row.
+    private func transcriptWindowNote(summary: ArchiveEvidenceImportSummary) -> String {
+        if model.selectedArchiveIsHitWindow {
+            return "Showing a window of up to 500 records around the search result."
         }
-        if summary.isAnonymous {
-            parts.append(summary.link == nil ? "Unlinked export" : "Explicitly linked")
+        if summary.recordCount > model.selectedArchiveRecords.count {
+            return "Showing the first \(model.selectedArchiveRecords.count) of "
+                + "\(summary.recordCount) records."
         }
-        if let first = summary.firstSentAt, let last = summary.lastSentAt {
-            parts.append(
-                first.formatted(date: .abbreviated, time: .shortened)
-                    + " – "
-                    + last.formatted(date: .abbreviated, time: .shortened)
-            )
-        }
-        return parts.joined(separator: " · ")
+        return summary.shape.label + " import · read-only local evidence."
     }
 }
 
@@ -1276,19 +1129,18 @@ private struct ArchiveAttachmentSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Attachments")
-                    .font(.callout.weight(.medium))
-                Text("Import-level evidence only · Unlinked to message")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text("Attachments")
+                .font(.callout.weight(.medium))
+            Text("Import-level evidence only · Unlinked to message")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            if batches.isEmpty {
+            Group {
+                if batches.isEmpty {
                 Text("Attachment metadata is unavailable for this import.")
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(batches) { batch in
+                } else {
+                    ForEach(batches) { batch in
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(alignment: .firstTextBaseline) {
                             Text(batch.observedAt.formatted(date: .abbreviated, time: .shortened))
@@ -1313,7 +1165,10 @@ private struct ArchiveAttachmentSection: View {
                         Divider()
                     }
                 }
+                .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if let message = model.attachmentPreviewStatus.message {
                 Text(message)
@@ -1340,10 +1195,16 @@ private struct ArchiveAttachmentRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
                     .font(.callout)
-                Text(statusText + " · Unlinked to message")
+                Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            // The two text lines read as one item, but the Preview and Reveal
+            // buttons beside them keep their own identities.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "\(title). \(statusText). Import-level evidence, unlinked to message."
+            )
 
             Spacer(minLength: 12)
 
@@ -1416,33 +1277,35 @@ private struct ArchiveImportRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(
                         summary.displayName
                             ?? summary.importedAt.formatted(date: .abbreviated, time: .shortened)
                     )
-                    .fontWeight(.medium)
+                    .font(.body.weight(.medium))
                     Text(
                         (summary.displayName == nil
                             ? ""
-                            : summary.importedAt.formatted(date: .abbreviated, time: .shortened) + " · ")
-                        + "\(summary.recordCount) records · \(summary.shape.label)"
-                        + (summary.attachmentCount > 0
-                            ? " · \(summary.attachmentCount) attachments"
-                            : "")
-                        + (summary.isAnonymous
-                            ? (summary.link == nil ? " · Unlinked export" : " · Explicitly linked")
-                            : "")
+                            : "\(summary.importedAt.formatted(date: .abbreviated, time: .shortened)) · ")
+                        + summary.shape.label + " · \(summary.recordCount) records"
                     )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
             }
-            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 6)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1466,35 +1329,183 @@ private struct ArchiveEvidenceRecordRow: View {
     }
 
     private var content: some View {
+        TranscriptRowView(
+            row: TranscriptRow(archive: record),
+            caption: showsImportDate
+                ? "Imported \(record.importedAt.formatted(date: .abbreviated, time: .shortened))"
+                : nil
+        )
+    }
+}
+
+// MARK: - Shared transcript presentation
+
+/// One canonical row, rendered.
+///
+/// Visual and Archive rows share their typography, spacing, reading width and
+/// highlight container, but the source-specific wording is resolved upstream
+/// in `TranscriptRow`, so an unattributed archive record can never read like
+/// an attributed one that simply lost its sender.
+///
+/// The row carries its own reveal anchor. Grouping wraps rows from the
+/// outside and never moves that anchor onto a container.
+private struct TranscriptRowView: View {
+    let row: TranscriptRow
+    /// Optional extra secondary line. Archive search results use it to say
+    /// when the import happened; the reader does not otherwise repeat it.
+    var caption: String?
+    var isHighlighted = false
+    var action: (() -> Void)?
+
+    var body: some View {
+        Group {
+            if let action {
+                Button(action: action) { content }
+                    .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+        .id(row.id)
+        .background(
+            isHighlighted
+                ? Color.accentColor.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            [row.sender, row.literalTime, row.shortTime, row.body]
+                .compactMap { $0 }
+                .joined(separator: ". ")
+                + ". " + row.source.rowProvenance
+        )
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(record.sender ?? (record.shape == .attributed ? "Unknown sender" : "Unattributed record"))
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(row.sender)
                     .font(.callout.weight(.medium))
                 Spacer(minLength: 12)
-                if let sentAtText = record.sentAtText {
-                    Text(sentAtText)
+                if let literalTime = row.literalTime {
+                    Text(row.timeLabel ?? literalTime)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if showsImportDate {
-                    Text(record.importedAt.formatted(date: .abbreviated, time: .shortened))
+                } else if let shortTime = row.shortTime {
+                    Text(shortTime)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            Text(record.text)
+            Text(row.body)
                 .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if showsImportDate, record.sentAtText != nil {
-                Text("Imported \(record.importedAt.formatted(date: .abbreviated, time: .shortened))")
+            if let caption {
+                Text(caption)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 6)
+        .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
         .contentShape(Rectangle())
     }
 }
 
+/// A transcript is a column of prose, not a dashboard: the reading width is
+/// bounded for the eye, but a narrow window simply gets a narrower column
+/// rather than clipping.
+private enum TranscriptLayout {
+    static let readableWidth: CGFloat = 680
+}
+
+/// A small header that answers "which conversation am I reading?" in three
+/// lines: what it is, how much of it is here, and what the times mean.
+/// Provenance is stated once here instead of on every row.
+private struct TranscriptContextHeader: View {
+    let title: String
+    let summary: String
+    var caveat: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let caveat {
+                Text(caveat)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// One line for a state where the transcript has nothing to show. The wording
+/// says why, because "storage off", "never captured" and "removed by
+/// retention" are three different problems with three different fixes.
+private struct TranscriptStateRow: View {
+    let state: TranscriptState
+
+    var body: some View {
+        Text(state.text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
+            .padding(.vertical, 4)
+    }
+}
+
+/// The grouped transcript itself.
+///
+/// Groups are presentation only. Every row keeps its own `.id`, so a search
+/// hit still scrolls to the exact canonical row and highlights only that row,
+/// even when it sits in the middle of a sender run.
+private struct TranscriptList: View {
+    let rows: [TranscriptRow]
+    let highlightedAnchor: ContextRevealAnchor?
+    var now: Date = Date()
+
+    private var groups: [TranscriptGroup] {
+        TranscriptGrouping.groups(rows)
+    }
+
+    var body: some View {
+        let separated = TranscriptGrouping.dateSeparatorIndices(in: groups)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+                VStack(alignment: .leading, spacing: 0) {
+                    if separated.contains(index), let label = group.dateLabel(reference: now) {
+                        Text(label)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 12)
+                            .padding(.bottom, 6)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    ForEach(group.rows) { row in
+                        TranscriptRowView(
+                            row: row,
+                            isHighlighted: highlightedAnchor == row.id
+                        )
+                        Divider()
+                    }
+                }
+                .padding(.bottom, 6)
+            }
+        }
+        .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
+    }
+}
 /// Which conversations have actually been captured, how much of each is still
 /// kept, and whether capture has obvious gaps.
 ///
@@ -1511,7 +1522,10 @@ private struct CaptureLedgerSection: View {
 
     var body: some View {
         let shown = presentation
-        GroupBox("Captured Conversations") {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Captured Conversations")
+                .font(.title3.weight(.semibold))
+
             VStack(alignment: .leading, spacing: 0) {
                 if let message = shown.emptyMessage {
                     Text(message)
@@ -1547,88 +1561,234 @@ private struct CaptureLedgerSection: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
 
-        if model.visualContextUnavailable {
-            GroupBox("Captured conversation") {
-                Text("This captured conversation is no longer available in local history.")
-                    .foregroundStyle(.secondary)
-            }
-            .id("visual-context")
-        } else if let selected = model.captureLedger.conversations.first(where: {
-            $0.id == model.selectedVisualConversationID
-        }) {
-            GroupBox("Captured conversation · \(selected.title)") {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Visual capture · Read-only retained context")
-                        .font(.caption.weight(.medium))
-                    Text(model.selectedVisualIsHitWindow
-                        ? "Showing up to 100 retained messages around the search result. Times are first observed, not sent times."
-                        : "Showing the newest \(model.selectedVisualMessages.count) retained messages. Times are first observed, not sent times.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if model.searchHitUnavailable {
-                        Text("This search result is no longer retained.")
-                            .foregroundStyle(.secondary)
-                    } else if model.selectedVisualMessages.isEmpty {
-                        Text("No retained Visual messages in this conversation.")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(model.selectedVisualMessages) { message in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(message.sender ?? "Sender unknown")
-                                .font(.caption.weight(.medium))
-                            if let visibleTime = message.visibleTime, !visibleTime.isEmpty {
-                                Text("WeChat showed: \(visibleTime)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Text(message.text ?? "[No text retained]")
-                                .textSelection(.enabled)
-                            Text("First observed \(message.firstObservedAt.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .id(ContextRevealAnchor.visualMessage(message.id))
-                        .background(
-                            highlightedAnchor == .visualMessage(message.id)
-                                ? Color.accentColor.opacity(0.16) : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6)
+            Group {
+                if model.visualContextUnavailable {
+                    TranscriptStateRow(state: .contextVanished)
+                } else if let selected = model.captureLedger.conversations.first(where: {
+                    $0.id == model.selectedVisualConversationID
+                }) {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        let count = model.selectedVisualMessages.count
+                        let windowNote = model.selectedVisualIsHitWindow
+                            ? "Showing a window of up to 100 messages around the search result."
+                            : "Showing the newest retained messages."
+                        let summary = "Visual capture · \(count) retained messages · captured "
+                            + firstCapturedRange(selected)
+                        TranscriptContextHeader(
+                            title: selected.title,
+                            summary: summary,
+                            caveat: "Times are first observed, not sent times. " + windowNote
                         )
-                        Divider()
+                        if model.searchHitUnavailable {
+                            TranscriptStateRow(state: .searchHitVanished)
+                        } else if model.selectedVisualMessages.isEmpty {
+                            TranscriptStateRow(state: .noRetainedRows)
+                        } else {
+                            TranscriptList(
+                                rows: model.selectedVisualMessages.map(TranscriptRow.init(visual:)),
+                                highlightedAnchor: highlightedAnchor
+                            )
+                        }
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .id("visual-context")
-        }
 
-        if let note = shown.retentionNote {
-            Text(note)
+            if let note = shown.retentionNote {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    /// When this conversation was first and last seen on screen. Observation
+    /// metadata, not message send times.
+    private func firstCapturedRange(_ summary: CapturedConversationSummary) -> String {
+        let first = summary.firstCapturedAt.formatted(date: .abbreviated, time: .shortened)
+        let last = summary.lastCapturedAt.formatted(date: .abbreviated, time: .shortened)
+        return first == last ? first : first + " – " + last
+    }
+}
+
+/// Capture runtime state, kept out of the reader's way. The whole point of
+/// the Chats page is the conversations; whether a frame was dropped because
+/// the extractor was busy is a question the reader only has when something
+/// looks wrong.
+private struct CaptureStatusDisclosure: View {
+    @Bindable var model: AppModel
+    let ledger: CaptureLedgerPresentation
+
+    var body: some View {
+        DisclosureGroup("Capture status") {
+            VStack(alignment: .leading, spacing: 0) {
+                StatusRow(
+                    label: "Status",
+                    value: model.extractionMetrics.status.label,
+                    isPositive: model.extractionMetrics.status == .ready
+                        || model.extractionMetrics.status == .processing
+                )
+                Divider()
+                StatusRow(
+                    label: "Remote Processing",
+                    value: model.allowsRemoteProcessing ? "Enabled" : "Disabled",
+                    isPositive: model.allowsRemoteProcessing
+                )
+                Divider()
+                LabeledContent("Selected Gemini Model") {
+                    Text(model.selectedGeminiModel.label).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 10)
+                Divider()
+                Text(
+                    model.extractionMetrics.status == .notConfigured
+                        ? "No extraction provider is configured, so no message content is read. "
+                            + "Frames are observed and released."
+                        : "Extracted message content stays in memory and is not stored yet."
+                )
                 .font(.callout)
                 .foregroundStyle(.secondary)
-        }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-        if !shown.healthRows.isEmpty {
-            GroupBox("Capture Health") {
-                VStack(spacing: 0) {
-                    ForEach(Array(shown.healthRows.enumerated()), id: \.element.id) { index, row in
+                if !ledger.healthRows.isEmpty {
+                    Divider()
+                    Text("Capture health")
+                        .font(.callout.weight(.medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    ForEach(Array(ledger.healthRows.enumerated()), id: \.element.id) { index, row in
                         if index > 0 { Divider() }
                         LabeledContent(row.label) {
                             Text(row.value).foregroundStyle(.secondary)
                         }
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 8)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
 
-        ForEach(shown.guidance, id: \.self) { advice in
-            Text(advice)
-                .font(.callout)
-                .foregroundStyle(.secondary)
+                ForEach(ledger.guidance, id: \.self) { advice in
+                    Divider()
+                    Text(advice)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .font(.title3.weight(.semibold))
+    }
+}
+
+/// Failure diagnosis, frame counters and the live extraction preview. All of
+/// it stays available; none of it is on the first screen.
+private struct DiagnosticsDisclosure: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        DisclosureGroup("Diagnostics") {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(spacing: 0) {
+                    ExtractionMetric(
+                        label: "Meaningful Frames Received",
+                        value: model.extractionMetrics.framesReceived
+                    )
+                    Divider()
+                    ExtractionMetric(
+                        label: "Successful Extractions",
+                        value: model.extractionMetrics.extractionsSucceeded
+                    )
+                    Divider()
+                    ExtractionMetric(
+                        label: "Dropped While Busy",
+                        value: model.extractionMetrics.framesDroppedWhileBusy
+                    )
+                    Divider()
+                    ExtractionMetric(
+                        label: "Failures",
+                        value: model.extractionMetrics.extractionsFailed
+                    )
+                    Divider()
+                    // Shown separately: pausing cancels work, which is
+                    // expected lifecycle rather than an error.
+                    ExtractionMetric(
+                        label: "Cancelled",
+                        value: model.extractionMetrics.extractionsCancelled
+                    )
+                    Divider()
+                    // Makes a consent misconfiguration obvious rather than
+                    // silently looking like "nothing is happening".
+                    ExtractionMetric(
+                        label: "Withheld Pending Consent",
+                        value: model.extractionMetrics.framesWithheldPendingConsent
+                    )
+                    Divider()
+                    LabeledContent("Last Extraction") {
+                        Text(
+                            model.extractionMetrics.lastExtractionAt?
+                                .formatted(date: .omitted, time: .standard) ?? "Never"
+                        )
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
+                }
+
+                if let failure = model.extractionMetrics.lastFailure {
+                    Divider()
+                    Text("Last failure diagnosis")
+                        .font(.callout.weight(.medium))
+                    VStack(spacing: 0) {
+                        LabeledContent("Category") {
+                            Text(failure.category.label).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                        Divider()
+                        FailureDetail("HTTP Status", failure.httpStatus.map(String.init))
+                        Divider()
+                        FailureDetail("URL Error Code", failure.urlErrorCode.map(String.init))
+                        Divider()
+                        FailureDetail("Keychain Status", failure.keychainStatus.map(String.init))
+                        Divider()
+                        FailureDetail("Finish Reason", failure.finishReason?.label)
+                        Divider()
+                        FailureDetail("Block Reason", failure.blockReason?.label)
+                        Divider()
+                        FailureDetail(
+                            "Output Characters",
+                            failure.outputCharacterCount.map(String.init)
+                        )
+                        Divider()
+                        FailureDetail("Prompt Tokens", failure.promptTokenCount.map(String.init))
+                        Divider()
+                        FailureDetail(
+                            "Candidate Tokens", failure.candidatesTokenCount.map(String.init)
+                        )
+                        Divider()
+                        FailureDetail(
+                            "Thinking Tokens", failure.thoughtsTokenCount.map(String.init)
+                        )
+                        Divider()
+                        FailureDetail("Total Tokens", failure.totalTokenCount.map(String.init))
+                        Divider()
+                        FailureDetail(
+                            "Occurred",
+                            failure.occurredAt?.formatted(date: .omitted, time: .standard)
+                        )
+                    }
+                    Text("Diagnosis is aggregate metadata only — no response body, "
+                        + "message text, or image data is recorded.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                LatestExtractionSection(extraction: model.latestExtraction)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.title3.weight(.semibold))
     }
 }
 
@@ -1639,21 +1799,18 @@ private struct CapturedConversationRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(row.title)
-                    .fontWeight(.medium)
+                    .font(.body.weight(.medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 12)
                 Text(row.retainedCount)
                     .foregroundStyle(.secondary)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
             }
-            Text("First captured \(row.firstCaptured) · Last captured \(row.lastCaptured)")
+            Text("Captured \(row.firstCaptured) – \(row.lastCaptured)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
