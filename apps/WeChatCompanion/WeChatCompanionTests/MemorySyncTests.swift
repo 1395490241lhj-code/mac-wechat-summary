@@ -54,6 +54,31 @@ private final class FakeDailySummaryRunner: DailySummaryRunning, @unchecked Send
     }
 }
 
+private actor HeldMemorySyncRunner: MemorySyncRunning {
+    private(set) var calls: [MemorySource] = []
+    private var completion: CheckedContinuation<MemorySyncOutcome, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func sync(source: MemorySource) async -> MemorySyncOutcome {
+        calls.append(source)
+        return await withCheckedContinuation { continuation in
+            completion = continuation
+            started?.resume()
+            started = nil
+        }
+    }
+    func waitUntilStarted() async {
+        if completion == nil {
+            await withCheckedContinuation { started = $0 }
+        }
+    }
+    func finish() {
+        completion?.resume(returning: .failed(.runnerUnavailable))
+        completion = nil
+    }
+    func freshness(source: MemorySource) async -> MemoryFreshnessSummary? { nil }
+}
+
 private func dailySnapshot(source: MemorySource = .archive) -> DailySummarySnapshot {
     let start = Date(timeIntervalSince1970: 1_700_000_000)
     let end = Date(timeIntervalSince1970: 1_700_003_600)
@@ -200,6 +225,129 @@ private func freshness(
 }
 
 struct MemorySyncTests {
+    @Test @MainActor
+    func archiveSummaryNavigationSelectsArchiveAndNeverRunsWork() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary)
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.visual)
+        model.setDailySummaryWindow(.yesterday)
+        model.openArchiveDailySummary()
+        #expect(model.selectedDestination == .dailySummary)
+        #expect(model.dailySummarySource == .archive)
+        #expect(model.dailySummaryWindow == .yesterday)
+        #expect(model.memorySource == .visual)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func summaryMemoryShortcutSelectsArchiveWithoutSyncOrPreparation() async {
+        let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: .archive))
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary)
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        await model.openDailySummaryMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.memorySource == .archive)
+        #expect(model.memoryFreshness?.source == .archive)
+        #expect(model.consumeMemorySettingsRequest())
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        model.setDailySummarySource(.visual)
+        await model.openDailySummaryMemorySettings()
+        #expect(model.memorySource == .visual)
+        #expect(sync.syncCalls.isEmpty)
+    }
+
+    @Test @MainActor
+    func incompatibleMemorySyncBlocksSummaryShortcutWithoutChangingSource() async {
+        let sync = HeldMemorySyncRunner()
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary)
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        model.selectedDestination = .dailySummary
+        let operation = Task { await model.syncMemoryNow() }
+        await sync.waitUntilStarted()
+        #expect(!model.canOpenDailySummaryMemorySettings)
+        await model.openDailySummaryMemorySettings()
+        #expect(model.selectedDestination == .dailySummary)
+        #expect(model.memorySource == .visual)
+        #expect(model.memorySyncPhase == .running)
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(await sync.calls == [.visual])
+        #expect(summary.calls.isEmpty)
+        await sync.finish()
+        await operation.value
+        #expect(model.canOpenDailySummaryMemorySettings)
+    }
+
+    @Test @MainActor
+    func storageOffNavigationDoesNotReadSyncOrPrepareMemory() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary)
+        model.openArchiveDailySummary()
+        await model.openDailySummaryMemorySettings()
+        #expect(model.memorySource == .archive)
+        #expect(!model.isMemoryAvailable)
+        #expect(!model.canPrepareDailySummary)
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func dailySummaryDefaultsToArchiveWithoutSyncingOrPreparing() {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary)
+        #expect(model.dailySummarySource == .archive)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func explicitVisualSummarySelectionSurvivesOrdinaryNavigation() {
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults())
+        model.setDailySummarySource(.visual)
+        model.selectedDestination = .chats
+        model.selectedDestination = .dailySummary
+        #expect(model.dailySummarySource == .visual)
+        model.setDailySummarySource(.database)
+        #expect(model.dailySummarySource == .visual)
+    }
+
+    @Test
+    func archiveSummaryAndMemoryPreparationControlsAreWired() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("WeChatCompanion/ContentView.swift")
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let archive = try #require(source.components(separatedBy: "private struct ArchiveEvidenceBrowser: View {").last?
+            .components(separatedBy: "private struct ArchiveLinkControls:").first)
+        let summary = try #require(source.components(separatedBy: "private struct DailySummaryView: View {").last?
+            .components(separatedBy: "private struct DailySummarySnapshotView:").first)
+        #expect(archive.contains("model.openArchiveDailySummary()"))
+        #expect(summary.contains("model.openDailySummaryMemorySettings()"))
+    }
+
     @Test @MainActor
     func aFreshInstallCannotSyncAndNeverReachesTheRunner() async {
         let runner = FakeMemorySyncRunner(outcomes: [.succeeded(counts, freshness())])

@@ -354,10 +354,37 @@ final class AppModel {
 
     // MARK: - Daily Summary
 
-    private(set) var dailySummarySource: MemorySource = .visual
+    private(set) var dailySummarySource: MemorySource = .archive
     private(set) var dailySummaryWindow: DailySummaryWindow = .today
     private(set) var dailySummaryPhase: DailySummaryPhase = .idle
     private(set) var dailySummarySnapshot: DailySummarySnapshot?
+    private var memorySettingsRequested = false
+
+    func openArchiveDailySummary() {
+        guard !dailySummaryPhase.isRunning else { return }
+        setDailySummarySource(.archive)
+        selectedDestination = .dailySummary
+    }
+
+    var canOpenDailySummaryMemorySettings: Bool {
+        !dailySummaryPhase.isRunning
+            && (!memorySyncPhase.isRunning || memorySource == dailySummarySource)
+    }
+
+    func openDailySummaryMemorySettings() async {
+        guard canOpenDailySummaryMemorySettings else { return }
+        let source = dailySummarySource
+        await setMemorySource(source)
+        guard dailySummarySource == source, memorySource == source,
+              canOpenDailySummaryMemorySettings else { return }
+        memorySettingsRequested = true
+        selectedDestination = .settings
+    }
+
+    func consumeMemorySettingsRequest() -> Bool {
+        defer { memorySettingsRequested = false }
+        return memorySettingsRequested
+    }
 
     var canPrepareDailySummary: Bool {
         allowsLocalPersistence && !dailySummaryPhase.isRunning

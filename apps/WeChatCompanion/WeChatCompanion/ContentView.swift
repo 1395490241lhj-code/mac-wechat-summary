@@ -822,6 +822,11 @@ private struct ArchiveEvidenceBrowser: View {
                 Text("Archive Conversations")
                     .font(.title3.weight(.semibold))
                 Spacer()
+                Button("Daily Summary", systemImage: "text.document") {
+                    model.openArchiveDailySummary()
+                }
+                .disabled(model.dailySummaryPhase.isRunning)
+                .help("Open Daily Summary with Archive selected. Sync and preparation remain explicit.")
                 Button("Choose WeChat Export ZIP…") {
                     isChoosingArchive = true
                 }
@@ -1830,6 +1835,7 @@ private struct SettingsView: View {
     @Bindable var model: AppModel
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Settings")
@@ -1991,6 +1997,7 @@ private struct SettingsView: View {
                 }
 
                 MemorySection(model: model)
+                    .id("memory")
 
                 Spacer(minLength: 0)
             }
@@ -1998,6 +2005,12 @@ private struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Settings")
+        .onAppear {
+            if model.consumeMemorySettingsRequest() {
+                proxy.scrollTo("memory", anchor: .top)
+            }
+        }
+        }
     }
 }
 
@@ -2216,6 +2229,25 @@ private struct DailySummaryView: View {
                         }
 
                         Divider()
+
+                        if model.dailySummarySource == .archive {
+                            Text("Uses already-synced attributed Archive evidence for the selected window across all imports, not just the export you are browsing. Unattributed records and attachments are excluded. Importing does not sync Memory.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack {
+                            Button("Open Memory Settings") {
+                                Task { await model.openDailySummaryMemorySettings() }
+                            }
+                            .disabled(!model.canOpenDailySummaryMemorySettings)
+                            .help("Select this summary source in Memory Settings. Sync remains explicit.")
+                            if !model.canOpenDailySummaryMemorySettings && model.memorySyncPhase.isRunning {
+                                Text("Wait for the current Memory sync before changing its source.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
                         HStack {
                             Text("Reads only the already-synced Memory store.")
