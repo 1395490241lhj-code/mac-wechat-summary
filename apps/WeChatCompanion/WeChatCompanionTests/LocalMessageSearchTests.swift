@@ -652,6 +652,35 @@ struct LocalMessageSearchConsentTests {
     }
 
     @Test @MainActor
+    func overviewArchiveEntryReplacesPreviousVisualContext() async throws {
+        let history = await makeHistory(
+            conversations: ["Overview fixture": [visualMessage("visual fixture")]]
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: try attributed([("fixture sender", "20:35", "archive fixture")]),
+            conversationKey: ArchiveConversationKey("overview-entry"),
+            importedAt: Date()
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.refreshCaptureLedger()
+        await app.refreshArchiveEvidence()
+        let importID = try #require(app.archiveEvidence.imports.first?.id)
+        let visualID = try #require(app.captureLedger.conversations.first?.id)
+        await app.selectVisualConversation(visualID)
+        app.selectedDestination = .overview
+        await app.openArchiveBrowser()
+        #expect(app.selectedDestination == .chats)
+        #expect(app.selectedVisualConversationID == nil)
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.contextNavigationTarget == .archiveImport(importID))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["archive fixture"])
+        await app.openArchiveBrowser()
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.contextNavigationTarget == .archiveImport(importID))
+        #expect(app.archiveEvidence.imports.count == 1)
+    }
+
+    @Test @MainActor
     func directVisualBrowseReadsNewestHundredCanonicalRowsInOrder() async throws {
         let history = await makeHistory(
             conversations: ["Group A": [visualMessage("message 000")]]

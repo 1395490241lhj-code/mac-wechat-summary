@@ -3,6 +3,7 @@ import AppKit
 import Observation
 
 enum ContextNavigationTarget: Equatable {
+    case archiveBrowser
     case visualConversation(Int64)
     case archiveImport(Int64)
 }
@@ -863,6 +864,29 @@ final class AppModel {
         }
         guard selectedVisualConversationID == conversationID else { return }
         selectedVisualMessages = messages
+    }
+
+    /// Explicit Overview entry; reads existing evidence but starts no processing.
+    func openArchiveBrowser() async {
+        if archiveEvidence.storeState == .ready,
+           let importID = archiveEvidence.imports.first(where: {
+               $0.id == selectedArchiveImportID
+           })?.id ?? archiveEvidence.imports.first?.id {
+            await selectArchiveImport(importID)
+        } else {
+            revealGeneration &+= 1
+            directContextSelectionGeneration &+= 1
+            contextRevealRequest = nil
+            selectedVisualConversationID = nil
+            selectedVisualMessages = []
+            visualContextUnavailable = false
+            selectedArchiveImportID = nil
+            selectedArchiveRecords = []
+            selectedArchiveAttachmentBatches = []
+            contextNavigationTarget = .archiveBrowser
+            archiveContextUnavailable = false
+        }
+        selectedDestination = .chats
     }
 
     func selectArchiveImport(_ importID: Int64) async {

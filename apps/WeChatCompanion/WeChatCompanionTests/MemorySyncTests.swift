@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import WeChatCompanion
 
+private actor OverviewTransport: GeminiTransporting {
+    private(set) var calls = 0
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        calls += 1
+        throw URLError(.cancelled)
+    }
+}
+
 /// App-owned Memory sync (M2.2c): consent-gated, foreground, explicit; the
 /// runner is a fake so no memory layer, Python, or file is touched.
 private final class FakeMemorySyncRunner: MemorySyncRunning, @unchecked Sendable {
@@ -278,6 +286,110 @@ private func freshness(
 }
 
 struct MemorySyncTests {
+    @Test @MainActor
+    func genericArchiveEntryClearsExpiredExactContextWithoutWork() async throws {
+        let history = makeTestMessageHistory()
+        let transport = OverviewTransport()
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let defaults = makeDefaults()
+        let model = AppModel(messageHistory: history, shareInbox: nil,
+                             geminiTransport: transport, consentDefaults: defaults,
+                             memorySync: sync, dailySummary: summary, followUpCandidates: scan)
+        await model.setAllowsLocalPersistence(true)
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·Fixture sender\n2026年9月7日 20:35\nstale-overview-target\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: transcript, conversationKey: ArchiveConversationKey("stale-overview"),
+            importedAt: Date()
+        )
+        let hit = try #require(await history.searchLocalMessages("stale-overview-target", filter: .archive).results.first)
+        await history.deleteAllHistory()
+        await model.openSearchResult(hit)
+        // A genuine failed exact reveal must still report its missing context.
+        #expect(model.archiveContextUnavailable)
+        #expect(model.archiveEvidence.storeState == .ready)
+        #expect(model.archiveEvidence.imports.isEmpty)
+        #expect(model.contextRevealRequest == nil)
+        let syncCalls = sync.syncCalls
+        let freshnessCalls = sync.freshnessCalls
+        let consent = defaults.dictionaryRepresentation()
+        model.selectedDestination = .overview
+        await model.openArchiveBrowser()
+        #expect(model.selectedDestination == .chats)
+        #expect(model.contextNavigationTarget == .archiveBrowser)
+        #expect(!model.archiveContextUnavailable)
+        #expect(model.selectedArchiveImportID == nil)
+        #expect(model.archiveEvidence.imports.isEmpty)
+        #expect(model.archiveImportStatus == .idle)
+        #expect(sync.syncCalls == syncCalls && sync.freshnessCalls == freshnessCalls)
+        #expect(summary.calls.isEmpty && scan.calls.isEmpty)
+        #expect(await transport.calls == 0)
+        #expect(model.allowsLocalPersistence && !model.allowsRemoteProcessing)
+        #expect(NSDictionary(dictionary: defaults.dictionaryRepresentation()).isEqual(to: consent))
+        // Superseding the warning must not suppress a later real reveal failure.
+        await model.openSearchResult(hit)
+        #expect(model.archiveContextUnavailable)
+        #expect(model.contextRevealRequest == nil)
+    }
+
+    @Test @MainActor
+    func overviewArchiveEntryTargetsArchiveWithoutConsentOrWork() async {
+        let history = makeTestMessageHistory()
+        let transport = OverviewTransport()
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let model = AppModel(messageHistory: history, shareInbox: nil,
+                             geminiTransport: transport,
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary, followUpCandidates: scan)
+        await model.openArchiveBrowser()
+        #expect(model.selectedDestination == .chats)
+        #expect(model.contextNavigationTarget == .archiveBrowser)
+        #expect(!model.allowsLocalPersistence)
+        #expect(!model.allowsRemoteProcessing)
+        #expect(await history.hasOpenStore == false)
+        #expect(model.archiveEvidence.storeState == .disabled)
+        #expect(model.archiveImportStatus == .idle)
+        #expect(sync.syncCalls.isEmpty && sync.freshnessCalls.isEmpty)
+        #expect(summary.calls.isEmpty && scan.calls.isEmpty)
+        #expect(model.dailySummaryPhase == .idle && model.followUpPhase == .idle)
+        #expect(await transport.calls == 0)
+    }
+
+    @Test @MainActor
+    func overviewArchiveEntryKeepsUnavailableStorageTruthful() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("overview-unavailable-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("not-a-database")
+        try Data("synthetic invalid database".utf8).write(to: database)
+        let before = try Data(contentsOf: database)
+        let history = LocalMessageHistory(url: database)
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let model = AppModel(messageHistory: history, shareInbox: nil,
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary, followUpCandidates: scan)
+        await model.setAllowsLocalPersistence(true)
+        #expect(model.archiveEvidence.storeState == .unavailable)
+        await model.openArchiveBrowser()
+        #expect(model.selectedDestination == .chats)
+        #expect(model.contextNavigationTarget == .archiveBrowser)
+        #expect(model.allowsLocalPersistence)
+        #expect(model.archiveEvidence.storeState == .unavailable)
+        #expect(await history.hasOpenStore == false)
+        #expect(try Data(contentsOf: database) == before)
+        #expect(sync.syncCalls.isEmpty && summary.calls.isEmpty && scan.calls.isEmpty)
+        #expect(model.archiveImportStatus == .idle)
+    }
+
     @Test(arguments: [MemorySource.archive, .visual]) @MainActor
     func reminderMemoryShortcutMatchesCurrentSourceWithoutWork(source: MemorySource) async {
         let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: source))

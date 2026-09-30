@@ -45,140 +45,175 @@ private struct OverviewView: View {
                 Text("Overview")
                     .font(.largeTitle.bold())
 
-                GroupBox("WeChat") {
-                    VStack(spacing: 0) {
-                        StatusRow(
-                            label: "Application",
-                            value: model.systemStatus.wechatInstalled ? "Installed" : "Not Installed",
-                            isPositive: model.systemStatus.wechatInstalled
-                        )
+                GroupBox("Safe Share → Archive") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Share a supported WeChat conversation export to WeChat Companion using the Share menu. Read and search the imported evidence in Archive.")
+                        Text("Safe Share does not require Screen Recording or a Gemini API key.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Open Archive", systemImage: "tray.full") {
+                            Task { await model.openArchiveBrowser() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Text("Then explicitly sync eligible attributed Archive evidence into Memory for Daily Summary and Reminders. Preparation, candidate scanning and saving remain explicit.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                         Divider()
-                        StatusRow(
-                            label: "Process",
-                            value: model.systemStatus.wechatRunning ? "Running" : "Not Running",
-                            isPositive: model.systemStatus.wechatRunning
-                        )
+                        switch model.archiveEvidence.storeState {
+                        case .disabled:
+                            Text("Local message storage is off. Enable it in Settings to persist Archive imports; enabling it can resume queued shares.")
+                        case .unavailable:
+                            Text("Local message storage is unavailable. Archive imports cannot be persisted until the store is available.")
+                        case .ready:
+                            Text("Local message storage is available. Queued shares can be imported; Memory sync remains a separate explicit action.")
+                        }
+                        Button("Open Local Storage Settings") {
+                            model.selectedDestination = .settings
+                        }
+                        .help("Open Settings, then Local Message Storage. This does not change consent.")
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                GroupBox("Permissions") {
-                    VStack(spacing: 0) {
-                        StatusRow(
-                            label: "Screen Recording",
-                            value: model.systemStatus.screenRecordingGranted ? "Granted" : "Required",
-                            isPositive: model.systemStatus.screenRecordingGranted
-                        )
-                    }
-                }
-
-                GroupBox("WeChat Window") {
-                    VStack(spacing: 0) {
-                        StatusRow(
-                            label: "Status",
-                            value: model.captureMetrics.state.label,
-                            isPositive: model.captureMetrics.state == .observing
-                        )
-                        Divider()
-                        LabeledContent("Selected Capture") {
-                            Text("System Window Share")
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        LabeledContent("Meaningful Frames") {
-                            Text(String(model.captureMetrics.meaningfulFramesObserved))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        LabeledContent("Duplicates Skipped") {
-                            Text(String(model.captureMetrics.duplicateFramesSkipped))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        LabeledContent("Last Observed") {
-                            Text(model.captureMetrics.lastFrameAt?
-                                .formatted(date: .omitted, time: .standard) ?? "Never")
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                        Divider()
-                        HStack {
-                            Button(model.needsWindowSelection
-                                ? "Select WeChat Window" : "Change Window") {
-                                Task { await model.selectWeChatWindow() }
-                            }
-                            .buttonStyle(.borderedProminent)
-
-                            if model.captureMetrics.state == .paused {
-                                Button("Resume") {
-                                    Task { await model.resumeObserving() }
-                                }
-                            } else {
-                                Button("Pause") {
-                                    Task { await model.pauseObserving() }
-                                }
-                                .disabled(model.captureMetrics.state != .observing)
-                            }
-                            Button("Stop Observing") {
-                                Task { await model.stopObserving() }
-                            }
-                            .disabled(model.needsWindowSelection)
-                            Spacer()
-                        }
-                        .padding(.vertical, 10)
-                        if model.captureMetrics.state == .selectionLost {
+                DisclosureGroup("Visual Capture — Optional / Experimental") {
+                    Text("Visual capture uses Screen Recording and a separately configured extraction provider. It is not required for Safe Share.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    GroupBox("WeChat") {
+                        VStack(spacing: 0) {
+                            StatusRow(
+                                label: "Application",
+                                value: model.systemStatus.wechatInstalled ? "Installed" : "Not Installed",
+                                isPositive: model.systemStatus.wechatInstalled
+                            )
                             Divider()
-                            Text("The selected window is no longer available. "
-                                + "Select it again to resume observing.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .padding(.vertical, 10)
+                            StatusRow(
+                                label: "Process",
+                                value: model.systemStatus.wechatRunning ? "Running" : "Not Running",
+                                isPositive: model.systemStatus.wechatRunning
+                            )
                         }
                     }
-                }
 
-                CapturePreviewSection(model: model)
+                    GroupBox("Permissions") {
+                        VStack(spacing: 0) {
+                            StatusRow(
+                                label: "Screen Recording",
+                                value: model.systemStatus.screenRecordingGranted ? "Granted" : "Required for Visual capture",
+                                isPositive: model.systemStatus.screenRecordingGranted
+                            )
+                        }
+                    }
 
-                GroupBox("Diagnostics") {
-                    VStack(spacing: 0) {
-                        StatusRow(
-                            label: "Last Status",
-                            value: model.lastDiagnosticStatus.label,
-                            isPositive: model.lastDiagnosticStatus == .succeeded
+                    GroupBox("WeChat Window") {
+                        VStack(spacing: 0) {
+                            StatusRow(
+                                label: "Status",
+                                value: model.captureMetrics.state.label,
+                                isPositive: model.captureMetrics.state == .observing
+                            )
+                            Divider()
+                            LabeledContent("Selected Capture") {
+                                Text("System Window Share")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 10)
+                            Divider()
+                            LabeledContent("Meaningful Frames") {
+                                Text(String(model.captureMetrics.meaningfulFramesObserved))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            .padding(.vertical, 10)
+                            Divider()
+                            LabeledContent("Duplicates Skipped") {
+                                Text(String(model.captureMetrics.duplicateFramesSkipped))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            .padding(.vertical, 10)
+                            Divider()
+                            LabeledContent("Last Observed") {
+                                Text(model.captureMetrics.lastFrameAt?
+                                    .formatted(date: .omitted, time: .standard) ?? "Never")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 10)
+                            Divider()
+                            HStack {
+                                Button(model.needsWindowSelection
+                                    ? "Select WeChat Window" : "Change Window") {
+                                    Task { await model.selectWeChatWindow() }
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                if model.captureMetrics.state == .paused {
+                                    Button("Resume") {
+                                        Task { await model.resumeObserving() }
+                                    }
+                                } else {
+                                    Button("Pause") {
+                                        Task { await model.pauseObserving() }
+                                    }
+                                    .disabled(model.captureMetrics.state != .observing)
+                                }
+                                Button("Stop Observing") {
+                                    Task { await model.stopObserving() }
+                                }
+                                .disabled(model.needsWindowSelection)
+                                Spacer()
+                            }
+                            .padding(.vertical, 10)
+                            if model.captureMetrics.state == .selectionLost {
+                                Divider()
+                                Text("The selected window is no longer available. "
+                                    + "Select it again to resume observing.")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 10)
+                            }
+                        }
+                    }
+
+                    CapturePreviewSection(model: model)
+
+                    GroupBox("Diagnostics") {
+                        VStack(spacing: 0) {
+                            StatusRow(
+                                label: "Last Status",
+                                value: model.lastDiagnosticStatus.label,
+                                isPositive: model.lastDiagnosticStatus == .succeeded
+                            )
+                            Divider()
+                            LabeledContent("Last Run") {
+                                Text(model.lastDiagnostic?.timestamp.formatted() ?? "Never")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 10)
+                        }
+                    }
+
+                    if !model.systemStatus.screenRecordingGranted {
+                        Label(
+                            "Screen Recording permission must be approved manually in System Settings before capture diagnostics can run.",
+                            systemImage: "exclamationmark.triangle"
                         )
-                        Divider()
-                        LabeledContent("Last Run") {
-                            Text(model.lastDiagnostic?.timestamp.formatted() ?? "Never")
-                                .foregroundStyle(.secondary)
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        Task { await model.runDiagnostics() }
+                    } label: {
+                        if model.isRunningDiagnostics {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Test Passive Capture")
                         }
-                        .padding(.vertical, 10)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isRunningDiagnostics)
                 }
-
-                if !model.systemStatus.screenRecordingGranted {
-                    Label(
-                        "Screen Recording permission must be approved manually in System Settings before capture diagnostics can run.",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .foregroundStyle(.secondary)
-                }
-
-                Button {
-                    Task { await model.runDiagnostics() }
-                } label: {
-                    if model.isRunningDiagnostics {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("Test Passive Capture")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.isRunningDiagnostics)
             }
             .padding(28)
             .frame(maxWidth: 720, alignment: .leading)
@@ -749,7 +784,7 @@ private struct ChatsView: View {
         .onAppear {
             guard model.contextRevealRequest == nil else { return }
             switch model.contextNavigationTarget {
-            case .archiveImport: scroll.scrollTo("archives", anchor: .top)
+            case .archiveBrowser, .archiveImport: scroll.scrollTo("archives", anchor: .top)
             case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
             case nil: break
             }
@@ -757,7 +792,7 @@ private struct ChatsView: View {
         .onChange(of: model.contextNavigationTarget) { _, target in
             guard model.contextRevealRequest == nil else { return }
             switch target {
-            case .archiveImport: scroll.scrollTo("archives", anchor: .top)
+            case .archiveBrowser, .archiveImport: scroll.scrollTo("archives", anchor: .top)
             case .visualConversation: scroll.scrollTo("visual-context", anchor: .top)
             case nil: break
             }
@@ -832,6 +867,10 @@ private struct ArchiveEvidenceBrowser: View {
                 }
                 .disabled(model.archiveImportStatus == .importing)
             }
+
+            Text("Read and search imported evidence here. For Daily Summary and Reminders, explicitly sync eligible attributed Archive evidence in Settings → Memory. Their selected source and time window can span applicable imports. Unattributed exports remain available for reading/search, not Memory. Imports are not complete WeChat history.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
 
             if model.archiveContextUnavailable {
                 TranscriptStateRow(state: .contextVanished)
@@ -1931,7 +1970,7 @@ private struct SettingsView: View {
                 GroupBox("Local Message Storage") {
                     VStack(alignment: .leading, spacing: 0) {
                         Toggle(
-                            "Save extracted message text on this Mac",
+                            "Save Archive imports and extracted Visual text on this Mac",
                             isOn: Binding(
                                 get: { model.allowsLocalPersistence },
                                 set: { newValue in
@@ -1941,10 +1980,7 @@ private struct SettingsView: View {
                         )
                         .padding(.vertical, 10)
                         Divider()
-                        Text("Off by default, and separate from remote processing. When "
-                            + "off, extraction still runs and results are shown here, but "
-                            + "nothing is written to disk. Screenshots are never saved "
-                            + "either way.")
+                        Text("Off by default, and separate from remote processing. Enables local persistence of Safe Share Archive imports and extracted Visual text. When off, new Archive imports wait for consent and Visual extraction results are not saved. Enabling storage can resume queued shares. Screenshots are never saved.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .padding(.vertical, 10)
