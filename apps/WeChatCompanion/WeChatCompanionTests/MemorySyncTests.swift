@@ -206,6 +206,59 @@ private func makeDefaults() -> UserDefaults {
     return defaults
 }
 
+private actor RecordingReminderStore: ReminderStoring {
+    private(set) var calls: [String] = []
+
+    func load() async throws -> [SavedFollowUp] { calls.append("load"); return [] }
+    func add(_ reminder: SavedFollowUp) async throws -> [SavedFollowUp] { calls.append("add"); return [] }
+    func setStatus(id: UUID, status: SavedFollowUpStatus) async throws -> [SavedFollowUp] {
+        calls.append("setStatus"); return []
+    }
+    func delete(id: UUID) async throws -> [SavedFollowUp] { calls.append("delete"); return [] }
+}
+
+private actor HeldFollowUpRunner: FollowUpCandidateRunning {
+    private var completion: CheckedContinuation<FollowUpOutcome, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func scan(source: MemorySource, start: Date, end: Date,
+              messageLimit: Int, candidateLimit: Int) async -> FollowUpOutcome {
+        await withCheckedContinuation { continuation in
+            completion = continuation
+            started?.resume()
+            started = nil
+        }
+    }
+    func waitUntilStarted() async {
+        if completion == nil { await withCheckedContinuation { started = $0 } }
+    }
+    func finish() {
+        completion?.resume(returning: .failed(.runnerUnavailable))
+        completion = nil
+    }
+}
+
+private actor HeldFreshnessRunner: MemorySyncRunning {
+    private var completion: CheckedContinuation<MemoryFreshnessSummary?, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func sync(source: MemorySource) async -> MemorySyncOutcome { .failed(.runnerUnavailable) }
+    func freshness(source: MemorySource) async -> MemoryFreshnessSummary? {
+        await withCheckedContinuation { continuation in
+            completion = continuation
+            started?.resume()
+            started = nil
+        }
+    }
+    func waitUntilStarted() async {
+        if completion == nil { await withCheckedContinuation { started = $0 } }
+    }
+    func finish() {
+        completion?.resume(returning: nil)
+        completion = nil
+    }
+}
+
 private let counts = MemorySyncCounts(conversationsSeen: 2, messagesSeen: 13, messagesInserted: 3, messagesUpdated: 10)
 
 private func freshness(
@@ -225,6 +278,175 @@ private func freshness(
 }
 
 struct MemorySyncTests {
+    @Test(arguments: [MemorySource.archive, .visual]) @MainActor
+    func reminderMemoryShortcutMatchesCurrentSourceWithoutWork(source: MemorySource) async {
+        let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: source))
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let store = RecordingReminderStore()
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary, followUpCandidates: scan, reminderStore: store)
+        await model.setAllowsLocalPersistence(true)
+        await model.setMemorySource(source == .archive ? .visual : .archive)
+        model.setFollowUpSource(source)
+        model.selectedDestination = .reminders
+        let storeCalls = await store.calls
+        await model.openFollowUpMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.memorySource == source)
+        #expect(model.followUpSource == source)
+        #expect(model.memoryFreshness?.source == source)
+        #expect(model.consumeMemorySettingsRequest())
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(sync.syncCalls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(await store.calls == storeCalls)
+    }
+
+    @Test @MainActor
+    func storageOffReminderShortcutDoesNotReadOrWriteMemory() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let store = RecordingReminderStore()
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary, followUpCandidates: scan, reminderStore: store)
+        await model.openFollowUpMemorySettings()
+        #expect(model.memorySource == .archive)
+        #expect(model.selectedDestination == .settings)
+        #expect(model.consumeMemorySettingsRequest())
+        #expect(!model.isMemoryAvailable)
+        #expect(!model.canScanFollowUps)
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(await store.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func runningCandidateScanBlocksReminderMemoryHandoff() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let scan = HeldFollowUpRunner()
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync, followUpCandidates: scan)
+        await model.setAllowsLocalPersistence(true)
+        model.selectedDestination = .reminders
+        let operation = Task { await model.scanFollowUps() }
+        await scan.waitUntilStarted()
+        #expect(!model.canOpenFollowUpMemorySettings)
+        await model.openFollowUpMemorySettings()
+        #expect(model.selectedDestination == .reminders)
+        #expect(model.memorySource == .visual)
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(sync.syncCalls.isEmpty)
+        model.setFollowUpSource(.visual)
+        #expect(model.followUpSource == .archive)
+        await scan.finish()
+        await operation.value
+        #expect(model.canOpenFollowUpMemorySettings)
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func reminderHandoffDuringMemorySyncRequiresMatchingSource(compatible: Bool) async {
+        let sync = HeldMemorySyncRunner()
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync, followUpCandidates: scan)
+        await model.setAllowsLocalPersistence(true)
+        if compatible { await model.setMemorySource(.archive) }
+        model.selectedDestination = .reminders
+        let operation = Task { await model.syncMemoryNow() }
+        await sync.waitUntilStarted()
+        #expect(model.canOpenFollowUpMemorySettings == compatible)
+        await model.openFollowUpMemorySettings()
+        #expect(model.selectedDestination == (compatible ? .settings : .reminders))
+        #expect(model.memorySource == (compatible ? .archive : .visual))
+        #expect(model.consumeMemorySettingsRequest() == compatible)
+        #expect(await sync.calls == [compatible ? .archive : .visual])
+        #expect(scan.calls.isEmpty)
+        await sync.finish()
+        await operation.value
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func reminderHandoffRevalidatesAfterAwaitedFreshness(startScan: Bool) async {
+        let sync = HeldFreshnessRunner()
+        let scan = HeldFollowUpRunner()
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync, followUpCandidates: scan)
+        await model.setAllowsLocalPersistence(true)
+        model.selectedDestination = .reminders
+        let handoff = Task { await model.openFollowUpMemorySettings() }
+        await sync.waitUntilStarted()
+        var scanOperation: Task<Void, Never>?
+        if startScan {
+            scanOperation = Task { await model.scanFollowUps() }
+            await scan.waitUntilStarted()
+        } else {
+            model.setFollowUpSource(.visual)
+        }
+        await sync.finish()
+        await handoff.value
+        #expect(model.selectedDestination == .reminders)
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(model.followUpSource == (startScan ? .archive : .visual))
+        if let scanOperation {
+            await scan.finish()
+            await scanOperation.value
+        }
+    }
+
+    @Test @MainActor
+    func freshRemindersDefaultsToArchiveWithoutWork() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let store = RecordingReminderStore()
+        let model = AppModel(messageHistory: makeTestMessageHistory(),
+                             consentDefaults: makeDefaults(), memorySync: sync,
+                             dailySummary: summary, followUpCandidates: scan, reminderStore: store)
+        #expect(model.followUpSource == .archive)
+        #expect(model.followUpPhase == .idle)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(await store.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func explicitVisualReminderSelectionSurvivesOrdinaryNavigation() {
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
+        model.setFollowUpSource(.visual)
+        model.selectedDestination = .chats
+        model.selectedDestination = .dailySummary
+        model.selectedDestination = .reminders
+        #expect(model.followUpSource == .visual)
+        model.setFollowUpSource(.database)
+        #expect(model.followUpSource == .visual)
+    }
+
+    @Test
+    func reminderPreparationUsesTheExistingMemoryPanelAndExplicitScan() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("WeChatCompanion/ContentView.swift")
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let reminders = try #require(source.components(separatedBy: "private struct RemindersView: View {").last?
+            .components(separatedBy: "private struct SavedFollowUpRow:").first)
+        #expect(reminders.contains("model.openFollowUpMemorySettings()"))
+        #expect(reminders.contains("model.canOpenFollowUpMemorySettings"))
+        #expect(reminders.contains("across all applicable imports"))
+        #expect(reminders.contains("Unattributed records and attachments are excluded"))
+        #expect(reminders.contains("Task { await model.scanFollowUps() }"))
+        #expect(!reminders.contains("MemorySection("))
+        #expect(!reminders.contains("syncMemoryNow()"))
+    }
+
     @Test @MainActor
     func archiveSummaryNavigationSelectsArchiveAndNeverRunsWork() async {
         let sync = FakeMemorySyncRunner(outcomes: [])
@@ -667,6 +889,7 @@ struct MemorySyncTests {
             reminderStore: reminderStore
         )
         await model.setAllowsLocalPersistence(true)
+        model.setFollowUpSource(.visual)
         await model.scanFollowUps(now: Date(timeIntervalSince1970: 1_800_000_000))
         await model.saveFollowUpCandidate(0)
         let id = try! #require(model.savedFollowUps.first?.id)

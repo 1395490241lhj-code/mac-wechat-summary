@@ -2566,8 +2566,31 @@ private struct RemindersView: View {
 
                         Divider()
 
+                        if model.followUpSource == .archive {
+                            Text("Uses already-synced attributed Archive evidence across all applicable imports for the selected time window, not just the export you are browsing. Unattributed records and attachments are excluded. Importing does not sync Memory, and stored evidence does not imply complete WeChat history.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
                         HStack {
-                            Text("Scans already-synced Memory only. It never syncs Memory automatically.")
+                            Button("Open Memory Settings") {
+                                Task { await model.openFollowUpMemorySettings() }
+                            }
+                            .disabled(!model.canOpenFollowUpMemorySettings)
+                            .help("Select the current Reminder source in Memory Settings. Sync remains explicit.")
+                            if model.followUpPhase.isRunning {
+                                Text("Wait for the candidate scan before opening Memory Settings.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else if !model.canOpenFollowUpMemorySettings && model.memorySyncPhase.isRunning {
+                                Text("Wait for the current Memory sync before changing its source.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        HStack {
+                            Text("Scans already-synced eligible Memory evidence for the selected source and time window. It never syncs Memory automatically.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Spacer()

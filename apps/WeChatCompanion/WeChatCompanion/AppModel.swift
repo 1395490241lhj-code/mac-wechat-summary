@@ -436,7 +436,7 @@ final class AppModel {
 
     // MARK: - Reminders / follow-up
 
-    private(set) var followUpSource: MemorySource = .visual
+    private(set) var followUpSource: MemorySource = .archive
     private(set) var followUpWindow: FollowUpWindow = .today
     private(set) var followUpPhase: FollowUpPhase = .idle
     private(set) var followUpSnapshot: FollowUpCandidateSnapshot?
@@ -445,6 +445,21 @@ final class AppModel {
 
     var canScanFollowUps: Bool {
         allowsLocalPersistence && !followUpPhase.isRunning
+    }
+
+    var canOpenFollowUpMemorySettings: Bool {
+        !followUpPhase.isRunning
+            && (!memorySyncPhase.isRunning || memorySource == followUpSource)
+    }
+
+    func openFollowUpMemorySettings() async {
+        guard canOpenFollowUpMemorySettings else { return }
+        let source = followUpSource
+        await setMemorySource(source)
+        guard followUpSource == source, memorySource == source,
+              canOpenFollowUpMemorySettings else { return }
+        memorySettingsRequested = true
+        selectedDestination = .settings
     }
 
     func setFollowUpSource(_ source: MemorySource) {
