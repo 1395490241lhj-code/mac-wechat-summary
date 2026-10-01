@@ -310,6 +310,41 @@ def _refusal(op: str, state: str, detail: str) -> dict[str, Any]:
     return {"ok": False, "op": op, "state": state, "detail": detail}
 
 
+def _archive_evidence(citation: Any) -> dict[str, int] | None:
+    """Decode the canonical Archive identity into the pair the app reveals by.
+
+    Memory stores one packed Archive record identifier -- the same
+    ``(import_id << 32) | sequence`` value :mod:`archive_message_source`
+    assigns -- as ``source_message_id``. That value is the canonical identity,
+    so this is where it is unpacked, while the source that produced it is still
+    in hand. A value that is absent, non-numeric, or out of range is refused
+    rather than repaired: an unidentifiable candidate is not offered as one
+    that can be revealed, and nothing is ever approximated onto a nearby row.
+
+    Only Archive-attributed candidates are anchored, and only because the
+    pack is Archive's. Visual identities are not packed this way, and
+    unattributed Archive records never enter Memory, so neither can produce a
+    truthful anchor here.
+    """
+    packed = citation.source_message_id
+    if packed is None:
+        return None
+    try:
+        value = int(packed)
+    except (TypeError, ValueError):
+        raise MemoryStoreError(
+            "archive_evidence_malformed",
+            "Archive evidence identity is unreadable and will not be approximated.",
+        )
+    import_id = value >> 32
+    if import_id <= 0:
+        raise MemoryStoreError(
+            "archive_evidence_malformed",
+            "Archive evidence identity is invalid and will not be approximated.",
+        )
+    return {"import_id": import_id, "sequence": value & 0xFFFFFFFF}
+
+
 
 def _summary_input(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
     source, start, end, limit = _summary_parameters(request)
@@ -476,7 +511,7 @@ def _reminder_candidates(store: MemoryStore, request: dict[str, Any]) -> dict[st
             text = text[:MAX_SUMMARY_TEXT_CHARS]
             clipped_count += 1
 
-        candidates.append({
+        candidate = {
             "ordinal": ordinal,
             "conversation_index": index,
             "source": source,
@@ -486,7 +521,12 @@ def _reminder_candidates(store: MemoryStore, request: dict[str, Any]) -> dict[st
             "text": text,
             "text_truncated": text_was_clipped,
             "reasons": reasons,
-        })
+        }
+        if source == SOURCE_ARCHIVE:
+            anchor = _archive_evidence(item.citation)
+            if anchor is not None:
+                candidate["archive_evidence"] = anchor
+        candidates.append(candidate)
 
     return {
         "ok": True,

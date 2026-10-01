@@ -106,7 +106,8 @@ private let followUpReply = """
  "candidates": [{"ordinal": 0, "conversation_index": 0, "source": "archive",
                  "timestamp": 1700001200.0, "timestamp_kind": "source_created",
                  "sender": "A", "text": "麻烦明天确认一下报价", "text_truncated": false,
-                 "reasons": ["explicit_request", "explicit_follow_up", "time_reference"]}]}
+                 "reasons": ["explicit_request", "explicit_follow_up", "time_reference"],
+                 "archive_evidence": {"import_id": 1, "sequence": 0}}]}
 """
 
 struct PackagedMemorySyncRunnerTests {
@@ -409,6 +410,8 @@ struct PackagedMemorySyncRunnerTests {
         #expect(snapshot.candidates.first?.reasons == [
             "explicit_request", "explicit_follow_up", "time_reference"
         ])
+        #expect(snapshot.candidates.first?.archiveEvidence
+                == ArchiveEvidenceAnchor(importID: 1, sequence: 0))
         #expect(snapshot.freshness?.source == .archive)
 
         let sent = try JSONSerialization.jsonObject(
@@ -422,6 +425,143 @@ struct PackagedMemorySyncRunnerTests {
         #expect(sent["candidate_limit"] as? Int == 50)
         #expect(sent["store_path"] as? String == store.path)
         #expect(sent["message_store_path"] as? String == messages.path)
+    }
+
+    @Test
+    func followUpAnchorIsRequiredForArchiveAndRejectedWhenMalformedOrWrongSource()
+    async throws {
+        // The anchor is the only route from a saved follow-up back to exact
+        // evidence, so a wrong, defaulted, or partially-present one must fail
+        // the whole reply rather than produce a candidate that cannot be
+        // revealed truthfully.
+        for body in [
+            followUpReply.replacingOccurrences(
+                of: #""archive_evidence": {"import_id": 1, "sequence": 0}"#,
+                with: #""archive_evidence": {"sequence": 0}"#
+            ),
+            followUpReply.replacingOccurrences(
+                of: #""archive_evidence": {"import_id": 1, "sequence": 0}"#,
+                with: #""archive_evidence": {"import_id": 0, "sequence": 0}"#
+            ),
+            followUpReply.replacingOccurrences(
+                of: #""archive_evidence": {"import_id": 1, "sequence": 0}"#,
+                with: #""archive_evidence": {"import_id": 1, "sequence": -1}"#
+            ),
+            // Absent entirely: Archive evidence is only ever named by the
+            // worker's own identity, so a missing anchor is malformed.
+            followUpReply.replacingOccurrences(
+                of: ",\n                 \"archive_evidence\": {\"import_id\": 1, \"sequence\": 0}",
+                with: ""
+            ),
+        ] {
+            let stub = try StubWorker(replying: body)
+            defer { stub.cleanup() }
+            let store = temporaryStore()
+            let runner = PackagedMemorySyncRunner(
+                workerURL: stub.executable,
+                storeURL: store,
+                messageStoreURL: store.deletingLastPathComponent()
+                    .appendingPathComponent("messages.sqlite")
+            )
+            let outcome = await runner.scan(
+                source: .archive,
+                start: Date(timeIntervalSince1970: 1_700_000_000),
+                end: Date(timeIntervalSince1970: 1_700_003_600),
+                messageLimit: 200,
+                candidateLimit: 50
+            )
+            #expect(outcome == .failed(.workerFailed(state: "worker_response_malformed")))
+        }
+    }
+
+    @Test
+    func followUpRejectsAnArchiveAnchorOnANonArchiveCandidate() async throws {
+        // An anchor is only ever an Archive fact. Carrying one on a Visual
+        // candidate would let a Visual follow-up reveal an unrelated Archive
+        // row, so the source check is the same shape as the existing
+        // candidate-source check above it.
+        let mismatched = followUpReply.replacingOccurrences(
+            of: #""source": "archive""#, with: #""source": "visual""#
+        )
+        let stub = try StubWorker(replying: mismatched)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: store.deletingLastPathComponent()
+                .appendingPathComponent("messages.sqlite")
+        )
+
+        let outcome = await runner.scan(
+            source: .visual,
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200,
+            candidateLimit: 50
+        )
+
+        #expect(outcome == .failed(.workerFailed(state: "worker_response_malformed")))
+    }
+
+    @Test
+    func followUpFromAVisualSourceCarriesNoArchiveAnchor() async throws {
+        let visual = followUpReply
+            .replacingOccurrences(of: #""source": "archive""#, with: #""source": "visual""#)
+            .replacingOccurrences(
+                of: #""archive_evidence": {"import_id": 1, "sequence": 0}"#, with: ""
+            )
+        let stub = try StubWorker(replying: visual)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: store.deletingLastPathComponent()
+                .appendingPathComponent("messages.sqlite")
+        )
+
+        let outcome = await runner.scan(
+            source: .visual,
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200,
+            candidateLimit: 50
+        )
+
+        guard case .ready(let snapshot) = outcome else {
+            Issue.record("expected Follow-Up success, got \(outcome)")
+            return
+        }
+        #expect(snapshot.candidates.first?.archiveEvidence == nil)
+    }
+
+    @Test
+    func followUpAnchorOnANonArchiveCandidateIsRejected() async throws {
+        // A Visual candidate has no Archive row, so an anchor on it would be a
+        // provenance claim the worker cannot have made.
+        let visual = followUpReply.replacingOccurrences(
+            of: #""source": "archive"#, with: #""source": "visual"#
+        )
+        let stub = try StubWorker(replying: visual)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: store.deletingLastPathComponent()
+                .appendingPathComponent("messages.sqlite")
+        )
+
+        let outcome = await runner.scan(
+            source: .visual,
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200,
+            candidateLimit: 50
+        )
+
+        #expect(outcome == .failed(.workerFailed(state: "worker_response_malformed")))
     }
 
     @Test

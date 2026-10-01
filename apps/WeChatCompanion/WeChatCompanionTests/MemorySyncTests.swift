@@ -201,7 +201,9 @@ private func followUpSnapshot(
                 sender: "A",
                 text: "麻烦明天确认一下报价",
                 textTruncated: textTruncated,
-                reasons: ["explicit_request", "explicit_follow_up", "time_reference"]
+                reasons: ["explicit_request", "explicit_follow_up", "time_reference"],
+                archiveEvidence: source == .archive
+                    ? ArchiveEvidenceAnchor(importID: 1, sequence: 0) : nil
             ),
         ]
     )
@@ -1057,11 +1059,510 @@ struct MemorySyncTests {
 
         let raw = try Data(contentsOf: url)
         let object = try JSONSerialization.jsonObject(with: raw) as? [String: Any]
-        #expect(object?["version"] as? Int == 1)
+        #expect(object?["version"] as? Int == 2)
 
         let completed = try await store.setStatus(id: reminder.id, status: .completed)
         #expect(completed.first?.status == .completed)
         #expect(try await store.delete(id: reminder.id).isEmpty)
+    }
+
+    // MARK: - Canonical evidence reveal (B8)
+
+    private func anchoredReminder(
+        anchor: ArchiveEvidenceAnchor,
+        text: String,
+        source: MemorySource = .archive,
+        evidenceTimestamp: TimeInterval = 1_700_001_200,
+        savedAt: TimeInterval = 1_800_000_000
+    ) -> SavedFollowUp {
+        SavedFollowUp(
+            id: UUID(),
+            source: source,
+            conversationLabel: "Imported archive export",
+            sender: "林晓",
+            evidenceTimestamp: Date(timeIntervalSince1970: evidenceTimestamp),
+            evidenceTimestampKind: "source_created",
+            scanWindowStart: Date(timeIntervalSince1970: 1_700_000_000),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_700_003_600),
+            coverageStatus: "partial",
+            coverageCaveats: ["archive:partial"],
+            savedAt: Date(timeIntervalSince1970: savedAt),
+            text: text,
+            reasons: ["explicit_request"],
+            status: .pending,
+            archiveEvidence: anchor
+        )
+    }
+
+    /// A model that already holds `reminders`, through the same store the app
+    /// writes, so the reveal is exercised against real persisted state rather
+    /// than a value poked into the model.
+    private func modelWithSavedFollowUps(
+        _ reminders: [SavedFollowUp],
+        history: LocalMessageHistory,
+        scan: FakeFollowUpRunner = FakeFollowUpRunner(outcomes: []),
+        transport: OverviewTransport = OverviewTransport(),
+        sync: FakeMemorySyncRunner = FakeMemorySyncRunner(outcomes: []),
+        summary: FakeDailySummaryRunner = FakeDailySummaryRunner(outcomes: [])
+    ) async throws -> AppModel {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreReveal-\(UUID().uuidString)", isDirectory: true)
+        let store = LocalReminderStore(url: root.appendingPathComponent("reminders.json"))
+        for reminder in reminders { _ = try await store.add(reminder) }
+        let model = await MainActor.run { AppModel(
+            messageHistory: history, shareInbox: nil, geminiTransport: transport,
+            consentDefaults: makeDefaults(), memorySync: sync,
+            dailySummary: summary, followUpCandidates: scan, reminderStore: store
+        ) }
+        await model.setAllowsLocalPersistence(true)
+        return model
+    }
+
+    @Test @MainActor
+    func savedFollowUpRevealsItsExactArchiveRowAndRepeatsCleanly() async throws {
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\nreveal-target-row\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let imported = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("b8-reveal"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected an archive import")
+            return
+        }
+        let hit = try #require(
+            await history.searchLocalMessages("reveal-target-row").results.first
+        )
+        guard case .archiveRecord(let hitImport, let sequence, let provenance) = hit.target else {
+            Issue.record("expected an exact archive target")
+            return
+        }
+        #expect(hitImport == importID && provenance == .archiveAttributed)
+
+        let transport = OverviewTransport()
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let reminder = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: hitImport, sequence: sequence),
+            text: "reveal-target-row"
+        )
+        let model = try await modelWithSavedFollowUps(
+            [reminder], history: history, scan: scan, transport: transport,
+            sync: sync, summary: summary
+        )
+        #expect(model.savedFollowUps.map(\.id) == [reminder.id])
+
+        // The reveal uses only the anchor, and reaches the exact row.
+        await model.openSavedFollowUpEvidence(reminder.id)
+        #expect(model.selectedDestination == .chats)
+        #expect(model.selectedArchiveImportID == hitImport)
+        #expect(model.selectedArchiveIsHitWindow)
+        #expect(model.selectedArchiveRecords.contains(where: { $0.sequence == sequence }))
+        #expect(model.contextRevealRequest?.anchor
+                == .archiveRecord(importID: hitImport, sequence: sequence))
+        #expect(!model.archiveContextUnavailable)
+        #expect(!model.searchHitUnavailable)
+
+        // Repeating the same request repeats the same reveal.
+        await model.consumeContextReveal(generation: model.contextRevealRequest!.generation)
+        await model.openSavedFollowUpEvidence(reminder.id)
+        #expect(model.selectedArchiveImportID == hitImport)
+        #expect(model.selectedArchiveRecords.contains(where: { $0.sequence == sequence }))
+        #expect(model.contextRevealRequest?.anchor
+                == .archiveRecord(importID: hitImport, sequence: sequence))
+
+        // Revealing is navigation only: no sync, scan, summary, or network.
+        #expect(scan.calls.isEmpty)
+        #expect(await transport.calls == 0)
+    }
+
+    @Test @MainActor
+    func savedFollowUpRevealTargetsItsOwnRowAndNeverANeighbouringOne() async throws {
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\nfirst-anchor-row\n\n"
+                + "·林晓\n2026年9月7日 20:36\nsecond-anchor-row\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let imported = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("b8-two-rows"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected an archive import")
+            return
+        }
+        let firstHit = try #require(
+            await history.searchLocalMessages("first-anchor-row").results.first
+        )
+        let secondHit = try #require(
+            await history.searchLocalMessages("second-anchor-row").results.first
+        )
+        guard case .archiveRecord(_, let firstSequence, _) = firstHit.target,
+              case .archiveRecord(_, let secondSequence, _) = secondHit.target
+        else {
+            Issue.record("expected exact archive targets")
+            return
+        }
+        #expect(firstSequence != secondSequence)
+
+        let first = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: importID, sequence: firstSequence),
+            text: "first-anchor-row", evidenceTimestamp: 1_700_001_200,
+            savedAt: 1_800_000_000
+        )
+        let second = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: importID, sequence: secondSequence),
+            text: "second-anchor-row", evidenceTimestamp: 1_700_001_260,
+            savedAt: 1_800_000_100
+        )
+        let model = try await modelWithSavedFollowUps([first, second], history: history)
+
+        await model.openSavedFollowUpEvidence(first.id)
+        #expect(model.contextRevealRequest?.anchor
+                == .archiveRecord(importID: importID, sequence: firstSequence))
+        await model.consumeContextReveal(generation: model.contextRevealRequest!.generation)
+
+        // A different follow-up reveals its own row, not the previous one.
+        await model.openSavedFollowUpEvidence(second.id)
+        #expect(model.contextRevealRequest?.anchor
+                == .archiveRecord(importID: importID, sequence: secondSequence))
+    }
+
+    @Test @MainActor
+    func savedFollowUpRevealReportsMissingEvidenceHonestly() async throws {
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\nexpiring-anchor-row\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let imported = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("b8-expiring"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected an archive import")
+            return
+        }
+        let hit = try #require(
+            await history.searchLocalMessages("expiring-anchor-row").results.first
+        )
+        guard case .archiveRecord(let hitImport, let sequence, _) = hit.target else {
+            Issue.record("expected an exact archive target")
+            return
+        }
+        let reminder = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: hitImport, sequence: sequence),
+            text: "expiring-anchor-row"
+        )
+        let model = try await modelWithSavedFollowUps([reminder], history: history)
+
+        // The whole import is gone: the context is gone, and no row is shown.
+        await history.deleteAllHistory()
+        await model.openSavedFollowUpEvidence(reminder.id)
+        #expect(model.archiveContextUnavailable)
+        #expect(model.contextRevealRequest == nil)
+        #expect(model.selectedArchiveRecords.isEmpty)
+        #expect(!model.searchHitUnavailable)
+
+        // The import exists but the anchored row does not: a sequence that was
+        // never written. This is the hit-unavailable state with the context
+        // still present, and it must not substitute the row that is there.
+        let survivor = try WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\ndifferent-row-only\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: survivor,
+            conversationKey: ArchiveConversationKey("b8-expiring"),
+            importedAt: Date()
+        )
+        let survivorHit = try #require(
+            await history.searchLocalMessages("different-row-only").results.first
+        )
+        guard case .archiveRecord(let survivorImport, _, _) = survivorHit.target else {
+            Issue.record("expected an exact archive target")
+            return
+        }
+        let stale = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: survivorImport, sequence: sequence + 99),
+            text: "expiring-anchor-row"
+        )
+        let model3 = try await modelWithSavedFollowUps([stale], history: history)
+        await model3.openSavedFollowUpEvidence(stale.id)
+        #expect(model3.selectedArchiveImportID == survivorImport)
+        #expect(model3.searchHitUnavailable)
+        #expect(model3.contextRevealRequest == nil)
+        #expect(!model3.selectedArchiveRecords.contains(where: { $0.sequence == sequence + 99 }))
+        #expect(!model3.archiveContextUnavailable)
+    }
+
+    @Test @MainActor
+    func anAnchorlessSavedFollowUpNeverRevealsAnything() async throws {
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transport = OverviewTransport()
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let anchorless = SavedFollowUp(
+            id: UUID(),
+            source: .archive,
+            conversationLabel: "Imported archive export",
+            sender: "林晓",
+            evidenceTimestamp: Date(timeIntervalSince1970: 1_700_001_200),
+            evidenceTimestampKind: "source_created",
+            scanWindowStart: Date(timeIntervalSince1970: 1_700_000_000),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_700_003_600),
+            coverageStatus: "partial",
+            coverageCaveats: ["archive:partial"],
+            savedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            text: "legacy row",
+            reasons: ["explicit_request"],
+            status: .pending
+        )
+        #expect(anchorless.archiveEvidence == nil)
+        let model = try await modelWithSavedFollowUps(
+            [anchorless], history: history, scan: scan, transport: transport
+        )
+
+        // Nothing to reveal means nothing happens, including navigation.
+        await model.openSavedFollowUpEvidence(anchorless.id)
+        #expect(model.selectedDestination == .overview)
+        #expect(model.contextRevealRequest == nil)
+        #expect(model.contextNavigationTarget == nil)
+        #expect(!model.archiveContextUnavailable)
+        #expect(!model.searchHitUnavailable)
+        #expect(model.selectedArchiveRecords.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(await transport.calls == 0)
+    }
+
+    @Test @MainActor
+    func aNonArchiveSavedFollowUpCannotRevealArchiveEvidence() async throws {
+        // A record that pairs a Visual source with an Archive anchor is not
+        // something this app writes, and a tampered file must not be able to
+        // turn it into an Archive reveal.
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transcript = try WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\nvisual-source-row\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let imported = try await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("b8-visual-source"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected an archive import")
+            return
+        }
+        let hit = try #require(
+            await history.searchLocalMessages("visual-source-row").results.first
+        )
+        guard case .archiveRecord(let hitImport, let sequence, _) = hit.target else {
+            Issue.record("expected an exact archive target")
+            return
+        }
+        let tampered = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: hitImport, sequence: sequence),
+            text: "visual-source-row",
+            source: .visual
+        )
+        let model = try await modelWithSavedFollowUps([tampered], history: history)
+        // Whatever the import view happens to be showing, the reveal itself
+        // must do nothing: no navigation, no reveal request, no archive
+        // context loss, and no hit-unavailable state.
+
+        await model.openSavedFollowUpEvidence(tampered.id)
+        #expect(model.contextRevealRequest == nil)
+        #expect(model.contextNavigationTarget == nil)
+        #expect(!model.archiveContextUnavailable)
+        #expect(!model.searchHitUnavailable)
+    }
+
+    @Test
+    func exactDuplicateEvidenceWithDifferentAnchorsStaysIndependentlySaveable() async throws {
+        // Two records can agree on every displayed field and still name two
+        // different exact rows. Deduplication must not collapse them.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreAnchors-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = LocalReminderStore(url: root.appendingPathComponent("reminders.json"))
+        let first = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: 1, sequence: 0), text: "same-row"
+        )
+        let second = anchoredReminder(
+            anchor: ArchiveEvidenceAnchor(importID: 1, sequence: 1), text: "same-row"
+        )
+        #expect(!first.isSameEvidence(as: second))
+
+        var loaded = try await store.add(first)
+        #expect(loaded.count == 1)
+        loaded = try await store.add(second)
+        #expect(loaded.count == 2)
+        #expect(Set(loaded.compactMap(\.archiveEvidence?.sequence)) == [0, 1])
+    }
+
+    @Test
+    func localReminderStoreKeepsAVersionOneFileReadableAsAnchorless() async throws {
+        // The compatibility contract. A v1 file predates the evidence anchor,
+        // so its records load as anchorless and stay fully manageable. They
+        // are never guessed at, and reading one rewrites nothing.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreV1-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("reminders.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // Dates are seconds since the 2001 reference date, which is what the
+        // store's default encoder has always written -- a real version 1 file
+        // is in exactly this form.
+        let legacy = """
+        {"version":1,"reminders":[{"id":"11111111-1111-1111-1111-111111111111",
+        "source":"archive","conversationLabel":"Imported archive export","sender":"A",
+        "evidenceTimestamp":721694000,"evidenceTimestampKind":"source_created",
+        "scanWindowStart":720692800,"scanWindowEnd":721696800,
+        "coverageStatus":"partial","coverageCaveats":["archive:partial"],
+        "savedAt":821692800,"text":"麻烦明天确认一下报价",
+        "reasons":["explicit_request"],"status":"pending"}]}
+        """
+        let original = Data(legacy.utf8)
+        try original.write(to: url)
+
+        let store = LocalReminderStore(url: url)
+        let loaded = try await store.load()
+        let record = try #require(loaded.first)
+        #expect(loaded.count == 1)
+        #expect(record.id == UUID(uuidString: "11111111-1111-1111-1111-111111111111"))
+        #expect(record.source == .archive)
+        #expect(record.conversationLabel == "Imported archive export")
+        #expect(record.text == "麻烦明天确认一下报价")
+        #expect(abs(record.evidenceTimestamp.timeIntervalSince1970 - 1_700_001_200) < 1)
+        #expect(abs(record.savedAt.timeIntervalSince1970 - 1_800_000_000) < 1)
+        #expect(record.status == .pending)
+        #expect(record.archiveEvidence == nil)
+        // Reading is not a migration: the file on disk is untouched.
+        #expect(try Data(contentsOf: url) == original)
+
+        // Lifecycle still works on an anchorless legacy record.
+        let completed = try await store.setStatus(id: record.id, status: .completed)
+        #expect(completed.first?.status == .completed)
+        #expect(try await store.setStatus(id: record.id, status: .pending).first?.status == .pending)
+        #expect(try await store.delete(id: record.id).isEmpty)
+    }
+
+    @Test
+    func localReminderStoreRoundTripsAnchoredAndAnchorlessRecordsInTheCurrentVersion()
+    async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreV2-\(UUID().uuidString)", isDirectory: true)
+        let url = root.appendingPathComponent("reminders.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = LocalReminderStore(url: url)
+        let anchored = SavedFollowUp(
+            id: UUID(),
+            source: .archive,
+            conversationLabel: "Imported archive export",
+            sender: "A",
+            evidenceTimestamp: Date(timeIntervalSince1970: 1_700_001_200),
+            evidenceTimestampKind: "source_created",
+            scanWindowStart: Date(timeIntervalSince1970: 1_700_000_000),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_700_003_600),
+            coverageStatus: "partial",
+            coverageCaveats: ["archive:partial"],
+            savedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            text: "麻烦明天确认一下报价",
+            reasons: ["explicit_request"],
+            status: .pending,
+            archiveEvidence: ArchiveEvidenceAnchor(importID: 1, sequence: 0)
+        )
+        let anchorless = SavedFollowUp(
+            id: UUID(),
+            source: .visual,
+            conversationLabel: "Captured conversation",
+            sender: "B",
+            evidenceTimestamp: Date(timeIntervalSince1970: 1_700_001_400),
+            evidenceTimestampKind: "first_observed",
+            scanWindowStart: Date(timeIntervalSince1970: 1_700_000_000),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_700_003_600),
+            coverageStatus: "partial",
+            coverageCaveats: [],
+            savedAt: Date(timeIntervalSince1970: 1_800_000_100),
+            text: "我会明天跟进这个事情",
+            reasons: ["explicit_commitment"],
+            status: .completed
+        )
+
+        _ = try await store.add(anchored)
+        _ = try await store.add(anchorless)
+        #expect(try await store.load() == [anchorless, anchored])
+        #expect(try await store.load().first?.archiveEvidence == nil)
+        #expect(try await store.load().last?.archiveEvidence
+                == ArchiveEvidenceAnchor(importID: 1, sequence: 0))
+    }
+
+    @Test
+    func savedFollowUpCarriesTheCandidateAnchorIntoTheStore() async throws {
+        let anchor = ArchiveEvidenceAnchor(importID: 12, sequence: 34)
+        let candidate = FollowUpCandidate(
+            id: 0,
+            conversationIndex: 0,
+            source: .archive,
+            timestamp: Date(timeIntervalSince1970: 1_700_001_200),
+            timestampKind: "source_created",
+            sender: "A",
+            text: "麻烦明天确认一下报价",
+            textTruncated: false,
+            reasons: ["explicit_request"],
+            archiveEvidence: anchor
+        )
+        let runner = FakeFollowUpRunner(outcomes: [.ready(FollowUpCandidateSnapshot(
+            source: .archive,
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            scannedMessages: 4,
+            returnedCandidates: 1,
+            textTruncatedCount: 0,
+            truncated: false,
+            coverage: FollowUpCoverage(
+                status: "partial", trustworthyEmpty: false, caveats: ["archive:partial"]
+            ),
+            freshness: nil,
+            conversations: [FollowUpConversation(id: 0, label: "Imported archive export")],
+            candidates: [candidate]
+        ))])
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ReminderStoreSave-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reminderStore = LocalReminderStore(
+            url: root.appendingPathComponent("reminders.json")
+        )
+        let model = await MainActor.run { AppModel(
+            messageHistory: makeTestMessageHistory(), shareInbox: nil,
+            consentDefaults: makeDefaults(), followUpCandidates: runner,
+            reminderStore: reminderStore
+        ) }
+        await model.setAllowsLocalPersistence(true)
+        await MainActor.run { model.setFollowUpSource(.archive) }
+        await model.scanFollowUps(now: Date(timeIntervalSince1970: 1_800_000_000))
+        await model.saveFollowUpCandidate(0)
+
+        let saved = try #require(await MainActor.run { model.savedFollowUps.first })
+        #expect(saved.archiveEvidence == anchor)
+        #expect(saved.source == .archive)
+        // The anchor is persisted, not just held in the model.
+        #expect(try await reminderStore.load().first?.archiveEvidence == anchor)
     }
 
     @Test

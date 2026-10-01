@@ -297,6 +297,9 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
                       let textTruncated = row["text_truncated"] as? Bool,
                       let reasons = row["reasons"] as? [String]
                 else { return nil }
+                guard let anchor = Self.archiveAnchor(
+                    from: row["archive_evidence"], source: candidateSource
+                ) else { return nil }
                 return FollowUpCandidate(
                     id: ordinal,
                     conversationIndex: conversationIndex,
@@ -306,7 +309,8 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
                     sender: row["sender"] as? String,
                     text: text,
                     textTruncated: textTruncated,
-                    reasons: reasons
+                    reasons: reasons,
+                    archiveEvidence: anchor
                 )
             }
             guard candidates.count == candidateRows.count else {
@@ -337,6 +341,27 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
 
     private func baseRequest(op: String) -> [String: Any] {
         ["op": op, "store_path": storeURL.path, "message_store_path": messageStoreURL.path]
+    }
+
+    /// Decodes the worker's canonical Archive anchor, or rejects the row.
+    ///
+    /// The worker packs no identity of its own: it unpacks the one Memory
+    /// already stored, so this only has to refuse an anchor that is malformed,
+    /// non-positive, or attached to something that is not Archive evidence. A
+    /// candidate that cannot be named is never offered as one that can be
+    /// revealed, and no anchor is ever defaulted from a missing field.
+    private static func archiveAnchor(
+        from value: Any?, source: MemorySource
+    ) -> ArchiveEvidenceAnchor?? {
+        // Archive evidence is only ever named by the worker's own canonical
+        // identity, so an Archive row without one is malformed, not anchorless.
+        // Only a non-Archive candidate may legitimately carry no anchor.
+        guard source == .archive else { return value == nil ? .some(nil) : nil }
+        guard let row = value as? [String: Any],
+              let importID = row["import_id"] as? Int64, importID > 0,
+              let sequence = row["sequence"] as? Int, sequence >= 0
+        else { return nil }
+        return .some(ArchiveEvidenceAnchor(importID: importID, sequence: sequence))
     }
 
     private func failureFrom(_ reply: [String: Any]) -> MemorySyncFailure {

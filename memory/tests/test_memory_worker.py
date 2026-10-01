@@ -350,6 +350,151 @@ def test_reminder_candidates_do_not_turn_not_observed_into_nothing_to_do(tmp_pat
     assert reply["coverage"]["trustworthy_empty"] is False
     assert reply["coverage"]["status"] != "complete"
 
+
+# --- canonical Archive evidence anchors ------------------------------------
+
+
+def archive_message_store(path: Path, *, attributed: int = 2) -> Path:
+    """A minimal supported-schema Archive store, synthetic throughout.
+
+    Schema version 2 is used on purpose: it is the smallest supported version
+    and therefore needs the fewest tables, none of which involve attachments
+    or labels. Every string here is invented for this test file.
+    """
+    import sqlite3
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        PRAGMA user_version = 2;
+        CREATE TABLE conversations (
+            id INTEGER PRIMARY KEY, title TEXT,
+            first_seen_at REAL, last_seen_at REAL
+        );
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY, conversation_id INTEGER, sequence INTEGER,
+            sender TEXT, ownership TEXT, visible_time TEXT, text TEXT,
+            kind TEXT, confidence REAL, first_observed_at REAL
+        );
+        CREATE TABLE archive_conversations (
+            id INTEGER PRIMARY KEY, source_conversation_key TEXT NOT NULL
+        );
+        CREATE TABLE archive_imports (
+            id INTEGER PRIMARY KEY, archive_conversation_id INTEGER NOT NULL,
+            transcript_shape TEXT NOT NULL, imported_at REAL NOT NULL
+        );
+        CREATE TABLE archive_attributed_records (
+            import_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
+            sender TEXT NOT NULL, sent_at REAL NOT NULL,
+            sent_at_text TEXT NOT NULL, text TEXT NOT NULL
+        );
+        CREATE TABLE archive_unattributed_records (
+            import_id INTEGER NOT NULL, sequence INTEGER NOT NULL,
+            record_text TEXT NOT NULL
+        );
+        INSERT INTO archive_conversations VALUES (1, 'archive-a');
+        INSERT INTO archive_imports VALUES (1, 1, 'attributed', 1000.0);
+        INSERT INTO archive_imports VALUES (2, 1, 'unattributed', 2000.0);
+        INSERT INTO archive_unattributed_records VALUES (2, 0, '不应进入 Memory');
+        """
+    )
+    texts = ["麻烦明天确认一下报价", "我会明天跟进这个事情"]
+    for sequence in range(attributed):
+        connection.execute(
+            """INSERT INTO archive_attributed_records
+               VALUES (1, ?, '林晓', ?, '昨天 10:00', ?);""",
+            (sequence, 100.0 + sequence, texts[sequence % len(texts)]),
+        )
+    connection.commit()
+    connection.close()
+    return path
+
+
+def scan_archive_candidates(tmp_path, *, count: int = 2) -> dict:
+    """Sync a synthetic Archive store and scan it for follow-up candidates."""
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=count
+    )
+    run({
+        "op": "sync",
+        "store_path": str(store),
+        "message_store_path": str(messages),
+        "message_source": SOURCE_ARCHIVE,
+        "conversation_limit": 10,
+        "message_limit": 10,
+    })
+    reply, code = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_ARCHIVE,
+        "start": 50.0,
+        "end": 150.0,
+    })
+    assert (reply["ok"], code) == (True, 0), reply
+    return reply
+
+
+def test_archive_candidates_carry_their_exact_canonical_anchor(tmp_path):
+    reply = scan_archive_candidates(tmp_path, count=1)
+
+    assert reply["counts"]["returned_candidates"] == 1
+    anchor = reply["candidates"][0]["archive_evidence"]
+    assert anchor == {"import_id": 1, "sequence": 0}
+
+
+def test_each_archive_candidate_keeps_its_own_anchor(tmp_path):
+    reply = scan_archive_candidates(tmp_path, count=2)
+
+    assert reply["counts"]["returned_candidates"] == 2
+    anchors = [item["archive_evidence"] for item in reply["candidates"]]
+    assert anchors == [
+        {"import_id": 1, "sequence": 0},
+        {"import_id": 1, "sequence": 1},
+    ]
+
+
+def test_unattributed_and_visual_candidates_carry_no_archive_anchor(
+    tmp_path, monkeypatch
+):
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=1
+    )
+    run({
+        "op": "sync",
+        "store_path": str(store),
+        "message_store_path": str(messages),
+        "message_source": SOURCE_ARCHIVE,
+        "conversation_limit": 10,
+        "message_limit": 10,
+    })
+    archive_reply, _ = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_ARCHIVE,
+        "start": 50.0,
+        "end": 150.0,
+    })
+    # Unattributed evidence never reaches Memory, so it cannot be anchored.
+    assert "不应进入 Memory" not in json.dumps(archive_reply, ensure_ascii=False)
+    for candidate in archive_reply["candidates"]:
+        assert candidate["archive_evidence"]["import_id"] == 1
+
+    visual = FakeSource([visual_message(1, 7, "麻烦明天确认一下报价")])
+    monkeypatch.setattr(worker, "build_selected_source", lambda: visual)
+    run({"op": "sync", "store_path": str(store)})
+    visual_reply, _ = run({
+        "op": "reminder_candidates",
+        "store_path": str(store),
+        "message_source": SOURCE_VISUAL,
+        "start": 1_699_999_000.0,
+        "end": 1_700_001_000.0,
+    })
+    assert visual_reply["counts"]["returned_candidates"] == 1
+    assert "archive_evidence" not in visual_reply["candidates"][0]
+
 def test_freshness_advances_and_keeps_its_parts_distinct(tmp_path, synthetic):
     store = paths.canonical_store_path(tmp_path)
     first, _ = run({"op": "sync", "store_path": str(store)})

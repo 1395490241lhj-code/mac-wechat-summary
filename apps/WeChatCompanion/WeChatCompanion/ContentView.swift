@@ -2785,6 +2785,12 @@ private struct SavedFollowUpRow: View {
                 Button("Delete", role: .destructive) {
                     Task { await model.deleteSavedFollowUp(reminder.id) }
                 }
+                if reminder.source == .archive, reminder.archiveEvidence != nil {
+                    Button("Show Source Evidence") {
+                        Task { await model.openSavedFollowUpEvidence(reminder.id) }
+                    }
+                    .accessibilityLabel("Show the original archive message")
+                }
                 Spacer()
                 Text("No due date · no notification")
                     .font(.caption2)

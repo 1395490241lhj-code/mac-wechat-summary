@@ -293,6 +293,14 @@ struct FollowUpConversation: Identifiable, Equatable, Sendable {
     let label: String
 }
 
+/// The canonical Archive identity a saved follow-up can be revealed from:
+/// the exact import and the exact record within it. Produced by the Memory
+/// worker from the citation identity it already holds, and never guessed at.
+struct ArchiveEvidenceAnchor: Codable, Equatable, Hashable, Sendable {
+    let importID: Int64
+    let sequence: Int
+}
+
 struct FollowUpCandidate: Identifiable, Equatable, Sendable {
     let id: Int
     let conversationIndex: Int
@@ -303,6 +311,10 @@ struct FollowUpCandidate: Identifiable, Equatable, Sendable {
     let text: String
     let textTruncated: Bool
     let reasons: [String]
+    /// Present only for Archive-attributed candidates, and only when the
+    /// worker could name the exact record. Absence is not a defect: such a
+    /// follow-up stays savable, it simply has no evidence to reveal.
+    var archiveEvidence: ArchiveEvidenceAnchor? = nil
 }
 
 struct FollowUpCandidateSnapshot: Equatable, Sendable {
@@ -397,6 +409,10 @@ struct SavedFollowUp: Codable, Identifiable, Equatable, Sendable {
     let text: String
     let reasons: [String]
     var status: SavedFollowUpStatus
+    /// Optional so that a version 1 document -- which has no such field --
+    /// decodes unchanged and stays fully manageable. A follow-up without one
+    /// exposes no reveal action; an anchor is never inferred for it.
+    var archiveEvidence: ArchiveEvidenceAnchor? = nil
 
     func isSameEvidence(as other: SavedFollowUp) -> Bool {
         source == other.source
@@ -405,6 +421,7 @@ struct SavedFollowUp: Codable, Identifiable, Equatable, Sendable {
             && evidenceTimestamp == other.evidenceTimestamp
             && evidenceTimestampKind == other.evidenceTimestampKind
             && text == other.text
+            && archiveEvidence == other.archiveEvidence
     }
 }
 
@@ -425,7 +442,11 @@ private struct ReminderStoreDocument: Codable {
     var version: Int
     var reminders: [SavedFollowUp]
 
-    static let currentVersion = 1
+    /// Version 1 predates the evidence anchor. Its records decode as
+    /// anchorless because the field is optional, so a v1 file is read exactly
+    /// as written and stays manageable without any upgrade step.
+    static let supportedVersions: Set<Int> = [1, 2]
+    static let currentVersion = 2
     static var empty: ReminderStoreDocument {
         ReminderStoreDocument(version: currentVersion, reminders: [])
     }
@@ -492,10 +513,17 @@ actor LocalReminderStore: ReminderStoring {
         do {
             let data = try Data(contentsOf: url)
             let document = try decoder.decode(ReminderStoreDocument.self, from: data)
-            guard document.version == ReminderStoreDocument.currentVersion else {
+            guard ReminderStoreDocument.supportedVersions.contains(document.version) else {
                 throw ReminderStoreError.unsupportedVersion
             }
-            return document
+            // A v1 file is read as-is. Upgrading the version number is a
+            // write, and there is no reason to write on a read: the v1 records
+            // already decode, and the next genuine change rewrites the file in
+            // the current version anyway.
+            return ReminderStoreDocument(
+                version: ReminderStoreDocument.currentVersion,
+                reminders: document.reminders
+            )
         } catch let error as ReminderStoreError {
             throw error
         } catch {

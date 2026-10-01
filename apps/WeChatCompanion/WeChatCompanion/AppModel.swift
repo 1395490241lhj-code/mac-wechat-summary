@@ -549,7 +549,8 @@ final class AppModel {
             savedAt: now,
             text: candidate.text,
             reasons: candidate.reasons,
-            status: .pending
+            status: .pending,
+            archiveEvidence: candidate.archiveEvidence
         )
         do {
             savedFollowUps = try await reminderStore.add(reminder)
@@ -834,6 +835,36 @@ final class AppModel {
 
     func consumeContextReveal(generation: UInt64) {
         if contextRevealRequest?.generation == generation { contextRevealRequest = nil }
+    }
+
+    /// Reveals the exact Archive record a saved follow-up was drawn from.
+    ///
+    /// The anchor is the whole lookup: import and sequence, taken from the
+    /// worker when the follow-up was saved and revalidated against the store
+    /// here. Nothing is matched, searched, or recalled -- this is the existing
+    /// exact-reveal path with a different way in, so it starts no sync, scan,
+    /// summary, or network work. A follow-up with no anchor has nothing to
+    /// reveal, so nothing happens at all: no navigation and no error state.
+    func openSavedFollowUpEvidence(_ id: UUID) async {
+        guard allowsLocalPersistence,
+              let reminder = savedFollowUps.first(where: { $0.id == id }),
+              reminder.source == .archive,
+              let anchor = reminder.archiveEvidence
+        else { return }
+        await openSearchResult(LocalSearchResult(
+            id: "saved-follow-up:\(id.uuidString):\(anchor.importID):\(anchor.sequence)",
+            target: .archiveRecord(
+                importID: anchor.importID, sequence: anchor.sequence,
+                provenance: .archiveAttributed
+            ),
+            source: .archiveAttributed,
+            provenance: .archiveAttributed,
+            conversationLabel: reminder.conversationLabel,
+            sender: reminder.sender,
+            timestamp: reminder.evidenceTimestamp,
+            excerpt: reminder.text,
+            linkState: nil
+        ))
     }
 
     func selectVisualConversation(_ conversationID: Int64) async {
