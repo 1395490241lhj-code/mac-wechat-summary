@@ -22,7 +22,8 @@ operation that is not in :data:`OPERATIONS`::
                             "message_limit": 200, "candidate_limit": 50}
     {"op": "answer_evidence", "store_path": "<optional>", "message_source": "archive",
                             "start": 1700000000.0, "end": 1700086400.0,
-                            "message_limit": 200}
+                            "message_limit": 200, "conversation_canonical_id": "conv:<hex>"}
+    {"op": "archive_conversations", "store_path": "<optional>"}
     {"op": "paths"}
 
     {"ok": true,  "op": "sync", "state": "synced", "counts": {...}, "freshness": {...}}
@@ -117,7 +118,7 @@ DB_PATH_ENV: str = "WECHAT_COMPANION_DB_PATH"
 
 OPERATIONS: frozenset[str] = frozenset({
     "sync", "status", "paths", "summary_input", "reminder_candidates",
-    "answer_evidence",
+    "answer_evidence", "archive_conversations",
 })
 MEMORY_SOURCE_NAMES: frozenset[str] = SOURCE_NAMES | frozenset({SOURCE_ARCHIVE})
 
@@ -138,8 +139,10 @@ MAX_FOLLOW_UP_CANDIDATES: int = 50
 #: one that would eventually be trusted once.
 ANSWER_REQUEST_FIELDS: frozenset[str] = frozenset({
     "op", "store_path", "message_store_path", "message_source",
-    "start", "end", "message_limit",
+    "start", "end", "message_limit", "conversation_canonical_id",
 })
+
+ARCHIVE_CONVERSATION_FIELDS: frozenset[str] = frozenset({"op", "store_path"})
 
 FOLLOW_UP_REQUEST_MARKERS: tuple[str, ...] = (
     "请", "麻烦", "能不能", "能否", "可以帮", "记得", "别忘",
@@ -235,7 +238,7 @@ def _follow_up_parameters(
 
 def _answer_evidence_parameters(
     request: dict[str, Any],
-) -> tuple[float, float, int]:
+) -> tuple[float, float, int, str | None]:
     """The evidence window's shape: Archive only, bounded, no wording.
 
     Unlike the summary parameters this does not fall back to Visual. The
@@ -253,7 +256,44 @@ def _answer_evidence_parameters(
     if end <= start:
         raise BadRequest("end must be greater than start.")
     limit = _limit(request, "message_limit", MAX_SUMMARY_MESSAGES, MAX_SUMMARY_MESSAGES)
-    return start, end, limit
+    conversation_id = request.get("conversation_canonical_id")
+    if conversation_id is not None:
+        if (not isinstance(conversation_id, str) or len(conversation_id) != 37
+                or not conversation_id.startswith("conv:")
+                or any(character not in "0123456789abcdef" for character in conversation_id[5:])):
+            raise BadRequest("conversation_canonical_id must be a lowercase canonical id.")
+    return start, end, limit, conversation_id
+
+
+def _archive_conversations(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
+    if set(request) - ARCHIVE_CONVERSATION_FIELDS:
+        raise BadRequest("request has fields this operation does not accept.")
+    rows: list[dict[str, Any]] = []
+    discovery = MemoryQueryService(store).conversations(limit=MAX_CONVERSATION_LIMIT)
+    if discovery.truncated:
+        raise MemoryStoreError(
+            "archive_conversations_incomplete",
+            "Archive conversation discovery was incomplete.",
+        )
+    for group in discovery.items:
+        for observation in group.observations:
+            if observation.source != SOURCE_ARCHIVE:
+                continue
+            rows.append({
+                "canonical_conversation_id": observation.canonical_conversation_id,
+                "source": SOURCE_ARCHIVE,
+                "label": observation.display_name or "Imported Archive snapshot",
+                "first_seen_at": observation.first_seen_at,
+                "last_seen_at": observation.last_seen_at,
+            })
+    rows.sort(key=lambda row: (row["last_seen_at"] is None, -(row["last_seen_at"] or 0.0), row["canonical_conversation_id"]))
+    return {
+        "ok": True,
+        "op": "archive_conversations",
+        "state": "ready",
+        "counts": {"returned_conversations": len(rows)},
+        "conversations": rows,
+    }
 
 
 def _follow_up_reasons(text: str) -> list[str]:
@@ -527,7 +567,7 @@ def _answer_evidence(store: MemoryStore, request: dict[str, Any]) -> dict[str, A
     present but unreadable means the store is not what it claims, so the whole
     request is refused; nothing is skipped past a corrupt provenance field.
     """
-    start, end, limit = _answer_evidence_parameters(request)
+    start, end, limit, conversation_id = _answer_evidence_parameters(request)
     service = MemoryQueryService(store)
     result = service.recent_context(
         since=start,
@@ -535,6 +575,7 @@ def _answer_evidence(store: MemoryStore, request: dict[str, Any]) -> dict[str, A
         limit=limit,
         order="oldest",
         source=SOURCE_ARCHIVE,
+        conversation_canonical_id=conversation_id,
     )
 
     evidence: list[dict[str, Any]] = []
@@ -695,13 +736,16 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
         _follow_up_parameters(request)
     elif op == "answer_evidence":
         _answer_evidence_parameters(request)
+    elif op == "archive_conversations":
+        if set(request) - ARCHIVE_CONVERSATION_FIELDS:
+            raise BadRequest("request has fields this operation does not accept.")
 
     store_path = _store_path(request)
     decision = consent.resolve_consent(_activation(store_path), reader)
     if not decision.allowed:
         return _refusal(op, decision.state, decision.detail), EXIT_REFUSED
 
-    if op in {"status", "summary_input", "reminder_candidates", "answer_evidence"}:
+    if op in {"status", "summary_input", "reminder_candidates", "answer_evidence", "archive_conversations"}:
         try:
             store = MemoryStore.open_read_only(decision)
         except MemoryStoreError as error:
@@ -723,6 +767,8 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
                     return _summary_input(store, request), EXIT_OK
                 if op == "answer_evidence":
                     return _answer_evidence(store, request), EXIT_OK
+                if op == "archive_conversations":
+                    return _archive_conversations(store, request), EXIT_OK
                 return _reminder_candidates(store, request), EXIT_OK
             except MemoryStoreError as error:
                 return _refusal(op, error.state, error.detail), EXIT_REFUSED

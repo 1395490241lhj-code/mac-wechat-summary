@@ -615,6 +615,8 @@ final class AppModel {
     private(set) var answerSnapshot: AnswerEvidenceSnapshot?
     private(set) var answerAvailability: AnswerRuntimeAvailability
     private(set) var answerRevealTarget: ArchiveEvidenceAnchor?
+    private(set) var archiveSnapshots: [ArchiveSnapshot] = []
+    private(set) var selectedArchiveConversationID: String?
     @ObservationIgnored private var answerTask: Task<Void, Never>?
     /// The one user-visible deadline for a run. It is deliberately *earlier*
     /// than the packaged worker's own kill-switch: that one bounds a child
@@ -638,6 +640,26 @@ final class AppModel {
         answerWindow = window
         answerResult = nil
         answerSnapshot = nil
+        answerPhase = .idle
+    }
+
+    func loadArchiveSnapshots() async {
+        guard !isAnswerRunActive else { return }
+        if case let .ready(snapshots) = await answerEvidence.archiveConversations() {
+            archiveSnapshots = snapshots
+            if let selectedArchiveConversationID,
+               !snapshots.contains(where: { $0.id == selectedArchiveConversationID }) {
+                setAnswerConversation(nil)
+            }
+        }
+    }
+
+    func setAnswerConversation(_ snapshot: ArchiveSnapshot?) {
+        guard !isAnswerRunActive else { return }
+        selectedArchiveConversationID = snapshot?.id
+        answerResult = nil
+        answerSnapshot = nil
+        answerRevealTarget = nil
         answerPhase = .idle
     }
 
@@ -719,8 +741,9 @@ final class AppModel {
             answerPhase = .cancelled
             return
         }
-        let outcome = await answerEvidence.answerEvidence(
-            start: bounds.start, end: bounds.end, messageLimit: AnswerModelInput.maxRows
+        let outcome = await answerEvidence.answerEvidenceScoped(
+            start: bounds.start, end: bounds.end, messageLimit: AnswerModelInput.maxRows,
+            conversationCanonicalID: selectedArchiveConversationID
         )
         if Task.isCancelled {
             answerPhase = .cancelled

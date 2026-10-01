@@ -3261,6 +3261,9 @@ private struct AgentsView: View {
             // the surface appears rather than only at launch.
             model.refreshAnswerRuntimeAvailability()
         }
+        .task {
+            await model.loadArchiveSnapshots()
+        }
     }
 
     private func unavailable(_ reason: AnswerRuntimeUnavailableReason) -> some View {
@@ -3285,6 +3288,46 @@ private struct AgentsView: View {
                     .disabled(model.answerPhase.isRunning)
 
                 HStack {
+                    Menu {
+                        Button {
+                            model.setAnswerConversation(nil)
+                        } label: {
+                            if model.selectedArchiveConversationID == nil {
+                                Label("All Archive snapshots", systemImage: "checkmark")
+                            } else {
+                                Text("All Archive snapshots")
+                            }
+                        }
+                        ForEach(model.archiveSnapshots) { snapshot in
+                            Button {
+                                model.setAnswerConversation(snapshot)
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(snapshot.label)
+                                        Text(snapshot.rangeLabel).font(.caption2)
+                                    }
+                                    if snapshot.id == model.selectedArchiveConversationID {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(model.archiveSnapshots.first(where: {
+                                $0.id == model.selectedArchiveConversationID
+                            })?.label ?? "All Archive snapshots")
+                            if let snapshot = model.archiveSnapshots.first(where: {
+                                $0.id == model.selectedArchiveConversationID
+                            }) {
+                                Text(snapshot.rangeLabel).font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .disabled(model.answerPhase.isRunning)
+                    .accessibilityLabel("Archive scope")
+
                     Menu(model.answerWindow.label) {
                         ForEach(DailySummaryWindow.allCases) { window in
                             Button {

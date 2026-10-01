@@ -23,7 +23,9 @@ import memory_consent as consent
 import memory_paths as paths
 import memory_worker as worker
 from archive_message_source import SOURCE_ARCHIVE
-from conftest import app_state, conversation, visual_message
+from conftest import app_state, conversation, granted, visual_message
+from memory_identity import conversation_canonical_id
+from memory_store import MemoryStore
 from message_source import (
     COVERAGE_COMPLETE,
     REASON_EMPTY_WINDOW,
@@ -144,11 +146,11 @@ def test_there_is_no_operation_that_deletes_or_runs_arbitrary_commands():
     # exposes no delete. What it may not do is grow into anything else.
     assert worker.OPERATIONS <= {
         "sync", "status", "paths", "summary_input", "reminder_candidates",
-        "answer_evidence",
+        "answer_evidence", "archive_conversations",
     }
     assert worker.OPERATIONS == {
         "sync", "status", "paths", "summary_input", "reminder_candidates",
-        "answer_evidence",
+        "answer_evidence", "archive_conversations",
     }
 
 
@@ -551,6 +553,95 @@ def test_answer_evidence_is_a_recognized_packaged_operation(tmp_path):
     reply = evidence_window(tmp_path)
     assert (reply["ok"], reply["op"], reply["state"]) == (
         True, "answer_evidence", "ready")
+
+
+def _two_archive_snapshots(tmp_path: Path) -> tuple[Path, str, str]:
+    import sqlite3
+
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=1
+    )
+    connection = sqlite3.connect(messages)
+    connection.executescript(
+        """
+        INSERT INTO archive_conversations VALUES (2, 'archive-b');
+        INSERT INTO archive_imports VALUES (3, 2, 'attributed', 3000.0);
+        INSERT INTO archive_attributed_records
+            VALUES (3, 0, '林晓', 300.0, '昨天 11:00', '来自第二个快照');
+        """
+    )
+    connection.commit()
+    connection.close()
+    store = paths.canonical_store_path(tmp_path)
+    run({
+        "op": "sync", "store_path": str(store),
+        "message_store_path": str(messages), "message_source": SOURCE_ARCHIVE,
+        "conversation_limit": 10, "message_limit": 10,
+    })
+    return (
+        store,
+        conversation_canonical_id(SOURCE_ARCHIVE, "1"),
+        conversation_canonical_id(SOURCE_ARCHIVE, "3"),
+    )
+
+
+def test_archive_conversation_discovery_is_unwindowed_and_keeps_same_label_observations(tmp_path):
+    store, first, second = _two_archive_snapshots(tmp_path)
+    reply, code = run({"op": "archive_conversations", "store_path": str(store)})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    rows = reply["conversations"]
+    assert {row["canonical_conversation_id"] for row in rows} == {first, second}
+    assert {row["source"] for row in rows} == {SOURCE_ARCHIVE}
+    assert len({row["label"] for row in rows}) == 1
+    assert {row["first_seen_at"] for row in rows} == {100.0, 300.0}
+
+
+def test_archive_conversation_discovery_refuses_truncated_results(tmp_path):
+    store = tmp_path / "memory.sqlite"
+    with MemoryStore.open(granted(tmp_path)) as opened:
+        with opened.transaction():
+            for index in range(worker.MAX_CONVERSATION_LIMIT + 1):
+                opened.upsert_conversation(
+                    canonical_id=conversation_canonical_id(SOURCE_ARCHIVE, str(index)),
+                    source=SOURCE_ARCHIVE,
+                    source_conversation_id=str(index),
+                    display_name="Same label",
+                    kind=None,
+                    first_seen_at=float(index),
+                    last_seen_at=float(index),
+                    now=1_700_000_000.0,
+                )
+
+    reply, code = run({"op": "archive_conversations", "store_path": str(store)})
+    assert (reply["ok"], code) == (False, 1), reply
+    assert reply["state"] == "archive_conversations_incomplete"
+
+
+def test_answer_evidence_scopes_to_one_archive_conversation_and_rejects_bad_ids(tmp_path):
+    store, first, second = _two_archive_snapshots(tmp_path)
+    base = {
+        "op": "answer_evidence", "store_path": str(store),
+        "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 350.0,
+    }
+    scoped, code = run({**base, "conversation_canonical_id": first})
+    assert (scoped["ok"], code) == (True, 0), scoped
+    assert scoped["query_scope"]["conversation_canonical_id"] == first
+    assert len(scoped["evidence"]) == 1
+    assert scoped["evidence"][0]["canonical_conversation_id"] == first
+    assert scoped["evidence"][0]["archive_evidence"] == {"import_id": 1, "sequence": 0}
+    assert second not in json.dumps(scoped)
+
+    unknown, code = run({**base, "conversation_canonical_id": "conv:" + "0" * 32})
+    assert (unknown["ok"], code) == (True, 0), unknown
+    assert unknown["evidence"] == []
+    assert unknown["coverage"]["trustworthy_empty"] is False
+    assert unknown["coverage"]["status"] == "not_observed"
+
+    for malformed in ("CONV:" + "0" * 32, "conv:" + "A" * 32, "conv:bad", 7):
+        rejected, code = run({**base, "conversation_canonical_id": malformed})
+        assert (rejected["ok"], code) == (False, 2)
+        assert rejected["state"] == "invalid_request"
 
 
 @pytest.mark.parametrize("source", [SOURCE_VISUAL, "database", None, "nonsense", 7])

@@ -230,6 +230,30 @@ private func modelInput(
     AnswerModelInput.build(question: question, rows: rows, contextSize: contextSize)
 }
 
+@Test("Archive snapshot selection is ephemeral and defaults to all snapshots")
+@MainActor
+func archiveSnapshotSelectionClearsOnAllSnapshotsAndHasNoPersistenceState() {
+    let model = makeAnswerModel(
+        evidence: RecordingEvidenceRunner(outcomes: []),
+        answer: StubAnswerRunner()
+    )
+    #expect(model.selectedArchiveConversationID == nil)
+
+    let snapshot = ArchiveSnapshot(
+        id: "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        label: "Imported Archive snapshot",
+        firstSeenAt: Date(timeIntervalSince1970: 100),
+        lastSeenAt: Date(timeIntervalSince1970: 100)
+    )
+    model.setAnswerConversation(snapshot)
+    #expect(model.selectedArchiveConversationID == snapshot.id)
+    model.setAnswerConversation(nil)
+    #expect(model.selectedArchiveConversationID == nil)
+    #expect(model.answerPhase == .idle)
+    #expect(model.answerResult == nil)
+    #expect(model.answerSnapshot == nil)
+}
+
 @MainActor
 private func makeAnswerModel(
     evidence: any AnswerEvidenceRunning,
@@ -808,7 +832,7 @@ struct OnDeviceAnswerBoundaryTests {
             Issue.record("The Agents section marker is missing from AppModel.swift")
             return
         }
-        #expect(body.contains("answerEvidence.answerEvidence("))
+        #expect(body.contains("answerEvidence.answerEvidenceScoped("))
         #expect(body.contains("openSearchResult("))
         // The answer path must not reach the Memory store, search, sync,
         // summary, follow-up or reminder seams directly.

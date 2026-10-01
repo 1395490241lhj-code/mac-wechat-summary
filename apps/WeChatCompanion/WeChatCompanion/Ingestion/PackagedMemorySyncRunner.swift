@@ -38,6 +38,27 @@ protocol AnswerEvidenceRunning: Sendable {
     func answerEvidence(
         start: Date, end: Date, messageLimit: Int
     ) async -> AnswerEvidenceOutcome
+
+    func answerEvidenceScoped(
+        start: Date, end: Date, messageLimit: Int, conversationCanonicalID: String?
+    ) async -> AnswerEvidenceOutcome
+
+    func archiveConversations() async -> ArchiveConversationDiscoveryOutcome
+}
+
+extension AnswerEvidenceRunning {
+    func answerEvidenceScoped(
+        start: Date, end: Date, messageLimit: Int, conversationCanonicalID: String?
+    ) async -> AnswerEvidenceOutcome {
+        guard conversationCanonicalID == nil else {
+            return .failed(.workerFailed(state: "scoped_evidence_unavailable"))
+        }
+        return await answerEvidence(start: start, end: end, messageLimit: messageLimit)
+    }
+
+    func archiveConversations() async -> ArchiveConversationDiscoveryOutcome {
+        .failed(.workerFailed(state: "worker_unavailable"))
+    }
 }
 
 /// The honest evidence window for a build without the packaged worker: it
@@ -75,6 +96,29 @@ struct AnswerEvidenceSnapshot: Equatable, Sendable {
     let coverage: FollowUpCoverage
     let freshness: MemoryFreshnessSummary?
     let rows: [AnswerEvidenceRow]
+}
+
+struct ArchiveSnapshot: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let firstSeenAt: Date?
+    let lastSeenAt: Date?
+
+    var rangeLabel: String {
+        switch (firstSeenAt, lastSeenAt) {
+        case let (first?, last?) where first != last:
+            return "\(first.formatted(date: .abbreviated, time: .shortened)) – \(last.formatted(date: .abbreviated, time: .shortened))"
+        case let (first?, _):
+            return first.formatted(date: .abbreviated, time: .shortened)
+        default:
+            return "Date unavailable"
+        }
+    }
+}
+
+enum ArchiveConversationDiscoveryOutcome: Equatable, Sendable {
+    case ready([ArchiveSnapshot])
+    case failed(AnswerEvidenceFailure)
 }
 
 enum AnswerEvidenceFailure: Error, Equatable, Sendable {
@@ -440,11 +484,26 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
         end: Date,
         messageLimit: Int
     ) async -> AnswerEvidenceOutcome {
+        await answerEvidenceScoped(
+            start: start, end: end, messageLimit: messageLimit,
+            conversationCanonicalID: nil
+        )
+    }
+
+    func answerEvidenceScoped(
+        start: Date,
+        end: Date,
+        messageLimit: Int,
+        conversationCanonicalID: String?
+    ) async -> AnswerEvidenceOutcome {
         var request = baseRequest(op: "answer_evidence")
         request["message_source"] = MemorySource.archive.rawValue
         request["start"] = start.timeIntervalSince1970
         request["end"] = end.timeIntervalSince1970
         request["message_limit"] = messageLimit
+        if let conversationCanonicalID {
+            request["conversation_canonical_id"] = conversationCanonicalID
+        }
 
         switch invoke(request, timeout: answerEvidenceTimeout) {
         case .failure(let failure):
@@ -469,6 +528,9 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
                   let evidenceRows = reply["evidence"] as? [[String: Any]],
                   Self.echoesRequestedWindow(reply["query_scope"],
                                             start: startSeconds, end: endSeconds),
+                  Self.echoesConversationScope(
+                      reply["query_scope"], requested: conversationCanonicalID
+                  ),
                   let scannedMessages = counts["scanned_messages"] as? Int,
                   let returnedEvidence = counts["returned_evidence"] as? Int,
                   let excludedUnanchored = counts["excluded_unanchored"] as? Int,
@@ -531,6 +593,37 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
         }
     }
 
+    func archiveConversations() async -> ArchiveConversationDiscoveryOutcome {
+        let request: [String: Any] = ["op": "archive_conversations", "store_path": storeURL.path]
+        switch invoke(request) {
+        case .failure(let failure):
+            return .failed(answerEvidenceFailure(fromLocal: failure))
+        case .success(let reply):
+            guard reply["ok"] as? Bool == true,
+                  reply["op"] as? String == "archive_conversations",
+                  reply["state"] as? String == "ready",
+                  let rows = reply["conversations"] as? [[String: Any]]
+            else { return .failed(.workerFailed(state: "worker_response_malformed")) }
+            let snapshots = rows.compactMap { row -> ArchiveSnapshot? in
+                guard let id = row["canonical_conversation_id"] as? String,
+                      Self.isCanonicalConversationID(id),
+                      let source = row["source"] as? String, source == "archive",
+                      let label = row["label"] as? String
+                else { return nil }
+                return ArchiveSnapshot(
+                    id: id,
+                    label: label,
+                    firstSeenAt: Self.date(from: row["first_seen_at"]),
+                    lastSeenAt: Self.date(from: row["last_seen_at"])
+                )
+            }
+            guard snapshots.count == rows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+            return .ready(snapshots)
+        }
+    }
+
     // MARK: - Protocol
 
     private func baseRequest(op: String) -> [String: Any] {
@@ -573,6 +666,25 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
               let limit = scope["limit"] as? Int, limit > 0
         else { return false }
         return abs(scopeStart - start) < 0.001 && abs(scopeEnd - end) < 0.001
+    }
+
+    private static func echoesConversationScope(
+        _ value: Any?, requested: String?
+    ) -> Bool {
+        guard let scope = value as? [String: Any] else { return false }
+        return (scope["conversation_canonical_id"] as? String) == requested
+    }
+
+    private static func date(from value: Any?) -> Date? {
+        guard let seconds = value as? Double else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func isCanonicalConversationID(_ value: String) -> Bool {
+        guard value.count == 37, value.hasPrefix("conv:") else { return false }
+        return value.utf8.dropFirst(5).allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
     }
 
     private func failureFrom(_ reply: [String: Any]) -> MemorySyncFailure {

@@ -142,6 +142,17 @@ private let answerEvidenceReply = """
     "text_truncated": false, "archive_evidence": {"import_id": 1, "sequence": 1}}]}
 """
 
+private let archiveConversationsReply = """
+{"ok": true, "op": "archive_conversations", "state": "ready",
+ "counts": {"returned_conversations": 2},
+ "conversations": [
+   {"canonical_conversation_id": "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source": "archive",
+    "label": "Imported Archive snapshot", "first_seen_at": 100.0, "last_seen_at": 100.0},
+   {"canonical_conversation_id": "conv:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source": "archive",
+    "label": "Imported Archive snapshot", "first_seen_at": 300.0, "last_seen_at": 300.0}
+ ]}
+"""
+
 
 private let emptyAnswerEvidenceReply = """
 {"ok": true, "op": "answer_evidence", "state": "ready", "source": "archive",
@@ -692,6 +703,70 @@ struct PackagedMemorySyncRunnerTests {
 
     // MARK: - Answer evidence window
 
+    @Test
+    func archiveConversationDiscoveryKeepsSameLabelsAsDistinctOpaqueRows() async throws {
+        let stub = try StubWorker(replying: archiveConversationsReply)
+        defer { stub.cleanup() }
+        let outcome = await evidenceRunner(stub).archiveConversations()
+        guard case .ready(let snapshots) = outcome else {
+            Issue.record("expected Archive snapshot discovery success, got (outcome)")
+            return
+        }
+        #expect(snapshots.map(\.id) == [
+            "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "conv:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        #expect(Set(snapshots.map(\.label)).count == 1)
+        #expect(snapshots.map(\.rangeLabel).count == 2)
+        let sent = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: stub.requestDump)
+        ) as! [String: Any]
+        #expect(sent.keys.sorted() == ["op", "store_path"])
+    }
+
+    @Test
+    func archiveConversationDiscoveryRejectsMalformedEnvelopeAndRows() async throws {
+        let malformed = [
+            archiveConversationsReply.replacingOccurrences(
+                of: "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                with: "wrong:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                with: "conv:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                with: "conv:bad"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"op\": \"archive_conversations\", ", with: ""
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"op\": \"archive_conversations\"",
+                with: "\"op\": \"answer_evidence\""
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"state\": \"ready\"",
+                with: "\"state_missing\": \"ready\""
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"state\": \"ready\"",
+                with: "\"state\": \"partial\""
+            ),
+        ]
+
+        for (index, body) in malformed.enumerated() {
+            let stub = try StubWorker(replying: body)
+            defer { stub.cleanup() }
+            let outcome = await evidenceRunner(stub).archiveConversations()
+            #expect(
+                outcome == .failed(.workerFailed(state: "worker_response_malformed")),
+                "malformed discovery case \(index)"
+            )
+        }
+    }
+
     private func evidenceRunner(_ stub: StubWorker) -> PackagedMemorySyncRunner {
         let store = temporaryStore()
         return PackagedMemorySyncRunner(
@@ -749,6 +824,32 @@ struct PackagedMemorySyncRunnerTests {
             "end", "message_limit", "message_source", "message_store_path",
             "op", "start", "store_path",
         ])
+    }
+
+    @Test
+    func scopedAnswerEvidencePassesOpaqueConversationIDAndRequiresEcho() async throws {
+        let id = "conv:" + String(repeating: "a", count: 32)
+        let reply = answerEvidenceReply.replacingOccurrences(
+            of: "\"conversation_canonical_id\": null",
+            with: "\"conversation_canonical_id\": \"\(id)\""
+        )
+        let stub = try StubWorker(replying: reply)
+        defer { stub.cleanup() }
+
+        let outcome = await evidenceRunner(stub).answerEvidenceScoped(
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200,
+            conversationCanonicalID: id
+        )
+        guard case .ready = outcome else {
+            Issue.record("expected scoped evidence success, got (outcome)")
+            return
+        }
+        let sent = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: stub.requestDump)
+        ) as! [String: Any]
+        #expect(sent["conversation_canonical_id"] as? String == id)
     }
 
     @Test
