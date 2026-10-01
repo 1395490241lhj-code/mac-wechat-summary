@@ -140,8 +140,15 @@ def test_an_oversized_request_is_refused_before_being_parsed():
 
 
 def test_there_is_no_operation_that_deletes_or_runs_arbitrary_commands():
+    # answer_evidence is a read: it names no command, writes nothing, and
+    # exposes no delete. What it may not do is grow into anything else.
+    assert worker.OPERATIONS <= {
+        "sync", "status", "paths", "summary_input", "reminder_candidates",
+        "answer_evidence",
+    }
     assert worker.OPERATIONS == {
         "sync", "status", "paths", "summary_input", "reminder_candidates",
+        "answer_evidence",
     }
 
 
@@ -494,6 +501,324 @@ def test_unattributed_and_visual_candidates_carry_no_archive_anchor(
     })
     assert visual_reply["counts"]["returned_candidates"] == 1
     assert "archive_evidence" not in visual_reply["candidates"][0]
+
+
+# --- answer_evidence: the deterministic evidence window ----------------------
+
+
+def evidence_window(tmp_path, **overrides) -> dict:
+    """Sync a synthetic Archive store, then ask it for an evidence window."""
+    import sqlite3
+
+    attributed = overrides.pop("attributed", 2)
+    store = paths.canonical_store_path(tmp_path)
+    messages = paths.canonical_message_store_path(tmp_path)
+    if not messages.exists():
+        archive_message_store(messages, attributed=0)
+    connection = sqlite3.connect(messages)
+    try:
+        connection.execute("DELETE FROM archive_attributed_records")
+        for sequence in range(attributed):
+            connection.execute(
+                """INSERT INTO archive_attributed_records
+                   VALUES (1, ?, '林晓', ?, '昨天 10:00', '麻烦明天确认一下报价');""",
+                (sequence, 100.0 + sequence),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+    run({
+        "op": "sync",
+        "store_path": str(store),
+        "message_store_path": str(messages),
+        "message_source": SOURCE_ARCHIVE,
+        "conversation_limit": 10,
+        "message_limit": 10,
+    })
+    request = {
+        "op": "answer_evidence",
+        "store_path": str(store),
+        "message_source": SOURCE_ARCHIVE,
+        "start": 50.0,
+        "end": 150.0,
+    }
+    request.update(overrides)
+    return run(request)[0]
+
+
+def test_answer_evidence_is_a_recognized_packaged_operation(tmp_path):
+    assert "answer_evidence" in worker.OPERATIONS
+    reply = evidence_window(tmp_path)
+    assert (reply["ok"], reply["op"], reply["state"]) == (
+        True, "answer_evidence", "ready")
+
+
+@pytest.mark.parametrize("source", [SOURCE_VISUAL, "database", None, "nonsense", 7])
+def test_answer_evidence_refuses_every_non_archive_source(tmp_path, source):
+    # Recognized first: an unrecognized op refuses everything, so the refusal
+    # below has to be this operation's own.
+    assert "answer_evidence" in worker.OPERATIONS
+    store = paths.canonical_store_path(tmp_path)
+    request = {"op": "answer_evidence", "store_path": str(store),
+               "start": 50.0, "end": 150.0}
+    if source is not None:
+        request["message_source"] = source
+    reply, code = run(request)
+    assert (reply["ok"], code) == (False, 2)
+    assert reply["state"] == "invalid_request"
+
+
+@pytest.mark.parametrize("window", [{"start": 150.0, "end": 50.0},
+                                    {"end": 150.0}, {"start": 50.0}])
+def test_answer_evidence_refuses_a_reversed_or_missing_window(tmp_path, window):
+    assert "answer_evidence" in worker.OPERATIONS
+    store = paths.canonical_store_path(tmp_path)
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, **window})
+    assert (reply["ok"], code) == (False, 2)
+
+
+@pytest.mark.parametrize("field", ["question", "prompt", "model", "provider",
+                                    "sql", "candidate_limit", "whatever"])
+def test_answer_evidence_accepts_only_its_own_fields(tmp_path, field):
+    assert "answer_evidence" in worker.OPERATIONS
+    store = paths.canonical_store_path(tmp_path)
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0,
+                       field: "anything"})
+    # A silently ignored `sql` is the one that would eventually be trusted.
+    assert (reply["ok"], code) == (False, 2), field
+    assert reply["state"] == "invalid_request"
+
+
+def test_evidence_rows_are_oldest_first_and_carry_their_exact_anchor(tmp_path):
+    reply = evidence_window(tmp_path, attributed=3)
+
+    assert reply["counts"]["returned_evidence"] == 3
+    assert [row["archive_evidence"] for row in reply["evidence"]] == [
+        {"import_id": 1, "sequence": 0},
+        {"import_id": 1, "sequence": 1},
+        {"import_id": 1, "sequence": 2},
+    ]
+    assert [row["timestamp"] for row in reply["evidence"]] == [100.0, 101.0, 102.0]
+    for row in reply["evidence"]:
+        assert row["source"] == SOURCE_ARCHIVE
+        assert row["canonical_message_id"] and row["canonical_conversation_id"]
+        assert row["timestamp_kind"]
+        assert row["sender"] == "林晓"
+
+
+def test_identical_displayed_evidence_keeps_its_own_anchor(tmp_path):
+    # Same text, same sender, same timestamp. Only the canonical anchor tells
+    # these two rows apart, so each must keep its own.
+    import sqlite3
+
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=0
+    )
+    connection = sqlite3.connect(messages)
+    for sequence in (0, 1):
+        connection.execute(
+            """INSERT INTO archive_attributed_records
+               VALUES (1, ?, '林晓', 100.0, '昨天 10:00', '麻烦明天确认一下报价');""",
+            (sequence,),
+        )
+    connection.commit()
+    connection.close()
+    store = paths.canonical_store_path(tmp_path)
+    run({"op": "sync", "store_path": str(store), "message_store_path": str(messages),
+         "message_source": SOURCE_ARCHIVE, "conversation_limit": 10, "message_limit": 10})
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    rows = reply["evidence"]
+    assert len(rows) == 2
+    assert {(r["text"], r["sender"], r["timestamp"]) for r in rows} == {
+        ("麻烦明天确认一下报价", "林晓", 100.0)}
+    assert {r["canonical_message_id"] for r in rows} and len(
+        {r["canonical_message_id"] for r in rows}) == 2
+    assert sorted(r["archive_evidence"]["sequence"] for r in rows) == [0, 1]
+
+
+def test_unattributed_and_visual_evidence_never_enter_the_window(tmp_path, monkeypatch):
+    reply = evidence_window(tmp_path, attributed=1)
+    store = paths.canonical_store_path(tmp_path)
+    visual = FakeSource([visual_message(1, 7, "这是视觉证据")])
+    monkeypatch.setattr(worker, "build_selected_source", lambda: visual)
+    run({"op": "sync", "store_path": str(store)})
+    later, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), later
+    blob = json.dumps(later, ensure_ascii=False)
+    assert "不应进入 Memory" not in blob
+    assert "这是视觉证据" not in blob
+    assert all(row["archive_evidence"]["import_id"] == 1
+               for row in later["evidence"])
+
+
+@pytest.mark.parametrize("identity", [None, "not-a-number"])
+def test_a_row_without_a_usable_identity_is_never_approximated(tmp_path, identity):
+    import sqlite3
+
+    reply = evidence_window(tmp_path, attributed=1)
+    assert reply["counts"]["returned_evidence"] == 1
+    store = paths.canonical_store_path(tmp_path)
+    connection = sqlite3.connect(store)
+    connection.execute(
+        "UPDATE messages SET source_message_id = ? WHERE canonical_id = "
+        "(SELECT canonical_id FROM messages ORDER BY timestamp LIMIT 1)",
+        (identity,),
+    )
+    connection.commit()
+    connection.close()
+
+    after, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    if identity is None:
+        # No identity at all is not a malformed identity, only an
+        # unrevealable row: it is excluded, and the window says so.
+        assert (after["ok"], code) == (True, 0), after
+        assert after["evidence"] == []
+        assert after["counts"]["returned_evidence"] == 0
+        assert after["counts"]["excluded_unanchored"] == 1
+        assert after["truncated"] is True
+    else:
+        # An identity that exists but cannot be read is corruption, and is
+        # refused rather than skipped: the store is not what it claims.
+        assert (after["ok"], code) == (False, 1), after
+        assert after["state"] == "archive_evidence_malformed"
+        assert "evidence" not in after
+
+
+def test_coverage_freshness_and_scope_come_from_the_existing_envelope(tmp_path):
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=2
+    )
+    run({"op": "sync", "store_path": str(store), "message_store_path": str(messages),
+         "message_source": SOURCE_ARCHIVE, "conversation_limit": 10, "message_limit": 10})
+    summary, _ = run({"op": "summary_input", "store_path": str(store),
+                      "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    assert reply["coverage"] == summary["coverage"]
+    # Freshness is the query's own, carried through unchanged: only the
+    # envelope's generation stamp may differ between two reads.
+    reply_freshness = {k: v for k, v in reply["freshness"].items()
+                       if k != "generated_at"}
+    summary_freshness = {k: v for k, v in summary["freshness"].items()
+                         if k != "generated_at"}
+    assert reply_freshness == summary_freshness
+    assert reply["source"] == SOURCE_ARCHIVE
+    assert reply["window"] == {"start": 50.0, "end": 150.0}
+    scope = reply["query_scope"]
+    assert scope["kind"] == "recent"
+    assert scope["window"] == [50.0, 150.0]
+    assert scope["order"] == "oldest"
+    assert scope["limit"] == worker.MAX_SUMMARY_MESSAGES
+    assert scope["policy"]["required_sources"] == [SOURCE_ARCHIVE]
+
+
+def test_the_bound_makes_truncated_truthful(tmp_path):
+    bounded = evidence_window(tmp_path, attributed=3, message_limit=1)
+    assert bounded["truncated"] is True
+    assert bounded["counts"]["returned_evidence"] == 1
+    assert bounded["evidence"][0]["archive_evidence"]["sequence"] == 2
+    assert bounded["query_scope"]["limit"] == 1
+
+    # A separate store: re-syncing would leave the previous rows in Memory, so
+    # this half is about an unclipped window, not about stale rows.
+    unclipped = evidence_window(tmp_path / "unclipped", attributed=2, message_limit=2)
+    assert unclipped["truncated"] is False
+
+
+def test_long_text_is_clipped_by_the_existing_policy(tmp_path):
+    import sqlite3
+
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=1
+    )
+    long_text = "长" * (worker.MAX_SUMMARY_TEXT_CHARS + 50)
+    connection = sqlite3.connect(messages)
+    connection.execute("UPDATE archive_attributed_records SET text = ?", (long_text,))
+    connection.commit()
+    connection.close()
+    run({"op": "sync", "store_path": str(store), "message_store_path": str(messages),
+         "message_source": SOURCE_ARCHIVE, "conversation_limit": 10, "message_limit": 10})
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    row = reply["evidence"][0]
+    assert row["text_truncated"] is True
+    assert len(row["text"]) == worker.MAX_SUMMARY_TEXT_CHARS
+    assert reply["counts"]["text_truncated"] == 1
+
+
+def test_an_empty_but_valid_window_is_an_empty_success_not_an_error(tmp_path):
+    reply = evidence_window(tmp_path, attributed=2, start=10_000.0, end=20_000.0)
+
+    assert reply["ok"] is True
+    assert reply["evidence"] == []
+    assert reply["counts"]["returned_evidence"] == 0
+    assert "coverage" in reply and "freshness" in reply
+
+
+def test_the_operation_writes_nothing_to_either_store(tmp_path):
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=2
+    )
+    run({"op": "sync", "store_path": str(store), "message_store_path": str(messages),
+         "message_source": SOURCE_ARCHIVE, "conversation_limit": 10, "message_limit": 10})
+
+    def snapshot(root: Path) -> dict:
+        return {path.name: path.read_bytes() for path in sorted(root.iterdir())
+                if path.is_file() and not path.name.endswith(("-shm", "-wal"))}
+
+    memory_before = snapshot(store.parent)
+    messages_before = messages.read_bytes()
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    assert snapshot(store.parent) == memory_before
+    assert messages.read_bytes() == messages_before
+
+
+def test_the_window_neither_syncs_nor_scans_candidates(tmp_path, monkeypatch):
+    # The evidence window is a read, not a second ingestion path. A stale
+    # freshness entry is the observable proof: ingestion would have moved it.
+    store = paths.canonical_store_path(tmp_path)
+    messages = archive_message_store(
+        paths.canonical_message_store_path(tmp_path), attributed=2
+    )
+    run({"op": "sync", "store_path": str(store), "message_store_path": str(messages),
+         "message_source": SOURCE_ARCHIVE, "conversation_limit": 10, "message_limit": 10})
+    status, _ = run({"op": "status", "store_path": str(store)})
+    before = status["freshness"]
+
+    def poisoned(*args, **kwargs):
+        raise AssertionError("the evidence window must not ingest or scan")
+
+    monkeypatch.setattr(worker, "sync_from_source", poisoned)
+    monkeypatch.setattr(worker, "build_selected_source", poisoned)
+    monkeypatch.setattr(worker, "prepare_store_directory", poisoned)
+    reply, code = run({"op": "answer_evidence", "store_path": str(store),
+                       "message_source": SOURCE_ARCHIVE, "start": 50.0, "end": 150.0})
+
+    assert (reply["ok"], code) == (True, 0), reply
+    assert reply["counts"]["returned_evidence"] == 2
+    after, _ = run({"op": "status", "store_path": str(store)})
+    assert {k: v for k, v in after["freshness"].items() if k != "generated_at"} == {
+        k: v for k, v in before.items() if k != "generated_at"}
+
 
 def test_freshness_advances_and_keeps_its_parts_distinct(tmp_path, synthetic):
     store = paths.canonical_store_path(tmp_path)

@@ -27,6 +27,57 @@ private final class Expiry: @unchecked Sendable {
     var fired = false
 }
 
+// MARK: - The evidence window
+
+/// One anchored Archive row. There is no anchorless form: a row that cannot
+/// be named is not returned, because the window exists so a later answer can
+/// cite a row that can be revealed back to exactly where it came from.
+struct AnswerEvidenceRow: Equatable, Sendable {
+    let canonicalMessageID: String
+    let canonicalConversationID: String
+    let timestamp: Date
+    let timestampKind: String
+    let sender: String?
+    let text: String
+    let textTruncated: Bool
+    let archiveEvidence: ArchiveEvidenceAnchor
+}
+
+struct AnswerEvidenceSnapshot: Equatable, Sendable {
+    let start: Date
+    let end: Date
+    let scannedMessages: Int
+    let returnedEvidence: Int
+    let excludedUnanchored: Int
+    let textTruncatedCount: Int
+    let truncated: Bool
+    let coverage: FollowUpCoverage
+    let freshness: MemoryFreshnessSummary?
+    let rows: [AnswerEvidenceRow]
+}
+
+enum AnswerEvidenceFailure: Error, Equatable, Sendable {
+    case consentWithheld
+    case memoryUnavailable(state: String)
+    case workerFailed(state: String)
+
+    var message: String {
+        switch self {
+        case .consentWithheld:
+            "Local message storage is off. Evidence cannot be read."
+        case .memoryUnavailable(let state):
+            "Memory is not available for an evidence window (\(state)). Sync the Archive first."
+        case .workerFailed(let state):
+            "The evidence window could not be prepared (\(state))."
+        }
+    }
+}
+
+enum AnswerEvidenceOutcome: Equatable, Sendable {
+    case ready(AnswerEvidenceSnapshot)
+    case failed(AnswerEvidenceFailure)
+}
+
 struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowUpCandidateRunning {
     /// Where the worker sits inside the bundle. It is a nested *bundle*, not a
     /// loose directory: codesign refuses to seal an app that contains an
@@ -337,6 +388,113 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
         }
     }
 
+    // MARK: - Answer evidence window
+
+    /// A bounded, exactly anchored Archive evidence window.
+    ///
+    /// There is no source parameter because there is only one source this can
+    /// be: only an Archive-attributed row carries the canonical identity a
+    /// citation is revealed through, so the window pins Archive here rather
+    /// than trusting a caller to ask for it. The same shape is returned or
+    /// refused whole -- a row that cannot be named fails the reply, it is
+    /// never defaulted into an anchorless row that could be mistaken for
+    /// citeable.
+    func answerEvidence(
+        start: Date,
+        end: Date,
+        messageLimit: Int
+    ) async -> AnswerEvidenceOutcome {
+        var request = baseRequest(op: "answer_evidence")
+        request["message_source"] = MemorySource.archive.rawValue
+        request["start"] = start.timeIntervalSince1970
+        request["end"] = end.timeIntervalSince1970
+        request["message_limit"] = messageLimit
+
+        switch invoke(request) {
+        case .failure(let failure):
+            return .failed(answerEvidenceFailure(fromLocal: failure))
+        case .success(let reply):
+            guard reply["ok"] as? Bool == true else {
+                return .failed(answerEvidenceFailure(from: reply))
+            }
+            guard let replySourceRaw = reply["source"] as? String,
+                  let replySource = MemorySource(rawValue: replySourceRaw),
+                  replySource == .archive,
+                  let window = reply["window"] as? [String: Any],
+                  let startSeconds = window["start"] as? Double,
+                  let endSeconds = window["end"] as? Double,
+                  abs(startSeconds - start.timeIntervalSince1970) < 0.001,
+                  abs(endSeconds - end.timeIntervalSince1970) < 0.001,
+                  let counts = reply["counts"] as? [String: Any],
+                  let coverageRoot = reply["coverage"] as? [String: Any],
+                  let coverageStatus = coverageRoot["status"] as? String,
+                  let trustworthyEmpty = coverageRoot["trustworthy_empty"] as? Bool,
+                  let caveats = coverageRoot["caveats"] as? [String],
+                  let evidenceRows = reply["evidence"] as? [[String: Any]],
+                  Self.echoesRequestedWindow(reply["query_scope"],
+                                            start: startSeconds, end: endSeconds),
+                  let scannedMessages = counts["scanned_messages"] as? Int,
+                  let returnedEvidence = counts["returned_evidence"] as? Int,
+                  let excludedUnanchored = counts["excluded_unanchored"] as? Int,
+                  let textTruncatedCount = counts["text_truncated"] as? Int,
+                  let truncated = reply["truncated"] as? Bool,
+                  scannedMessages >= returnedEvidence + excludedUnanchored,
+                  // A window that lost a row to the bound, or to an
+                  // unnameable identity, has to say so.
+                  truncated || (returnedEvidence + excludedUnanchored == scannedMessages)
+            else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            let rows = evidenceRows.compactMap { row -> AnswerEvidenceRow? in
+                guard let messageID = row["canonical_message_id"] as? String,
+                      let conversationID = row["canonical_conversation_id"] as? String,
+                      let rowSourceRaw = row["source"] as? String,
+                      let rowSource = MemorySource(rawValue: rowSourceRaw),
+                      rowSource == .archive,
+                      let timestamp = row["timestamp"] as? Double,
+                      let timestampKind = row["timestamp_kind"] as? String,
+                      let text = row["text"] as? String,
+                      let textTruncated = row["text_truncated"] as? Bool,
+                      case let .some(anchor?) = Self.archiveAnchor(
+                        from: row["archive_evidence"], source: rowSource
+                      )
+                else { return nil }
+                return AnswerEvidenceRow(
+                    canonicalMessageID: messageID,
+                    canonicalConversationID: conversationID,
+                    timestamp: Date(timeIntervalSince1970: timestamp),
+                    timestampKind: timestampKind,
+                    sender: row["sender"] as? String,
+                    text: text,
+                    textTruncated: textTruncated,
+                    archiveEvidence: anchor
+                )
+            }
+            guard rows.count == evidenceRows.count,
+                  returnedEvidence == rows.count else {
+                return .failed(.workerFailed(state: "worker_response_malformed"))
+            }
+
+            return .ready(AnswerEvidenceSnapshot(
+                start: Date(timeIntervalSince1970: startSeconds),
+                end: Date(timeIntervalSince1970: endSeconds),
+                scannedMessages: scannedMessages,
+                returnedEvidence: returnedEvidence,
+                excludedUnanchored: excludedUnanchored,
+                textTruncatedCount: textTruncatedCount,
+                truncated: truncated,
+                coverage: FollowUpCoverage(
+                    status: coverageStatus,
+                    trustworthyEmpty: trustworthyEmpty,
+                    caveats: caveats
+                ),
+                freshness: Self.summary(from: reply["freshness"], source: .archive),
+                rows: rows
+            ))
+        }
+    }
+
     // MARK: - Protocol
 
     private func baseRequest(op: String) -> [String: Any] {
@@ -362,6 +520,23 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
               let sequence = row["sequence"] as? Int, sequence >= 0
         else { return nil }
         return .some(ArchiveEvidenceAnchor(importID: importID, sequence: sequence))
+    }
+
+    /// The worker restates the query it ran as ``query_scope``. This window's
+    /// value is that the restatement is the window the app asked for: a scope
+    /// that is absent, or that describes a different range, would let a
+    /// caller believe it was reading one window while being handed another.
+    private static func echoesRequestedWindow(
+        _ value: Any?, start: Double, end: Double
+    ) -> Bool {
+        guard let scope = value as? [String: Any],
+              let scopeWindow = scope["window"] as? [Any],
+              scopeWindow.count == 2,
+              let scopeStart = scopeWindow[0] as? Double,
+              let scopeEnd = scopeWindow[1] as? Double,
+              let limit = scope["limit"] as? Int, limit > 0
+        else { return false }
+        return abs(scopeStart - start) < 0.001 && abs(scopeEnd - end) < 0.001
     }
 
     private func failureFrom(_ reply: [String: Any]) -> MemorySyncFailure {
@@ -424,6 +599,29 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
             return .runnerUnavailable
         case .sourceUnavailable(let state):
             return .memoryUnavailable(state: state)
+        case .ingestionFailed(let state):
+            return .workerFailed(state: state)
+        }
+    }
+
+    private func answerEvidenceFailure(from reply: [String: Any]) -> AnswerEvidenceFailure {
+        let state = reply["state"] as? String ?? "unknown"
+        if state == "consent_withheld" || state == "consent_state_missing"
+            || state == "consent_state_malformed" || state == "consent_unobservable" {
+            return .consentWithheld
+        }
+        if state.hasPrefix("memory_") || state == "archive_evidence_malformed" {
+            return .memoryUnavailable(state: state)
+        }
+        return .workerFailed(state: state)
+    }
+
+    private func answerEvidenceFailure(fromLocal failure: MemorySyncFailure) -> AnswerEvidenceFailure {
+        switch failure {
+        case .consentWithheld:
+            return .consentWithheld
+        case .runnerUnavailable, .sourceUnavailable:
+            return .workerFailed(state: "worker_unavailable")
         case .ingestionFailed(let state):
             return .workerFailed(state: state)
         }

@@ -20,6 +20,9 @@ operation that is not in :data:`OPERATIONS`::
     {"op": "reminder_candidates", "store_path": "<optional>", "message_source": "visual",
                             "start": 1700000000.0, "end": 1700086400.0,
                             "message_limit": 200, "candidate_limit": 50}
+    {"op": "answer_evidence", "store_path": "<optional>", "message_source": "archive",
+                            "start": 1700000000.0, "end": 1700086400.0,
+                            "message_limit": 200}
     {"op": "paths"}
 
     {"ok": true,  "op": "sync", "state": "synced", "counts": {...}, "freshness": {...}}
@@ -114,6 +117,7 @@ DB_PATH_ENV: str = "WECHAT_COMPANION_DB_PATH"
 
 OPERATIONS: frozenset[str] = frozenset({
     "sync", "status", "paths", "summary_input", "reminder_candidates",
+    "answer_evidence",
 })
 MEMORY_SOURCE_NAMES: frozenset[str] = SOURCE_NAMES | frozenset({SOURCE_ARCHIVE})
 
@@ -126,6 +130,16 @@ MAX_MESSAGE_LIMIT: int = 2_000
 MAX_SUMMARY_MESSAGES: int = 200
 MAX_SUMMARY_TEXT_CHARS: int = 2_000
 MAX_FOLLOW_UP_CANDIDATES: int = 50
+
+#: The evidence window is asked for by shape, not by wording. The request is a
+#: closed set of fields, not a bag to ignore unknown keys from: a question,
+#: prompt, model, provider or a hand-written ``sql`` key are attempts to make
+#: this operation something it is not, and a silently ignored ``sql`` is the
+#: one that would eventually be trusted once.
+ANSWER_REQUEST_FIELDS: frozenset[str] = frozenset({
+    "op", "store_path", "message_store_path", "message_source",
+    "start", "end", "message_limit",
+})
 
 FOLLOW_UP_REQUEST_MARKERS: tuple[str, ...] = (
     "请", "麻烦", "能不能", "能否", "可以帮", "记得", "别忘",
@@ -217,6 +231,29 @@ def _follow_up_parameters(
         request, "candidate_limit", MAX_FOLLOW_UP_CANDIDATES, MAX_FOLLOW_UP_CANDIDATES
     )
     return source, start, end, message_limit, candidate_limit
+
+
+def _answer_evidence_parameters(
+    request: dict[str, Any],
+) -> tuple[float, float, int]:
+    """The evidence window's shape: Archive only, bounded, no wording.
+
+    Unlike the summary parameters this does not fall back to Visual. The
+    window exists to be revealed back to an exact Archive row, and only an
+    Archive-attributed row has one, so a missing or non-Archive selection is
+    a refusal rather than a different source's evidence.
+    """
+    if request.get("message_source") != SOURCE_ARCHIVE:
+        raise BadRequest("message_source must be archive.")
+    unexpected = sorted(set(request) - ANSWER_REQUEST_FIELDS)
+    if unexpected:
+        raise BadRequest("request has fields this operation does not accept.")
+    start = _timestamp(request, "start")
+    end = _timestamp(request, "end")
+    if end <= start:
+        raise BadRequest("end must be greater than start.")
+    limit = _limit(request, "message_limit", MAX_SUMMARY_MESSAGES, MAX_SUMMARY_MESSAGES)
+    return start, end, limit
 
 
 def _follow_up_reasons(text: str) -> list[str]:
@@ -456,6 +493,98 @@ def _summary_input(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any
 
 
 
+def _query_scope(result: Any) -> dict[str, Any]:
+    """The existing scope representation, so the window says what it asked."""
+    scope = result.query_scope
+    return {
+        "kind": scope.kind,
+        "conversation_canonical_id": scope.conversation_canonical_id,
+        "window": list(scope.window),
+        "limit": scope.limit,
+        "order": scope.order,
+        "text": scope.text,
+        "sender": scope.sender,
+        "anchor": scope.anchor,
+        "policy": {
+            "required_sources": list(scope.policy.required),
+            "supplemental_sources": list(scope.policy.supplemental),
+        },
+    }
+
+
+def _answer_evidence(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
+    """A bounded Archive-attributed evidence window, anchored exactly.
+
+    No question, no answer, no model: the window is the deterministic half of
+    a question, so that whatever reads it later can only cite rows this
+    process has already named. The rows come from the same Archive-attributed
+    query the summary and follow-up scans use, and each one carries the
+    canonical anchor unpacked from the identity Memory already holds.
+
+    Fail-closed, deliberately and in two distinct ways. A row whose identity
+    is absent cannot be revealed, so it is excluded and counted -- the window
+    stays truthful rather than dropping it silently. A row whose identity is
+    present but unreadable means the store is not what it claims, so the whole
+    request is refused; nothing is skipped past a corrupt provenance field.
+    """
+    start, end, limit = _answer_evidence_parameters(request)
+    service = MemoryQueryService(store)
+    result = service.recent_context(
+        since=start,
+        until=end,
+        limit=limit,
+        order="oldest",
+        source=SOURCE_ARCHIVE,
+    )
+
+    evidence: list[dict[str, Any]] = []
+    excluded = 0
+    clipped_count = 0
+    for item in result.items:
+        anchor = _archive_evidence(item.citation)
+        if anchor is None:
+            excluded += 1
+            continue
+        text = item.text or ""
+        text_was_clipped = len(text) > MAX_SUMMARY_TEXT_CHARS
+        if text_was_clipped:
+            text = text[:MAX_SUMMARY_TEXT_CHARS]
+            clipped_count += 1
+        citation = item.citation
+        evidence.append({
+            "source": SOURCE_ARCHIVE,
+            "canonical_message_id": citation.canonical_message_id,
+            "canonical_conversation_id": citation.canonical_conversation_id,
+            "timestamp": item.timestamp,
+            "timestamp_kind": citation.timestamp_kind,
+            "sender": item.sender,
+            "text": text,
+            "text_truncated": text_was_clipped,
+            "archive_evidence": anchor,
+        })
+
+    return {
+        "ok": True,
+        "op": "answer_evidence",
+        "state": "ready",
+        "source": SOURCE_ARCHIVE,
+        "window": {"start": start, "end": end},
+        "query_scope": _query_scope(result),
+        "counts": {
+            "scanned_messages": len(result.items),
+            "returned_evidence": len(evidence),
+            "excluded_unanchored": excluded,
+            "text_truncated": clipped_count,
+        },
+        # Excluding a row loses evidence the bound could have carried, so the
+        # window is truncated by the unanchored count too.
+        "truncated": bool(result.truncated or excluded),
+        "coverage": result.coverage.as_dict(),
+        "freshness": result.freshness.as_dict(),
+        "evidence": evidence,
+    }
+
+
 def _reminder_candidates(store: MemoryStore, request: dict[str, Any]) -> dict[str, Any]:
     source, start, end, message_limit, candidate_limit = _follow_up_parameters(request)
     service = MemoryQueryService(store)
@@ -564,13 +693,15 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
         _summary_parameters(request)
     elif op == "reminder_candidates":
         _follow_up_parameters(request)
+    elif op == "answer_evidence":
+        _answer_evidence_parameters(request)
 
     store_path = _store_path(request)
     decision = consent.resolve_consent(_activation(store_path), reader)
     if not decision.allowed:
         return _refusal(op, decision.state, decision.detail), EXIT_REFUSED
 
-    if op in {"status", "summary_input", "reminder_candidates"}:
+    if op in {"status", "summary_input", "reminder_candidates", "answer_evidence"}:
         try:
             store = MemoryStore.open_read_only(decision)
         except MemoryStoreError as error:
@@ -590,6 +721,8 @@ def handle(request: dict[str, Any], *, read_app_consent_state=None) -> tuple[dic
             try:
                 if op == "summary_input":
                     return _summary_input(store, request), EXIT_OK
+                if op == "answer_evidence":
+                    return _answer_evidence(store, request), EXIT_OK
                 return _reminder_candidates(store, request), EXIT_OK
             except MemoryStoreError as error:
                 return _refusal(op, error.state, error.detail), EXIT_REFUSED

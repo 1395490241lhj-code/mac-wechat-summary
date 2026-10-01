@@ -110,6 +110,62 @@ private let followUpReply = """
                  "archive_evidence": {"import_id": 1, "sequence": 0}}]}
 """
 
+
+private let answerEvidenceReply = """
+{"ok": true, "op": "answer_evidence", "state": "ready", "source": "archive",
+ "window": {"start": 1700000000.0, "end": 1700003600.0},
+ "query_scope": {"kind": "recent", "conversation_canonical_id": null,
+                 "window": [1700000000.0, 1700003600.0], "limit": 200,
+                 "order": "oldest", "text": null, "sender": null, "anchor": null,
+                 "policy": {"required_sources": ["archive"], "supplemental_sources": []}},
+ "counts": {"scanned_messages": 2, "returned_evidence": 2,
+            "excluded_unanchored": 0, "text_truncated": 0},
+ "truncated": false,
+ "coverage": {"status": "partial", "trustworthy_empty": false,
+              "required_sources": ["archive"], "supplemental_sources": [],
+              "complete_sources": [], "per_source": {}, "caveats": ["archive:partial"]},
+ "freshness": {"generated_at": 1700004000.0, "participating_sources": ["archive"],
+   "sources": {"archive": {"source": "archive", "runs_total": 1,
+     "last_attempted_at": 1700000000.0, "last_attempt_state": "succeeded",
+     "last_attempt_failure_state": null, "last_succeeded_at": 1700000000.0,
+     "observed_through": 1700003000.0, "complete_through": null,
+     "latest_message_at": 1700002000.0, "latest_message_timestamp_kind": "source_created",
+     "stored_messages": 2}}},
+ "evidence": [
+   {"source": "archive", "canonical_message_id": "msg-a",
+    "canonical_conversation_id": "conv-a", "timestamp": 1700001200.0,
+    "timestamp_kind": "source_created", "sender": "A", "text": "同一句话",
+    "text_truncated": false, "archive_evidence": {"import_id": 1, "sequence": 0}},
+   {"source": "archive", "canonical_message_id": "msg-b",
+    "canonical_conversation_id": "conv-a", "timestamp": 1700001200.0,
+    "timestamp_kind": "source_created", "sender": "A", "text": "同一句话",
+    "text_truncated": false, "archive_evidence": {"import_id": 1, "sequence": 1}}]}
+"""
+
+
+private let emptyAnswerEvidenceReply = """
+{"ok": true, "op": "answer_evidence", "state": "ready", "source": "archive",
+ "window": {"start": 1700000000.0, "end": 1700003600.0},
+ "query_scope": {"kind": "recent", "conversation_canonical_id": null,
+                 "window": [1700000000.0, 1700003600.0], "limit": 200,
+                 "order": "oldest", "text": null, "sender": null, "anchor": null,
+                 "policy": {"required_sources": ["archive"], "supplemental_sources": []}},
+ "counts": {"scanned_messages": 0, "returned_evidence": 0,
+            "excluded_unanchored": 0, "text_truncated": 0},
+ "truncated": false,
+ "coverage": {"status": "complete", "trustworthy_empty": true,
+              "required_sources": ["archive"], "supplemental_sources": [],
+              "complete_sources": ["archive"], "per_source": {}, "caveats": []},
+ "freshness": {"generated_at": 1700004000.0, "participating_sources": ["archive"],
+   "sources": {"archive": {"source": "archive", "runs_total": 1,
+     "last_attempted_at": 1700000000.0, "last_attempt_state": "succeeded",
+     "last_attempt_failure_state": null, "last_succeeded_at": 1700000000.0,
+     "observed_through": 1700003000.0, "complete_through": 1700003000.0,
+     "latest_message_at": 1700002000.0, "latest_message_timestamp_kind": "source_created",
+     "stored_messages": 0}}},
+ "evidence": []}
+"""
+
 struct PackagedMemorySyncRunnerTests {
     // MARK: - Resolution
 
@@ -632,6 +688,186 @@ struct PackagedMemorySyncRunnerTests {
         // A parent variable must not be able to select a source behind the app.
         #expect(!names.contains("WECHAT_COMPANION_MESSAGE_SOURCE"))
         #expect(names.isSubset(of: ["HOME", "PATH", "LANG", "_", "SHLVL", "PWD"]))
+    }
+
+    // MARK: - Answer evidence window
+
+    private func evidenceRunner(_ stub: StubWorker) -> PackagedMemorySyncRunner {
+        let store = temporaryStore()
+        return PackagedMemorySyncRunner(
+            workerURL: stub.executable,
+            storeURL: store,
+            messageStoreURL: store.deletingLastPathComponent()
+                .appendingPathComponent("messages.sqlite")
+        )
+    }
+
+    @Test
+    func answerEvidencePinsArchiveAndDecodesEveryRowWithItsOwnAnchor() async throws {
+        let stub = try StubWorker(replying: answerEvidenceReply)
+        defer { stub.cleanup() }
+        let runner = evidenceRunner(stub)
+
+        let outcome = await runner.answerEvidence(
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200
+        )
+
+        guard case .ready(let snapshot) = outcome else {
+            Issue.record("expected evidence success, got \(outcome)")
+            return
+        }
+        #expect(snapshot.returnedEvidence == 2)
+        #expect(snapshot.excludedUnanchored == 0)
+        #expect(snapshot.truncated == false)
+        #expect(snapshot.coverage.status == "partial")
+        #expect(snapshot.coverage.trustworthyEmpty == false)
+        #expect(snapshot.coverage.caveats == ["archive:partial"])
+        #expect(snapshot.freshness?.source == .archive)
+        // Two rows that display identically stay two rows, and only the
+        // canonical anchor tells them apart.
+        #expect(snapshot.rows.map(\.archiveEvidence) == [
+            ArchiveEvidenceAnchor(importID: 1, sequence: 0),
+            ArchiveEvidenceAnchor(importID: 1, sequence: 1),
+        ])
+        #expect(Set(snapshot.rows.map(\.canonicalMessageID)).count == 2)
+        #expect(snapshot.rows.first?.timestampKind == "source_created")
+
+        let sent = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: stub.requestDump)
+        ) as! [String: Any]
+        #expect(sent["op"] as? String == "answer_evidence")
+        #expect(sent["message_source"] as? String == "archive")
+        #expect(sent["start"] as? Double == 1_700_000_000)
+        #expect(sent["end"] as? Double == 1_700_003_600)
+        #expect(sent["message_limit"] as? Int == 200)
+        #expect(sent["store_path"] as? String == runner.storeURL.path)
+        #expect(sent["message_store_path"] as? String == runner.messageStoreURL.path)
+        // The window is asked for by shape: no wording ever crosses the wire.
+        #expect(sent.keys.sorted() == [
+            "end", "message_limit", "message_source", "message_store_path",
+            "op", "start", "store_path",
+        ])
+    }
+
+    @Test
+    func answerEvidenceFailsClosedOnAnythingItCannotNameExactly() async throws {
+        // Every case below would otherwise produce a row that looks citeable
+        // but cannot be revealed back to an exact Archive record.
+        let anchor = #""archive_evidence": {"import_id": 1, "sequence": 0}"#
+        for body in [
+            // The source the app did not ask for.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""source": "archive""#, with: #""source": "visual""#
+            ),
+            // A window the app did not ask for.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""end": 1700003600.0"#, with: #""end": 1700003601.0"#
+            ),
+            // Absent, partial, non-positive, or negative anchor.
+            answerEvidenceReply.replacingOccurrences(of: anchor, with: "{}"),
+            answerEvidenceReply.replacingOccurrences(
+                of: anchor, with: #""archive_evidence": {"sequence": 0}"#
+            ),
+            answerEvidenceReply.replacingOccurrences(
+                of: anchor, with: #""archive_evidence": {"import_id": 0, "sequence": 0}"#
+            ),
+            answerEvidenceReply.replacingOccurrences(
+                of: anchor, with: #""archive_evidence": {"import_id": 1, "sequence": -1}"#
+            ),
+            // A row whose displayed fields are not decodable.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""text_truncated": false"#, with: #""text_truncated": "no""#
+            ),
+            // A count that disagrees with the rows actually sent.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""returned_evidence": 2"#, with: #""returned_evidence": 3"#
+            ),
+            // A count the envelope does not state, or states as a word.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""excluded_unanchored": 0"#, with: #""excluded_unanchored": "none""#
+            ),
+            answerEvidenceReply.replacingOccurrences(
+                of: #""text_truncated": 0"#, with: #""truncated": false"#
+            ),
+            // A truncation flag that hides a row the window actually lost.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""scanned_messages": 2"#, with: #""scanned_messages": 4"#
+            ),
+            // A scope that describes a different window, or no window at all.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""window": [1700000000.0, 1700003600.0]"#,
+                with: #""window": [1699990000.0, 1700003600.0]"#
+            ),
+            // A scope that claims a bound it could not have read under.
+            answerEvidenceReply.replacingOccurrences(
+                of: #""limit": 200"#, with: #""limit": 0"#
+            ),
+            // Not an evidence envelope at all.
+            #"{"ok": true, "op": "answer_evidence", "state": "ready"}"#,
+        ] {
+            let stub = try StubWorker(replying: body)
+            defer { stub.cleanup() }
+            let outcome = await evidenceRunner(stub).answerEvidence(
+                start: Date(timeIntervalSince1970: 1_700_000_000),
+                end: Date(timeIntervalSince1970: 1_700_003_600),
+                messageLimit: 200
+            )
+            #expect(
+                outcome == .failed(.workerFailed(state: "worker_response_malformed")),
+                Comment(rawValue: body))
+        }
+    }
+
+    @Test
+    func answerEvidenceMapsAMissingOrCorruptMemoryToAnExplicitReadFailure() async throws {
+        for state in ["memory_store_missing", "archive_evidence_malformed"] {
+            let stub = try StubWorker(
+                replying: #"{"ok": false, "op": "answer_evidence", "state": "\#(state)", "detail": "x"}"#,
+                exitCode: 1
+            )
+            defer { stub.cleanup() }
+            let outcome = await evidenceRunner(stub).answerEvidence(
+                start: Date(timeIntervalSince1970: 1),
+                end: Date(timeIntervalSince1970: 2),
+                messageLimit: 200
+            )
+            #expect(outcome == .failed(.memoryUnavailable(state: state)))
+        }
+    }
+
+    @Test
+    func answerEvidenceWithholdsWhenConsentIsWithheld() async throws {
+        let stub = try StubWorker(
+            replying: #"{"ok": false, "op": "answer_evidence", "state": "consent_withheld", "detail": "x"}"#,
+            exitCode: 1
+        )
+        defer { stub.cleanup() }
+        let outcome = await evidenceRunner(stub).answerEvidence(
+            start: Date(timeIntervalSince1970: 1),
+            end: Date(timeIntervalSince1970: 2),
+            messageLimit: 200
+        )
+        #expect(outcome == .failed(.consentWithheld))
+    }
+
+    @Test
+    func anEmptyButValidWindowIsAnEmptySuccess() async throws {
+        let stub = try StubWorker(replying: emptyAnswerEvidenceReply)
+        defer { stub.cleanup() }
+        let outcome = await evidenceRunner(stub).answerEvidence(
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600),
+            messageLimit: 200
+        )
+        guard case .ready(let snapshot) = outcome else {
+            Issue.record("expected an empty success, got \(outcome)")
+            return
+        }
+        #expect(snapshot.rows.isEmpty)
+        #expect(snapshot.returnedEvidence == 0)
+        #expect(snapshot.coverage.trustworthyEmpty == true)
     }
 
     // MARK: - Failure
