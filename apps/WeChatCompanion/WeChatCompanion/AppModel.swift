@@ -113,6 +113,8 @@ final class AppModel {
     @ObservationIgnored private let memorySync: any MemorySyncRunning
     @ObservationIgnored private let dailySummary: any DailySummaryRunning
     @ObservationIgnored private let followUpCandidates: any FollowUpCandidateRunning
+    @ObservationIgnored private let answerEvidence: any AnswerEvidenceRunning
+    @ObservationIgnored private let answerRunner: any AnswerRunning
     @ObservationIgnored private let reminderStore: any ReminderStoring
     @ObservationIgnored private var observerPollingTask: Task<Void, Never>?
     /// Independent of capture polling: an extraction already in flight can
@@ -136,6 +138,8 @@ final class AppModel {
         memorySync: any MemorySyncRunning = AppModel.defaultMemorySyncRunner(),
         dailySummary: any DailySummaryRunning = AppModel.defaultDailySummaryRunner(),
         followUpCandidates: any FollowUpCandidateRunning = AppModel.defaultFollowUpRunner(),
+        answerEvidence: any AnswerEvidenceRunning = AppModel.defaultAnswerEvidenceRunner(),
+        answerRunner: any AnswerRunning = SystemLanguageModelAnswerRunner(),
         reminderStore: any ReminderStoring = AppModel.defaultReminderStore()
     ) {
         self.service = service
@@ -151,6 +155,9 @@ final class AppModel {
         self.memorySync = memorySync
         self.dailySummary = dailySummary
         self.followUpCandidates = followUpCandidates
+        self.answerEvidence = answerEvidence
+        self.answerRunner = answerRunner
+        self.answerAvailability = answerRunner.currentAvailability()
         self.reminderStore = reminderStore
         hasProviderCredential = credentials.hasSecret(
             account: GeminiFrameExtractor.credentialAccount
@@ -287,6 +294,16 @@ final class AppModel {
             return UnavailableFollowUpRunner()
         }
         return PackagedMemorySyncRunner.bundled() ?? UnavailableFollowUpRunner()
+    }
+
+    /// Reports the packaging gap rather than faking an evidence window. The
+    /// packaged worker itself is reached through the follow-up runner, which is
+    /// the same object; this exists only so the default above is never nil.
+    static func defaultAnswerEvidenceRunner() -> any AnswerEvidenceRunning {
+        guard !PackagedMemorySyncRunner.isUnderTestHost else {
+            return UnavailableAnswerEvidenceRunner()
+        }
+        return PackagedMemorySyncRunner.bundled() ?? UnavailableAnswerEvidenceRunner()
     }
 
     static func defaultReminderStore() -> any ReminderStoring {
@@ -585,6 +602,183 @@ final class AppModel {
             reminderStoreError = .unavailable
         }
     }
+
+    // MARK: - Agents: on-device archive answer
+
+    /// Reuses the Daily Summary window control verbatim. Both surfaces read the
+    /// same already-synced Archive Memory over the same three ranges, so a
+    /// second window type here would be two definitions of one choice.
+    private(set) var answerWindow: DailySummaryWindow = .today
+    private(set) var answerPhase: AnswerPhase = .idle
+    private(set) var answerResult: AnswerRunResult?
+    /// The sealed window the answer was built from, kept only to disclose it.
+    private(set) var answerSnapshot: AnswerEvidenceSnapshot?
+    private(set) var answerAvailability: AnswerRuntimeAvailability
+    private(set) var answerRevealTarget: ArchiveEvidenceAnchor?
+    @ObservationIgnored private var answerTask: Task<Void, Never>?
+    /// The one user-visible deadline for a run. It is deliberately *earlier*
+    /// than the packaged worker's own kill-switch: that one bounds a child
+    /// process and cannot time a run that is already inside the model, so the
+    /// two are not the same timer and must not fire at the same instant. The
+    /// packaged runner raises its ceiling to match; see
+    /// PackagedMemorySyncRunner.answerEvidenceTimeout.
+    @ObservationIgnored var answerTimeout: TimeInterval = 120
+
+    /// The live task, not the phase, owns the single-flight lease. A run that
+    /// has been asked to cancel is still alive until it actually unwinds, and a
+    /// second run must not start under it.
+    var isAnswerRunActive: Bool { answerTask != nil }
+
+    var canAskArchiveQuestion: Bool {
+        allowsLocalPersistence && !isAnswerRunActive && answerAvailability.isAvailable
+    }
+
+    func setAnswerWindow(_ window: DailySummaryWindow) {
+        guard window != answerWindow, !isAnswerRunActive else { return }
+        answerWindow = window
+        answerResult = nil
+        answerSnapshot = nil
+        answerPhase = .idle
+    }
+
+    /// One question, one run. Refuses a second run, an empty question, and a
+    /// run whose model is unavailable -- that last is checked *before* any
+    /// evidence is read, so an unavailable runtime costs no worker round trip.
+    func askArchiveQuestion(_ question: String, now: Date = Date()) async {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isAnswerRunActive else { return }
+        guard answerAvailability.isAvailable else {
+            answerResult = nil
+            answerSnapshot = nil
+            answerPhase = .failed(
+                .runtimeUnavailable(answerAvailability.reason ?? .frameworkUnavailable)
+            )
+            return
+        }
+        // Checked before any worker round trip: a question that cannot fit the
+        // context is refused, never shortened, and never costs a read.
+        if let contextSize = answerAvailability.contextSize,
+           !AnswerModelInput.fitsQuestion(trimmed, contextSize: contextSize) {
+            answerResult = nil
+            answerSnapshot = nil
+            answerPhase = .failed(.questionTooLong)
+            return
+        }
+        answerResult = nil
+        answerSnapshot = nil
+        answerRevealTarget = nil
+        answerPhase = .running
+
+        let bounds = answerWindow.bounds(now: now)
+        let timeout = answerTimeout
+        // One task owns the run and its deadline together, so cancelling the
+        // run cannot leave a timer behind still counting. The two children
+        // race and the loser is cancelled; the run only ends once the
+        // cancelled child has actually unwound, which is what makes the handle
+        // below a truthful lease rather than a claim.
+        let work = Task { [weak self] in
+            guard let self else { return }
+            await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    await self.runArchiveAnswer(question: trimmed, bounds: bounds)
+                    return false
+                }
+                group.addTask {
+                    // true only when the span actually elapsed; a cancellation
+                    // arrives as a thrown error and is not a timeout.
+                    do {
+                        try await Task.sleep(for: .seconds(timeout))
+                        return true
+                    } catch {
+                        return false
+                    }
+                }
+                if await group.next() == true {
+                    group.cancelAll()
+                    await group.next()   // the run has now really stopped
+                    answerPhase = .timedOut
+                } else {
+                    group.cancelAll()
+                }
+            }
+        }
+        answerTask = work
+        await work.value
+        // Only now, with the run actually finished, does ownership go back.
+        // Clearing it earlier let a second run start under a live one, and let
+        // this run's own cleanup wipe the second run's handle and result.
+        answerTask = nil
+    }
+
+    private func runArchiveAnswer(question: String, bounds: (start: Date, end: Date)) async {
+        if Task.isCancelled {
+            answerPhase = .cancelled
+            return
+        }
+        let outcome = await answerEvidence.answerEvidence(
+            start: bounds.start, end: bounds.end, messageLimit: AnswerModelInput.maxRows
+        )
+        if Task.isCancelled {
+            answerPhase = .cancelled
+            return
+        }
+        switch outcome {
+        case .failed(let failure):
+            answerSnapshot = nil
+            answerPhase = .failed(.evidence(failure))
+            return
+        case .ready(let snapshot):
+            answerSnapshot = snapshot
+        }
+        guard let snapshot = answerSnapshot else { return }
+        do {
+            let result = try await answerRunner.answer(question: question, snapshot: snapshot)
+            if Task.isCancelled {
+                answerPhase = .cancelled
+                answerResult = nil
+                return
+            }
+            answerResult = result
+            answerPhase = .answered
+        } catch let failure as AnswerFailure {
+            answerResult = nil
+            // Before the generic case, because a cancellation is not a
+            // failure. A runner that reports one as a domain case -- rather
+            // than as the `CancellationError` the production runner now lets
+            // through -- must still read as a cancellation here, so the two
+            // cancellation paths cannot disagree about what the user sees.
+            answerPhase = failure == .cancelled ? .cancelled : .failed(failure)
+        } catch is CancellationError {
+            answerResult = nil
+            answerPhase = .cancelled
+        } catch {
+            answerResult = nil
+            answerPhase = .failed(.generationFailed)
+        }
+    }
+
+    /// Cancels the run and leaves no partial answer. A run that already
+    /// finished keeps its result: cancelling nothing must not discard an answer
+    /// the user is reading.
+    func cancelArchiveAnswer() {
+        guard answerTask != nil else { return }
+        answerTask?.cancel()
+        answerResult = nil
+        answerPhase = .cancelled
+    }
+
+    /// Reveals a validated citation through the existing exact-reveal path.
+    /// There is no second Archive reveal path for Agents.
+    func openArchiveAnswerCitation(_ citation: AnswerCitation) async {
+        answerRevealTarget = citation.archiveEvidence
+        await openSearchResult(citation.searchResult)
+    }
+
+#if DEBUG
+    func setAnswerRuntimeAvailabilityForTesting(_ availability: AnswerRuntimeAvailability) {
+        answerAvailability = availability
+    }
+#endif
 
     // MARK: - Local persistence settings
 

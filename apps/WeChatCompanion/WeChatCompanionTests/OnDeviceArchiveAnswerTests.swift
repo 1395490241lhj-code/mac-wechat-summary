@@ -1,0 +1,924 @@
+import Foundation
+import Testing
+@testable import WeChatCompanion
+
+// On-Device Archive Answer v1. The model itself is exercised separately by the
+// FoundationModels boundary probe; everything here runs against a stub runner,
+// because model prose is nondeterministic and must never be asserted on.
+
+private func evidenceRow(
+    _ index: Int,
+    text: String,
+    sender: String? = "张伟",
+    seconds: TimeInterval = 1_700_000_000
+) -> AnswerEvidenceRow {
+    AnswerEvidenceRow(
+        canonicalMessageID: "msg-\(index)",
+        canonicalConversationID: "conv-1",
+        timestamp: Date(timeIntervalSince1970: seconds + Double(index)),
+        timestampKind: "source_created",
+        sender: sender,
+        text: text,
+        textTruncated: false,
+        archiveEvidence: ArchiveEvidenceAnchor(importID: 7, sequence: index)
+    )
+}
+
+private func evidenceSnapshot(
+    rows: [AnswerEvidenceRow],
+    truncated: Bool = false,
+    excludedUnanchored: Int = 0,
+    textTruncatedCount: Int = 0
+) -> AnswerEvidenceSnapshot {
+    AnswerEvidenceSnapshot(
+        start: Date(timeIntervalSince1970: 1_700_000_000),
+        end: Date(timeIntervalSince1970: 1_700_003_600),
+        scannedMessages: rows.count + excludedUnanchored,
+        returnedEvidence: rows.count,
+        excludedUnanchored: excludedUnanchored,
+        textTruncatedCount: textTruncatedCount,
+        truncated: truncated,
+        coverage: FollowUpCoverage(status: "complete", trustworthyEmpty: true, caveats: []),
+        freshness: nil,
+        rows: rows
+    )
+}
+
+private final class RecordingEvidenceRunner: AnswerEvidenceRunning, @unchecked Sendable {
+    struct Call: Equatable {
+        let start: Date
+        let end: Date
+        let messageLimit: Int
+    }
+
+    var outcomes: [AnswerEvidenceOutcome]
+    private(set) var calls: [Call] = []
+
+    init(outcomes: [AnswerEvidenceOutcome]) { self.outcomes = outcomes }
+
+    func answerEvidence(
+        start: Date, end: Date, messageLimit: Int
+    ) async -> AnswerEvidenceOutcome {
+        calls.append(Call(start: start, end: end, messageLimit: messageLimit))
+        return outcomes.isEmpty
+            ? .failed(.workerFailed(state: "no_outcome"))
+            : outcomes.removeFirst()
+    }
+}
+
+private actor HeldEvidenceRunner: AnswerEvidenceRunning {
+    private(set) var calls = 0
+    private var completion: CheckedContinuation<AnswerEvidenceOutcome, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func answerEvidence(
+        start: Date, end: Date, messageLimit: Int
+    ) async -> AnswerEvidenceOutcome {
+        calls += 1
+        return await withCheckedContinuation { continuation in
+            completion = continuation
+            started?.resume()
+            started = nil
+        }
+    }
+    func waitUntilStarted() async {
+        if completion == nil {
+            await withCheckedContinuation { started = $0 }
+        }
+    }
+    func finish(_ outcome: AnswerEvidenceOutcome) {
+        completion?.resume(returning: outcome)
+        completion = nil
+    }
+}
+
+/// An actor, not a mutable struct: a stub that hangs inside its answer call
+/// would otherwise mutate recorded state from two places at once.
+private actor StubAnswerRunner: AnswerRunning {
+    var returnedIndices: [Int] = [1]
+    private let hangs: Bool
+    private(set) var callCount = 0
+    private(set) var lastSnapshot: AnswerEvidenceSnapshot?
+    private(set) var lastQuestion: String?
+
+    init(returnedIndices: [Int] = [1], hangs: Bool = false) {
+        self.returnedIndices = returnedIndices
+        self.hangs = hangs
+    }
+
+    nonisolated func currentAvailability() -> AnswerRuntimeAvailability {
+        .available(contextSize: 8_192)
+    }
+
+    func answer(
+        question: String, snapshot: AnswerEvidenceSnapshot
+    ) async throws -> AnswerRunResult {
+        callCount += 1
+        lastQuestion = question
+        lastSnapshot = snapshot
+        if hangs {
+            try await Task.sleep(for: .seconds(600))
+        }
+        return AnswerRunResult.validating(
+            answer: "回答",
+            returnedIndices: returnedIndices,
+            input: AnswerModelInput.build(
+                question: question, rows: snapshot.rows, contextSize: 8_192
+            )
+        )
+    }
+}
+
+/// Mirrors the production runner's real cancellation boundary: the production
+/// code catches a cancellation coming out of the model and rethrows it as a
+/// domain failure, so a stub that throws a *raw* CancellationError never
+/// reaches the same code path. This one throws what production actually
+/// throws, which is the whole point of defect A.
+private actor ProductionShapedCancellingRunner: AnswerRunning {
+    nonisolated func currentAvailability() -> AnswerRuntimeAvailability {
+        .available(contextSize: 8_192)
+    }
+
+    func answer(
+        question: String, snapshot: AnswerEvidenceSnapshot
+    ) async throws -> AnswerRunResult {
+        // The production mapping, verbatim: the model call is cancelled, and
+        // production converts that into a *domain* failure. A stub that threw a
+        // raw CancellationError never reached this boundary, which is how the
+        // defect survived the earlier cancel test.
+        do {
+            try await Task.sleep(for: .seconds(600))
+        } catch is CancellationError {
+            throw AnswerFailure.cancelled
+        }
+        return AnswerRunResult.validating(
+            answer: "回答", returnedIndices: [],
+            input: AnswerModelInput.build(question: question, rows: [], contextSize: 8_192)
+        )
+    }
+}
+
+/// A runner that can be released *by hand* at a moment the test chooses, so a
+/// cancelled run can be observed still being alive after Cancel returns. This
+/// is what defect B needs and what the old cancel test could not express.
+private actor ControllableAnswerRunner: AnswerRunning {
+    private(set) var callCount = 0
+    private(set) var finishedCalls = 0
+    /// One gate per call, oldest first. A single slot would let a second,
+    /// overlapping run overwrite the first run's continuation and strand it
+    /// forever -- exactly the overlap this runner exists to observe, so the
+    /// harness must not reproduce it as an artefact of its own shape.
+    private var gates: [CheckedContinuation<Void, Never>] = []
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+    private var nextIndex = 0
+
+    nonisolated func currentAvailability() -> AnswerRuntimeAvailability {
+        .available(contextSize: 8_192)
+    }
+
+    func answer(
+        question: String, snapshot: AnswerEvidenceSnapshot
+    ) async throws -> AnswerRunResult {
+        callCount += 1
+        nextIndex += 1
+        let index = nextIndex
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            gates.append(c)
+            for waiter in arrivalWaiters { waiter.resume() }
+            arrivalWaiters.removeAll()
+        }
+        finishedCalls += 1
+        return AnswerRunResult.validating(
+            answer: "回答-\(index)", returnedIndices: [],
+            input: AnswerModelInput.build(question: question, rows: [], contextSize: 8_192)
+        )
+    }
+
+    func waitForCallCount(_ count: Int) async {
+        while callCount < count {
+            await withCheckedContinuation { arrivalWaiters.append($0) }
+        }
+    }
+
+    /// Let every parked call return, as if the runtime had finished unwinding.
+    func releaseAll() {
+        for gate in gates { gate.resume() }
+        gates.removeAll()
+    }
+}
+
+@MainActor
+private func answerTestDefaults(_ consent: Bool = true) -> UserDefaults {
+    let defaults = UserDefaults(suiteName: "OnDeviceAnswerTests-\(UUID().uuidString)")!
+    defaults.set(consent, forKey: AppModel.localPersistenceConsentKey)
+    defaults.removeObject(forKey: AppModel.remoteConsentKey)
+    return defaults
+}
+
+/// The exact input a run would have built for these rows.
+private func modelInput(
+    _ rows: [AnswerEvidenceRow], question: String = "问题", contextSize: Int = 8_192
+) -> AnswerModelInput {
+    AnswerModelInput.build(question: question, rows: rows, contextSize: contextSize)
+}
+
+@MainActor
+private func makeAnswerModel(
+    evidence: any AnswerEvidenceRunning,
+    answer: any AnswerRunning,
+    consent: Bool = true,
+    history: LocalMessageHistory = makeTestMessageHistory()
+) -> AppModel {
+    AppModel(
+        messageHistory: history,
+        shareInbox: nil,
+        consentDefaults: answerTestDefaults(consent),
+        memorySync: UnavailableMemorySyncRunner(),
+        dailySummary: UnavailableDailySummaryRunner(),
+        followUpCandidates: UnavailableFollowUpRunner(),
+        answerEvidence: evidence,
+        answerRunner: answer
+    )
+}
+
+// MARK: - Runtime input shaping
+
+@Suite("On-device answer runtime input")
+struct OnDeviceAnswerRuntimeInputTests {
+    @Test("Model-visible text is capped at 150 characters per row")
+    func capsRowText() {
+        let long = String(repeating: "字", count: 400)
+        let input = AnswerModelInput.build(
+            question: "问题",
+            rows: [evidenceRow(1, text: long)],
+            contextSize: 8_192
+        )
+        #expect(input.rows.count == 1)
+        #expect(input.rows[0].text.count == 150)
+        #expect(input.rowsTextShortened == 1)
+    }
+
+    @Test("At most 40 rows reach the model, oldest first")
+    func capsRowCount() {
+        let rows = (1...70).map { evidenceRow($0, text: "消息\($0)") }
+        let input = AnswerModelInput.build(
+            question: "问题",
+            rows: rows,
+            contextSize: 8_192
+        )
+        #expect(input.rows.count == 40)
+        #expect(input.rowsOmitted == 30)
+        #expect(input.rows.first?.token == 1)
+        #expect(input.rows.last?.token == 40)
+    }
+
+    @Test("A smaller context trims rows further than the 40-row ceiling")
+    func respectsContextSize() {
+        let rows = (1...40).map {
+            evidenceRow($0, text: String(repeating: "字", count: 150))
+        }
+        let roomy = AnswerModelInput.build(
+            question: String(repeating: "问", count: 100), rows: rows, contextSize: 16_000
+        )
+        #expect(roomy.rows.count == 40)
+
+        let cramped = AnswerModelInput.build(
+            question: "问题", rows: rows, contextSize: 1_200
+        )
+        #expect(cramped.rows.count < 40)
+        #expect(cramped.rowsOmitted > 0)
+    }
+
+    @Test("The 150-character row cap is what stops a 40-row set from fitting")
+    func rowCapHoldsEvenInARoomyContext() {
+        // 40 rows of 150 characters plus their labels is ~6.8k characters,
+        // which does not fit an 8k-token context once the reserve is held
+        // back. The answer is fewer rows, never a longer row: the per-row cap
+        // is a hard ceiling, not a suggestion the budget may raise.
+        let rows = (1...40).map {
+            evidenceRow($0, text: String(repeating: "字", count: 150))
+        }
+        let input = AnswerModelInput.build(question: "问题", rows: rows, contextSize: 8_192)
+        #expect(input.rows.count < 40)
+        #expect(input.rows.allSatisfy { $0.text.count <= 150 })
+        #expect(input.rowsOmitted == 40 - input.rows.count)
+    }
+
+    @Test("Prompt carries host tokens and never canonical identity")
+    func promptCarriesTokensOnly() {
+        let input = AnswerModelInput.build(
+            question: "会议改到什么时候了？",
+            rows: [evidenceRow(1, text: "改到周四上午十点了")],
+            contextSize: 8_192
+        )
+        #expect(input.prompt.contains("[1]"))
+        #expect(input.prompt.contains("改到周四上午十点了"))
+        for secret in ["msg-1", "conv-1", "import_id", "canonical", "sequence"] {
+            #expect(!input.prompt.contains(secret))
+        }
+    }
+
+    @Test("The runtime-input disclosure stays separate from B9 truncation")
+    func disclosureIsSeparate() {
+        let snapshot = evidenceSnapshot(
+            rows: (1...70).map { evidenceRow($0, text: "消息\($0)") },
+            truncated: true,
+            excludedUnanchored: 4,
+            textTruncatedCount: 2
+        )
+        let input = AnswerModelInput.build(
+            question: "问题", rows: snapshot.rows, contextSize: 8_192
+        )
+        let disclosure = AnswerEvidenceDisclosure(snapshot: snapshot, modelInput: input)
+        #expect(disclosure.evidenceTruncated)
+        #expect(disclosure.excludedUnanchored == 4)
+        #expect(disclosure.workerTextTruncated == 2)
+        #expect(disclosure.modelInputTruncated)
+        #expect(disclosure.rowsOmittedForContext == 30)
+        #expect(disclosure.rowsTextShortenedForContext == 0)
+    }
+}
+
+// MARK: - Citation validation
+
+@Suite("On-device answer citations")
+struct OnDeviceAnswerCitationTests {
+    @Test("Valid indices map to the sealed anchors in order, de-duplicated")
+    func mapsValidIndices() {
+        let rows = (1...3).map { evidenceRow($0, text: "消息\($0)") }
+        let result = AnswerRunResult.validating(
+            answer: "回答",
+            returnedIndices: [2, 2, 3],
+            input: modelInput(rows)
+        )
+        #expect(result.citations.map(\.archiveEvidence) == [
+            ArchiveEvidenceAnchor(importID: 7, sequence: 2),
+            ArchiveEvidenceAnchor(importID: 7, sequence: 3),
+        ])
+        #expect(result.hasVerifiableSource)
+    }
+
+    @Test("Out-of-range indices are dropped")
+    func dropsOutOfRange() {
+        let rows = (1...2).map { evidenceRow($0, text: "消息\($0)") }
+        let result = AnswerRunResult.validating(
+            answer: "回答",
+            returnedIndices: [0, -1, 3, 99, 1],
+            input: modelInput(rows)
+        )
+        #expect(result.citations.map(\.token) == [1])
+    }
+
+    @Test("All-invalid citations leave the answer explicitly unverified")
+    func allInvalidIsUnverified() {
+        let rows = (1...2).map { evidenceRow($0, text: "消息\($0)") }
+        let result = AnswerRunResult.validating(
+            answer: "回答",
+            returnedIndices: [7, 9],
+            input: modelInput(rows)
+        )
+        #expect(result.citations.isEmpty)
+        #expect(!result.hasVerifiableSource)
+    }
+
+    @Test("A citation exposes its own row's sender, time and text")
+    func citationCarriesRow() {
+        let rows = [evidenceRow(4, text: "原文", sender: "王经理")]
+        let result = AnswerRunResult.validating(
+            answer: "回答", returnedIndices: [1], input: modelInput(rows)
+        )
+        let citation = result.citations[0]
+        #expect(citation.sender == "王经理")
+        #expect(citation.text == "原文")
+        #expect(citation.timestamp == rows[0].timestamp)
+    }
+
+    @Test("A citation naming a row dropped for context is dropped, not resolved")
+    func omittedRowIsNotCitable() {
+        // 70 rows, 40 supplied. Token 55 exists in the sealed window and is
+        // the most tempting wrong answer: resolving it would reveal a row the
+        // model was never shown.
+        let rows = (1...70).map { evidenceRow($0, text: "消息\($0)") }
+        let input = modelInput(rows)
+        #expect(input.rows.count == 40)
+        let result = AnswerRunResult.validating(
+            answer: "回答", returnedIndices: [55, 1], input: input
+        )
+        #expect(result.citations.map(\.token) == [1])
+        #expect(result.citations[0].archiveEvidence == ArchiveEvidenceAnchor(importID: 7, sequence: 1))
+    }
+
+    @Test("Distinct citations carry distinct anchors and distinct reveal requests")
+    func distinctCitationsRevealDistinctRows() {
+        let rows = (1...3).map { evidenceRow($0, text: "消息\($0)") }
+        let result = AnswerRunResult.validating(
+            answer: "回答", returnedIndices: [1, 3], input: modelInput(rows)
+        )
+        #expect(result.citations.count == 2)
+        let targets: [ArchiveEvidenceAnchor?] = result.citations.map {
+            if case let .archiveRecord(importID, sequence, _) = $0.searchResult.target {
+                ArchiveEvidenceAnchor(importID: importID, sequence: sequence)
+            } else {
+                nil
+            }
+        }
+        #expect(targets == [
+            ArchiveEvidenceAnchor(importID: 7, sequence: 1),
+            ArchiveEvidenceAnchor(importID: 7, sequence: 3),
+        ])
+        #expect(Set(result.citations.map(\.id)).count == 2)
+    }
+
+    @Test("A citation reveals through the one existing search-result path")
+    func citationUsesCanonicalRevealShape() {
+        let rows = [evidenceRow(4, text: "原文")]
+        let citation = AnswerRunResult.validating(
+            answer: "回答", returnedIndices: [1], input: modelInput(rows)
+        ).citations[0]
+        #expect(citation.searchResult.target == .archiveRecord(
+            importID: 7, sequence: 4, provenance: .archiveAttributed
+        ))
+        #expect(citation.searchResult.provenance == .archiveAttributed)
+        #expect(citation.searchResult.conversationLabel == "Imported archive export")
+    }
+}
+
+// MARK: - Architectural boundaries
+
+/// The negative conditions are cheaper to state as source facts than to prove
+/// by injecting a network transport that must never be reachable.
+@Suite("On-device answer architectural boundary")
+struct OnDeviceAnswerBoundaryTests {
+    private static var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()          // WeChatCompanionTests
+            .deletingLastPathComponent()          // WeChatCompanion
+            .appendingPathComponent("WeChatCompanion")
+    }
+
+    private func source(_ name: String) -> String {
+        (try? String(contentsOf: Self.sourceRoot.appendingPathComponent(name), encoding: .utf8))
+            ?? ""
+    }
+
+    /// The Agents section of AppModel.swift, bounded by the next MARK so a
+    /// later section cannot silently satisfy (or break) these assertions.
+    private var agentsSection: String {
+        let appModel = source("AppModel.swift")
+        let start = "MARK: - Agents: on-device archive answer"
+        let end = "MARK: - Local persistence settings"
+        guard let from = appModel.range(of: start),
+              let to = appModel.range(of: end, range: from.upperBound..<appModel.endIndex)
+        else { return "" }
+        return String(appModel[from.upperBound..<to.lowerBound])
+    }
+
+    @Test("The answer path names no credential, network or remote provider")
+    func noProviderOrNetworkInAnswerPath() {
+        let runner = source("OnDeviceAnswerRunner.swift")
+        for forbidden in [
+            "URLSession", "Gemini", "Anthropic", "Keychain", "CredentialStoring",
+            "PrivateCloudComputeLanguageModel", "URLRequest",
+        ] {
+            #expect(!runner.contains(forbidden))
+        }
+    }
+
+    @Test("The app asks only the sealed evidence window and reveals only by search result")
+    func answerPathUsesSealedSeamsOnly() {
+        let body = agentsSection
+        guard !body.isEmpty else {
+            Issue.record("The Agents section marker is missing from AppModel.swift")
+            return
+        }
+        #expect(body.contains("answerEvidence.answerEvidence("))
+        #expect(body.contains("openSearchResult("))
+        // The answer path must not reach the Memory store, search, sync,
+        // summary, follow-up or reminder seams directly.
+        for forbidden in [
+            "messageHistory.", "localSearch", "memorySync.", "dailySummary.",
+            "followUpCandidates.", "reminderStore.",
+        ] {
+            #expect(!body.contains(forbidden))
+        }
+    }
+
+    @Test("The model runner never writes the question, answer or citations down")
+    func nothingPersisted() {
+        for text in [source("OnDeviceAnswerRunner.swift"), agentsSection, agentsView] {
+            for forbidden in ["UserDefaults", "FileManager", "write(", "JSONEncoder"] {
+                #expect(!text.contains(forbidden))
+            }
+        }
+    }
+
+    @Test("The prompt builder reads only presentation fields, never an anchor")
+    func promptNeverCarriesCanonicalIdentity() {
+        let runner = source("OnDeviceAnswerRunner.swift")
+        // The evidence window, whose rows do carry canonical identity, is not
+        // constructed anywhere in the prompt path: labels are rebuilt from
+        // the run-local row instead.
+        #expect(!runner.contains("row: AnswerEvidenceRow) -> String"))
+        #expect(runner.contains("label(token: Int, sender: String?, at timestamp: Date)"))
+        // The Agents view must not render an anchor as an identifier either.
+        #expect(!agentsView.contains("importID"))
+        #expect(!agentsView.contains("sequence"))
+    }
+
+    private var agentsView: String {
+        let content = source("ContentView.swift")
+        let start = "private struct AgentsView: View"
+        let end = "private struct PlaceholderView: View"
+        guard let from = content.range(of: start),
+              let to = content.range(of: end, range: from.upperBound..<content.endIndex)
+        else { return "" }
+        return String(content[from.upperBound..<to.lowerBound])
+    }
+}
+
+// MARK: - AppModel state
+
+@MainActor
+@Suite("On-device answer AppModel state")
+struct OnDeviceAnswerAppModelTests {
+    @Test("Ask reads evidence through the sealed runner with a real window")
+    func asksThroughSealedRunner() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        await model.askArchiveQuestion(
+            "问题？", now: Date(timeIntervalSince1970: 1_700_003_600)
+        )
+        #expect(evidence.calls.count == 1)
+        #expect(evidence.calls[0].messageLimit > 0)
+        #expect(evidence.calls[0].end > evidence.calls[0].start)
+    }
+
+    @Test("An empty question never reads evidence")
+    func emptyQuestionNoRun() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        await model.askArchiveQuestion("   \n ", now: Date())
+        #expect(evidence.calls.isEmpty)
+        #expect(model.answerPhase == .idle)
+    }
+
+    @Test("Asking while a run is in flight starts no second run")
+    func singleFlight() async {
+        let held = HeldEvidenceRunner()
+        let model = makeAnswerModel(evidence: held, answer: StubAnswerRunner())
+        let now = Date(timeIntervalSince1970: 1_700_003_600)
+        let first = Task { await model.askArchiveQuestion("第一个？", now: now) }
+        await held.waitUntilStarted()
+        await model.askArchiveQuestion("第二个？", now: now)
+        #expect(await held.calls == 1)
+        await held.finish(.failed(.workerFailed(state: "worker_unavailable")))
+        await first.value
+    }
+
+    @Test("An unavailable runtime never reads evidence")
+    func unavailableSkipsEvidence() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        model.setAnswerRuntimeAvailabilityForTesting(.unavailable(.appleIntelligenceNotEnabled))
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(evidence.calls.isEmpty)
+        #expect(model.answerPhase == .failed(.runtimeUnavailable(.appleIntelligenceNotEnabled)))
+    }
+
+    @Test("A cancel leaves a cancelled phase and no partial answer")
+    func cancelIsNotFailure() async {
+        let held = HeldEvidenceRunner()
+        let model = makeAnswerModel(evidence: held, answer: StubAnswerRunner())
+        let run = Task { await model.askArchiveQuestion("问题？", now: Date()) }
+        await held.waitUntilStarted()
+        model.cancelArchiveAnswer()
+        // The evidence is released *after* the cancel, on purpose: a parked
+        // continuation cannot be woken by cancellation, so this is also what
+        // proves the late answer cannot overwrite the cancelled phase.
+        await held.finish(.ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")])))
+        await run.value
+        #expect(model.answerPhase == .cancelled)
+        #expect(model.answerResult == nil)
+    }
+
+    @Test("A run that outlives the watchdog times out rather than hanging")
+    func timesOut() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner(hangs: true))
+        model.answerTimeout = 0.15
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(model.answerPhase == .timedOut)
+        #expect(model.answerResult == nil)
+    }
+
+    @Test("A withheld consent reports the sealed window's own failure, not a new one")
+    func consentFailureReusesSealedVocabulary() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [.failed(.consentWithheld)])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(model.answerPhase == .failed(.evidence(.consentWithheld)))
+    }
+
+    @Test("Asking starts no sync, summary or follow-up scan")
+    func asksNothingElse() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(model.memorySyncPhase == .idle)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(model.followUpPhase == .idle)
+        #expect(model.dailySummarySnapshot == nil)
+        #expect(model.followUpSnapshot == nil)
+    }
+
+    @Test("A completed answer survives leaving and returning to the tab")
+    func resultSurvivesNavigation() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
+        await model.askArchiveQuestion("问题？", now: Date())
+        model.selectedDestination = .chats
+        model.selectedDestination = .agents
+        #expect(model.answerPhase == .answered)
+        #expect(model.answerResult?.answer == "回答")
+    }
+
+    @Test("Two citations reveal their own exact rows through the same path")
+    func twoCitationsRevealOwnRows() async {
+        let rows = (1...3).map { evidenceRow($0, text: "消息\($0)") }
+        let evidence = RecordingEvidenceRunner(outcomes: [.ready(evidenceSnapshot(rows: rows))])
+        let model = makeAnswerModel(
+            evidence: evidence, answer: StubAnswerRunner(returnedIndices: [1, 3])
+        )
+        await model.askArchiveQuestion("问题？", now: Date())
+        let citations = try! #require(model.answerResult?.citations)
+        #expect(citations.count == 2)
+        await model.openArchiveAnswerCitation(citations[0])
+        #expect(model.answerRevealTarget == ArchiveEvidenceAnchor(importID: 7, sequence: 1))
+        await model.openArchiveAnswerCitation(citations[1])
+        #expect(model.answerRevealTarget == ArchiveEvidenceAnchor(importID: 7, sequence: 3))
+    }
+
+    @Test("Each runtime reason reads as itself, never as one blanket message")
+    func reasonsStayDistinct() {
+        let reasons: [AnswerRuntimeUnavailableReason] = [
+            .frameworkUnavailable, .deviceNotEligible,
+            .appleIntelligenceNotEnabled, .modelNotReady,
+        ]
+        #expect(Set(reasons.map(\.message)).count == reasons.count)
+        #expect(!reasons.map(\.message).contains {
+            $0.localizedCaseInsensitiveContains("api key")
+                || $0.localizedCaseInsensitiveContains("remote")
+        })
+    }
+
+    @Test("A successful run keeps its answer and citation anchors in memory only")
+    func answeredKeepsResult() async {
+        let rows = (1...2).map { evidenceRow($0, text: "消息\($0)") }
+        let evidence = RecordingEvidenceRunner(outcomes: [.ready(evidenceSnapshot(rows: rows))])
+        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner(returnedIndices: [1]))
+        await model.askArchiveQuestion(
+            "问题？", now: Date(timeIntervalSince1970: 1_700_003_600)
+        )
+        #expect(model.answerPhase == .answered)
+        let result = try! #require(model.answerResult)
+        #expect(result.citations.map(\.archiveEvidence) == [
+            ArchiveEvidenceAnchor(importID: 7, sequence: 1)
+        ])
+    }
+
+    @Test("A citation click reveals the exact Archive row through the existing path")
+    func citationClickReveals() async {
+        // Real reveal, real store: the citation has to be able to name a row
+        // that actually exists, or this would only be proving that the anchor
+        // survives a dictionary lookup. Mirrors the B8 exact-reveal fixture.
+        let history = makeTestMessageHistory()
+        await history.setEnabled(true)
+        let transcript = try! WeChatNativeTranscriptParser.parse(
+            "·林晓\n2026年9月7日 20:35\nanswer-reveal-row\n\n",
+            timeZone: TimeZone(identifier: "Asia/Shanghai")!
+        )
+        let imported = try! await history.persistArchiveEvidence(
+            transcript: transcript,
+            conversationKey: ArchiveConversationKey("answer-reveal"),
+            importedAt: Date()
+        )
+        guard case .inserted(let importID, _) = imported else {
+            Issue.record("expected an archive import")
+            return
+        }
+        let hit = try! #require(
+            await history.searchLocalMessages("answer-reveal-row").results.first
+        )
+        guard case .archiveRecord(let hitImport, let sequence, _) = hit.target else {
+            Issue.record("expected an exact archive target")
+            return
+        }
+        let rows = (1...2).map {
+            AnswerEvidenceRow(
+                canonicalMessageID: "msg-\($0)",
+                canonicalConversationID: "conv-1",
+                timestamp: Date(timeIntervalSince1970: 1_700_000_000 + Double($0)),
+                timestampKind: "source_created",
+                sender: "林晓",
+                text: "消息\($0)",
+                textTruncated: false,
+                archiveEvidence: ArchiveEvidenceAnchor(importID: hitImport, sequence: sequence)
+            )
+        }
+        let evidence = RecordingEvidenceRunner(outcomes: [.ready(evidenceSnapshot(rows: rows))])
+        let model = makeAnswerModel(
+            evidence: evidence,
+            answer: StubAnswerRunner(returnedIndices: [2]),
+            history: history
+        )
+        await model.askArchiveQuestion(
+            "问题？", now: Date(timeIntervalSince1970: 1_700_003_600)
+        )
+        let result = try! #require(model.answerResult)
+        let citation = try! #require(result.citations.first)
+        await model.openArchiveAnswerCitation(citation)
+        #expect(model.selectedDestination == .chats)
+        #expect(model.answerRevealTarget == ArchiveEvidenceAnchor(importID: hitImport, sequence: sequence))
+        #expect(model.selectedArchiveImportID == hitImport)
+        #expect(model.selectedArchiveIsHitWindow)
+        #expect(model.contextRevealRequest?.anchor
+                == .archiveRecord(importID: hitImport, sequence: sequence))
+        // Reveal is navigation only: no sync, scan or summary was started.
+        #expect(model.memorySyncPhase == .idle)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(model.followUpPhase == .idle)
+    }
+
+    @Test("Nothing in the answer path writes the question or the answer")
+    func persistsNothing() async {
+        let defaults = answerTestDefaults()
+        let model = AppModel(
+            messageHistory: makeTestMessageHistory(),
+            shareInbox: nil,
+            consentDefaults: defaults,
+            memorySync: UnavailableMemorySyncRunner(),
+            dailySummary: UnavailableDailySummaryRunner(),
+            followUpCandidates: UnavailableFollowUpRunner(),
+            answerEvidence: RecordingEvidenceRunner(outcomes: [
+                .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+            ]),
+            answerRunner: StubAnswerRunner()
+        )
+        await model.askArchiveQuestion("私密问题", now: Date())
+        for (_, value) in defaults.dictionaryRepresentation() {
+            let text = String(describing: value)
+            #expect(!text.contains("私密问题"))
+            #expect(!text.contains("回答"))
+        }
+    }
+}
+
+// MARK: - Run lifecycle
+
+@MainActor
+@Suite("On-device answer run lifecycle")
+struct OnDeviceAnswerRunLifecycleTests {
+    @Test("Production-shaped cancellation ends cancelled, never failed")
+    func productionCancellationIsCancelled() async throws {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let model = makeAnswerModel(
+            evidence: evidence, answer: ProductionShapedCancellingRunner()
+        )
+        model.answerTimeout = 30
+        let run = Task { await model.askArchiveQuestion("问题？", now: Date()) }
+        try await Task.sleep(for: .milliseconds(300))
+        model.cancelArchiveAnswer()
+        await run.value
+        #expect(model.answerPhase == .cancelled)
+        #expect(model.answerResult == nil)
+    }
+
+    @Test("A new Ask cannot start while a cancelled run is still unwinding")
+    func leaseBelongsToTheLiveTask() async throws {
+        let runner = ControllableAnswerRunner()
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")])),
+            .ready(evidenceSnapshot(rows: [evidenceRow(2, text: "另一条")])),
+        ])
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        model.answerTimeout = 30
+        let now = Date(timeIntervalSince1970: 1_700_003_600)
+
+        let runA = Task { await model.askArchiveQuestion("A？", now: now) }
+        await runner.waitForCallCount(1)
+        model.cancelArchiveAnswer()
+
+        let runB = Task { await model.askArchiveQuestion("B？", now: now) }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await runner.callCount == 1)
+        #expect(await evidence.calls.count == 1)
+
+        await runner.releaseAll()
+        await runA.value
+        await runB.value
+        #expect(model.answerPhase == .cancelled)
+        #expect(model.answerResult == nil)
+
+        let runC = Task { await model.askArchiveQuestion("C？", now: now) }
+        await runner.waitForCallCount(2)
+        await runner.releaseAll()
+        await runC.value
+        #expect(model.answerPhase == .answered)
+        #expect(model.answerResult?.answer == "回答-2")
+    }
+
+    /// One user-visible deadline. The packaged worker's watchdog bounds a
+    /// child process and cannot time a run that is inside the model, so the two
+    /// are not the same timer: the answer deadline comes first and the worker
+    /// kill-switch is a deliberately later ceiling that must never win the
+    /// race and report a timeout as an evidence failure.
+    @Test("The packaged worker kill-switch sits strictly later than the answer deadline")
+    func workerKillSwitchIsLater() {
+        let model = makeAnswerModel(
+            evidence: UnavailableAnswerEvidenceRunner(), answer: UnavailableAnswerRunner()
+        )
+        let worker = PackagedMemorySyncRunner(
+            workerURL: URL(fileURLWithPath: "/dev/null"),
+            storeURL: URL(fileURLWithPath: "/dev/null"),
+            messageStoreURL: URL(fileURLWithPath: "/dev/null")
+        )
+        #expect(worker.answerEvidenceTimeout > model.answerTimeout)
+        // The sealed consumers keep the untouched value: a shared timer moving
+        // is how a later change would quietly re-time Summary or Reminders.
+        #expect(worker.timeout == 120)
+    }
+
+    @Test("A run that overruns the deadline is timed out every time, not sometimes failed")
+    func nearDeadlineIsDeterministic() async throws {
+        for _ in 0..<5 {
+            let evidence = RecordingEvidenceRunner(outcomes: [
+                .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+            ])
+            let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner(hangs: true))
+            model.answerTimeout = 0.15
+            await model.askArchiveQuestion("问题？", now: Date())
+            #expect(model.answerPhase == .timedOut)
+            #expect(model.answerResult == nil)
+        }
+    }
+
+    /// The question is part of the hard budget. A question that cannot fit is
+    /// refused before anything is read or generated: it is never shortened to
+    /// make room, and it never costs a worker round trip.
+    @Test("A question too large for the context is refused before any work starts")
+    func oversizedQuestionIsRefused() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let runner = StubAnswerRunner()
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        await model.askArchiveQuestion(
+            String(repeating: "问", count: 400_000), now: Date()
+        )
+        #expect(evidence.calls.isEmpty)
+        #expect(await runner.callCount == 0)
+        #expect(model.answerResult == nil)
+        guard case .failed(let failure) = model.answerPhase else {
+            Issue.record("expected a dedicated failure, got \(model.answerPhase)")
+            return
+        }
+    }
+
+    /// The Agents state machine owns its own single deadline and must not
+    /// share the worker's unsynchronized flag across execution contexts.
+    @Test("The answer state machine shares no watchdog flag with the packaged worker")
+    func noSharedExpiryFlag() {
+        let appModel = (try? String(
+            contentsOf: Self.sourceRoot.appendingPathComponent("AppModel.swift"), encoding: .utf8
+        )) ?? ""
+        guard !appModel.isEmpty else {
+            Issue.record("AppModel.swift could not be read")
+            return
+        }
+        let start = "MARK: - Agents: on-device archive answer"
+        guard let from = appModel.range(of: start) else {
+            Issue.record("the Agents section marker is missing")
+            return
+        }
+        #expect(!appModel[from.lowerBound...].contains("Expiry("))
+    }
+
+    private static var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("WeChatCompanion")
+    }
+}

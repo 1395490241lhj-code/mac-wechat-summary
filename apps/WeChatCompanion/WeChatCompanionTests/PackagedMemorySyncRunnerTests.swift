@@ -946,6 +946,63 @@ struct PackagedMemorySyncRunnerTests {
         #expect(outcome == .failed(.ingestionFailed(state: "worker_timed_out")))
     }
 
+    /// The Agents kill-switch is scoped to `answer_evidence` alone.
+    ///
+    /// Asserting only that `answerEvidenceTimeout > answerTimeout` cannot catch
+    /// this: the property stays correct even when it is handed to the wrong
+    /// operation. These observe the real deadline each operation actually uses:
+    /// every one runs against the same slow stub, with a base timeout that
+    /// fires well before the stub answers. Anything bounded by the default is
+    /// killed and reports `worker_timed_out`. Only `answerEvidence` is allowed
+    /// the later safety ceiling, so it must still be waiting when the stub
+    /// replies -- and therefore must not report a timeout at all.
+    @Test
+    func onlyAnswerEvidenceGetsTheLaterWorkerCeiling() async throws {
+        // The stub answers after 1s. The default is 0.3s, so the default always
+        // fires first. The Agents ceiling is `timeout + 90s`, so it never does.
+        // The margin is deliberately not shrunk: shrinking it would make the
+        // test pass on a wrong constant instead of on correct wiring.
+        let stub = try StubWorker(replying: successReply, sleepSeconds: 1)
+        defer { stub.cleanup() }
+        let store = temporaryStore()
+        let messages = store.deletingLastPathComponent().appendingPathComponent("messages.sqlite")
+        var runner = PackagedMemorySyncRunner(
+            workerURL: stub.executable, storeURL: store, messageStoreURL: messages
+        )
+        runner.timeout = 0.3
+
+        let window = (
+            start: Date(timeIntervalSince1970: 1_700_000_000),
+            end: Date(timeIntervalSince1970: 1_700_003_600)
+        )
+
+        // The sealed consumers keep the default: each one is bounded by
+        // `timeout` and none of them inherits the Agents margin.
+        #expect(
+            await runner.sync(source: .visual)
+                == .failed(.ingestionFailed(state: "worker_timed_out"))
+        )
+        #expect(
+            await runner.prepare(source: .archive, start: window.start, end: window.end, messageLimit: 200)
+                == .failed(.workerFailed(state: "worker_timed_out"))
+        )
+        #expect(
+            await runner.scan(
+                source: .archive, start: window.start, end: window.end, messageLimit: 200,
+                candidateLimit: 50
+            ) == .failed(.workerFailed(state: "worker_timed_out"))
+        )
+        // Outlasts the default: still waiting when the stub replies, so it can
+        // only fail on its own validation, never on a timeout it outran.
+        let evidence = await runner.answerEvidence(
+            start: window.start, end: window.end, messageLimit: 200
+        )
+        if case .failed(.workerFailed(let state)) = evidence {
+            #expect(state != "worker_timed_out")
+        }
+        #expect(runner.answerEvidenceTimeout > runner.timeout)
+    }
+
     // MARK: - Freshness mapping
 
     @Test

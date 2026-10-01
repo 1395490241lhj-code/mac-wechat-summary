@@ -23,11 +23,32 @@ import Foundation
 ///   local one. A path, a chat, or an interpreter traceback never becomes a
 ///   user-visible string.
 /// One mutable bit shared with the watchdog queue.
-private final class Expiry: @unchecked Sendable {
+final class Expiry: @unchecked Sendable {
     var fired = false
 }
 
 // MARK: - The evidence window
+
+/// The seam through which the sealed evidence window is read.
+///
+/// Extracted from `PackagedMemorySyncRunner` so a caller that only needs an
+/// answer's evidence is not also handed the sync, summary and follow-up seams.
+/// The implementation is unchanged: the same packaged worker answers it.
+protocol AnswerEvidenceRunning: Sendable {
+    func answerEvidence(
+        start: Date, end: Date, messageLimit: Int
+    ) async -> AnswerEvidenceOutcome
+}
+
+/// The honest evidence window for a build without the packaged worker: it
+/// reports the packaging gap rather than faking a window.
+struct UnavailableAnswerEvidenceRunner: AnswerEvidenceRunning {
+    func answerEvidence(
+        start: Date, end: Date, messageLimit: Int
+    ) async -> AnswerEvidenceOutcome {
+        .failed(.workerFailed(state: "worker_unavailable"))
+    }
+}
 
 /// One anchored Archive row. There is no anchorless form: a row that cannot
 /// be named is not returned, because the window exists so a later answer can
@@ -78,7 +99,9 @@ enum AnswerEvidenceOutcome: Equatable, Sendable {
     case failed(AnswerEvidenceFailure)
 }
 
-struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowUpCandidateRunning {
+struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowUpCandidateRunning,
+    AnswerEvidenceRunning
+{
     /// Where the worker sits inside the bundle. It is a nested *bundle*, not a
     /// loose directory: codesign refuses to seal an app that contains an
     /// unsigned tree of plain files, and a helper .app carries its own seal.
@@ -88,6 +111,19 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
     let storeURL: URL
     let messageStoreURL: URL
     var timeout: TimeInterval = 120
+
+    /// The kill-switch an answer's evidence read gets, which is deliberately
+    /// *later* than the answer's own user-visible deadline.
+    ///
+    /// The two are not the same timer and must not share an instant. The
+    /// answer deadline times the whole run -- evidence read and model call --
+    /// and has to win, or a slow read would surface as a worker failure rather
+    /// than as the timeout the person is waiting through. This one only exists
+    /// to stop a wedged child, and the margin is wide enough that it is never
+    /// the thing that decides. It is scoped to `answer_evidence` alone: the
+    /// sealed sync, summary and follow-up reads keep `timeout` unchanged.
+    static let answerEvidenceTimeoutMargin: TimeInterval = 90
+    var answerEvidenceTimeout: TimeInterval { timeout + Self.answerEvidenceTimeoutMargin }
 
     /// True when this process is a test host rather than the shipped app.
     ///
@@ -410,7 +446,7 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
         request["end"] = end.timeIntervalSince1970
         request["message_limit"] = messageLimit
 
-        switch invoke(request) {
+        switch invoke(request, timeout: answerEvidenceTimeout) {
         case .failure(let failure):
             return .failed(answerEvidenceFailure(fromLocal: failure))
         case .success(let reply):
@@ -627,7 +663,11 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
         }
     }
 
-    private func invoke(_ request: [String: Any]) -> Result<[String: Any], MemorySyncFailure> {
+    private func invoke(
+        _ request: [String: Any],
+        timeout overrideTimeout: TimeInterval? = nil
+    ) -> Result<[String: Any], MemorySyncFailure> {
+        let deadline = overrideTimeout ?? timeout
         guard let payload = try? JSONSerialization.data(withJSONObject: request) else {
             return .failure(.ingestionFailed(state: "request_not_encodable"))
         }
@@ -658,7 +698,7 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
                 process.terminate()
             }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: watchdog)
+        DispatchQueue.global().asyncAfter(deadline: .now() + deadline, execute: watchdog)
         defer { watchdog.cancel() }
 
         // Read before waiting: a reply larger than the pipe buffer would

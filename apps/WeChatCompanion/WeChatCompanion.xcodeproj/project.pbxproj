@@ -45,6 +45,7 @@
 		A0000000000000000000B2 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B2 /* RuntimeEnvironment.swift */; };
 		A0000000000000000000009B /* MemorySync.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009B /* MemorySync.swift */; };
 		A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009E /* PackagedMemorySyncRunner.swift */; };
+		A0000000000000000000007A2 /* OnDeviceAnswerRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000007A2 /* OnDeviceAnswerRunner.swift */; };
 		A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009D /* MemoryStoreLocation.swift */; };
 		A00000000000000000000098 /* LocalMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000098 /* LocalMessageHistory.swift */; };
 		B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000099 /* LocalPersistenceConsentTests.swift */; };
@@ -52,6 +53,7 @@
 		B0000000000000000000A9 /* TestMessageHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000A9 /* TestMessageHistory.swift */; };
 		B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000B1 /* MessageStoreIsolationTests.swift */; };
 		B0000000000000000000009C /* MemorySyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009C /* MemorySyncTests.swift */; };
+		B0000000000000000000007A1 /* OnDeviceArchiveAnswerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000007A1 /* OnDeviceArchiveAnswerTests.swift */; };
 		B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */; };
 		A00000000000000000000091 /* MessageRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000091 /* MessageRecords.swift */; };
 		A00000000000000000000092 /* FrameReconciler.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000092 /* FrameReconciler.swift */; };
@@ -147,6 +149,7 @@
 		C0000000000000000000009A /* LocalPersistenceConsentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalPersistenceConsentState.swift; sourceTree = "<group>"; };
 		C0000000000000000000009B /* MemorySync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MemorySync.swift; sourceTree = "<group>"; };
 		C0000000000000000000009E /* PackagedMemorySyncRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/PackagedMemorySyncRunner.swift; sourceTree = "<group>"; };
+		C0000000000000000000007A2 /* OnDeviceAnswerRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnDeviceAnswerRunner.swift; sourceTree = "<group>"; };
 		C0000000000000000000009D /* MemoryStoreLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MemoryStoreLocation.swift; sourceTree = "<group>"; };
 		C00000000000000000000098 /* LocalMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/LocalMessageHistory.swift; sourceTree = "<group>"; };
 		C00000000000000000000099 /* LocalPersistenceConsentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalPersistenceConsentTests.swift; sourceTree = "<group>"; };
@@ -154,6 +157,7 @@
 		C0000000000000000000A9 /* TestMessageHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestMessageHistory.swift; sourceTree = "<group>"; };
 		C0000000000000000000B1 /* MessageStoreIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageStoreIsolationTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009C /* MemorySyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySyncTests.swift; sourceTree = "<group>"; };
+		C0000000000000000000007A1 /* OnDeviceArchiveAnswerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnDeviceArchiveAnswerTests.swift; sourceTree = "<group>"; };
 		C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PackagedMemorySyncRunnerTests.swift; sourceTree = "<group>"; };
 		C00000000000000000000091 /* MessageRecords.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/MessageRecords.swift; sourceTree = "<group>"; };
 		C00000000000000000000092 /* FrameReconciler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ingestion/FrameReconciler.swift; sourceTree = "<group>"; };
@@ -244,6 +248,7 @@
 				C0000000000000000000009A /* LocalPersistenceConsentState.swift */,
 				C0000000000000000000009B /* MemorySync.swift */,
 				C0000000000000000000009E /* PackagedMemorySyncRunner.swift */,
+				C0000000000000000000007A2 /* OnDeviceAnswerRunner.swift */,
 				C0000000000000000000009D /* MemoryStoreLocation.swift */,
 				C00000000000000000000A4 /* ArchiveEvidence.swift */,
 				C00000000000000000000A6 /* WeChatArchiveImportService.swift */,
@@ -278,6 +283,7 @@
 				C00000000000000000000096 /* MessageIngestionTests.swift */,
 				C00000000000000000000099 /* LocalPersistenceConsentTests.swift */,
 				C0000000000000000000009C /* MemorySyncTests.swift */,
+				C0000000000000000000007A1 /* OnDeviceArchiveAnswerTests.swift */,
 				C0000000000000000000A9 /* TestMessageHistory.swift */,
 				C0000000000000000000B1 /* MessageStoreIsolationTests.swift */,
 				C0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift */,
@@ -492,6 +498,7 @@
 				A0000000000000000000009A /* LocalPersistenceConsentState.swift in Sources */,
 				A0000000000000000000009B /* MemorySync.swift in Sources */,
 				A0000000000000000000009E /* PackagedMemorySyncRunner.swift in Sources */,
+				A0000000000000000000007A2 /* OnDeviceAnswerRunner.swift in Sources */,
 				A0000000000000000000009D /* MemoryStoreLocation.swift in Sources */,
 				A00000000000000000000A4 /* ArchiveEvidence.swift in Sources */,
 				A00000000000000000000A6 /* WeChatArchiveImportService.swift in Sources */,
@@ -524,6 +531,7 @@
 				B00000000000000000000096 /* MessageIngestionTests.swift in Sources */,
 				B00000000000000000000099 /* LocalPersistenceConsentTests.swift in Sources */,
 				B0000000000000000000009C /* MemorySyncTests.swift in Sources */,
+				B0000000000000000000007A1 /* OnDeviceArchiveAnswerTests.swift in Sources */,
 				B0000000000000000000A9 /* TestMessageHistory.swift in Sources */,
 				B0000000000000000000B1 /* MessageStoreIsolationTests.swift in Sources */,
 				B0000000000000000000009F /* PackagedMemorySyncRunnerTests.swift in Sources */,

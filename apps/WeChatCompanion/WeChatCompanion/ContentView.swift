@@ -25,6 +25,8 @@ struct ContentView: View {
                 DailySummaryView(model: model)
             case .reminders:
                 RemindersView(model: model)
+            case .agents:
+                AgentsView(model: model)
             case .settings:
                 SettingsView(model: model)
             case .diagnostics:
@@ -3221,6 +3223,244 @@ private struct LocalSearchResultRow: View {
         }
         .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// On-Device Archive Answer v1. One question, one window, one answer.
+///
+/// The question buffer is this view's own @State, exactly as Search's query
+/// is: it is not on the model, so nothing can write it to disk and a relaunch
+/// has nothing to restore.
+private struct AgentsView: View {
+    @Bindable var model: AppModel
+    @State private var question = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Agents")
+                        .font(.largeTitle.bold())
+                    Text("One question about already-synced Archive Memory, answered on this Mac. No API key, no remote processing, and nothing kept after you quit.")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let reason = model.answerAvailability.reason {
+                    unavailable(reason)
+                } else {
+                    controls
+                    state
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: 920, alignment: .leading)
+        }
+        .navigationTitle("Agents")
+    }
+
+    private func unavailable(_ reason: AnswerRuntimeUnavailableReason) -> some View {
+        ContentUnavailableView {
+            Label("On-Device Answer Is Unavailable", systemImage: "cpu")
+        } description: {
+            Text(reason.message)
+        } actions: {
+            Text("This feature uses only the model built into macOS. It has no provider, key or remote fallback.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var controls: some View {
+        GroupBox("Question") {
+            VStack(alignment: .leading, spacing: 12) {
+                TextField("Ask about the selected window", text: $question, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                    .accessibilityLabel("Question about the Archive")
+                    .disabled(model.answerPhase.isRunning)
+
+                HStack {
+                    Menu(model.answerWindow.label) {
+                        ForEach(DailySummaryWindow.allCases) { window in
+                            Button {
+                                model.setAnswerWindow(window)
+                            } label: {
+                                if window == model.answerWindow {
+                                    Label(window.label, systemImage: "checkmark")
+                                } else {
+                                    Text(window.label)
+                                }
+                            }
+                        }
+                    }
+                    .disabled(model.answerPhase.isRunning)
+                    .accessibilityLabel("Time window")
+
+                    Spacer()
+
+                    if model.isAnswerRunActive {
+                        Button("Cancel", role: .cancel) {
+                            model.cancelArchiveAnswer()
+                        }
+                    } else {
+                        Button("Ask", systemImage: "sparkle") {
+                            let asked = question
+                            Task { await model.askArchiveQuestion(asked) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canAskArchiveQuestion || question.isEmpty)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    @ViewBuilder
+    private var state: some View {
+        switch model.answerPhase {
+        case .idle:
+            ContentUnavailableView(
+                "No Answer Yet",
+                systemImage: "text.bubble",
+                description: Text("Ask one question about the selected window. There is no history: the answer is kept only while the app stays open.")
+            )
+        case .running:
+            HStack(spacing: 10) {
+                ProgressView()
+                Text("Reading the Archive window and asking the on-device model…")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 12)
+        case .cancelled:
+            notice("Cancelled", "The run was cancelled. No answer was kept.", "xmark.circle")
+        case .timedOut:
+            notice("Timed Out", "The on-device model took too long and was stopped.", "clock.badge.xmark")
+        case .failed(let failure):
+            notice("No Answer", failure.message, "exclamationmark.triangle")
+        case .answered:
+            if let result = model.answerResult {
+                answer(result)
+            }
+        }
+    }
+
+    private func notice(_ title: String, _ message: String, _ symbol: String) -> some View {
+        ContentUnavailableView {
+            Label(title, systemImage: symbol)
+        } description: {
+            Text(message)
+        }
+    }
+
+    private func answer(_ result: AnswerRunResult) -> some View {
+        let disclosure = model.answerSnapshot.map {
+            AnswerEvidenceDisclosure(snapshot: $0, modelInput: result.input)
+        }
+        return VStack(alignment: .leading, spacing: 20) {
+            GroupBox("Answer") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(result.answer)
+                        .textSelection(.enabled)
+                    if !result.hasVerifiableSource {
+                        Label(
+                            "Unverified: no supplied evidence row backed this answer, so it is not grounded in the Archive.",
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+            }
+
+            if result.hasVerifiableSource {
+                GroupBox("Sources") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(result.citations) { citation in
+                            Button {
+                                Task { await model.openArchiveAnswerCitation(citation) }
+                            } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("[\(citation.token)]")
+                                        .monospacedDigit()
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(citation.text)
+                                            .lineLimit(2)
+                                        Text(
+                                            (citation.sender ?? "Unknown sender") + " · "
+                                                + citation.timestamp.formatted(
+                                                    date: .abbreviated, time: .shortened
+                                                )
+                                        )
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(
+                                "Reveal source \(citation.token) in the Archive"
+                            )
+                            if citation.id != result.citations.last?.id {
+                                Divider()
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+
+            if let disclosure, !disclosure.lines.isEmpty {
+                GroupBox("Evidence Completeness") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(disclosure.lines, id: \.self) { line in
+                            Label(line, systemImage: "info.circle")
+                        }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+                }
+            }
+
+            if let snapshot = model.answerSnapshot {
+                GroupBox("Source Window") {
+                    VStack(spacing: 0) {
+                        summaryRow(
+                            "Window",
+                            snapshot.start.formatted(date: .abbreviated, time: .shortened)
+                                + " – "
+                                + snapshot.end.formatted(date: .abbreviated, time: .shortened)
+                        )
+                        Divider()
+                        summaryRow("Coverage", snapshot.coverage.status)
+                        Divider()
+                        summaryRow("Rows read", String(snapshot.returnedEvidence))
+                        if let freshness = snapshot.freshness,
+                           let lastSync = freshness.lastSuccessfulSync {
+                            Divider()
+                            summaryRow(
+                                "Last Memory sync",
+                                lastSync.formatted(date: .abbreviated, time: .shortened)
+                            )
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    private func summaryRow(_ label: String, _ value: String) -> some View {
+        LabeledContent(label) {
+            Text(value)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 10)
     }
 }
 
