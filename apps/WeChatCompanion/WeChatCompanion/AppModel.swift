@@ -647,6 +647,10 @@ final class AppModel {
     func askArchiveQuestion(_ question: String, now: Date = Date()) async {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isAnswerRunActive else { return }
+        // Re-read before deciding. The cached copy may predate the model
+        // becoming ready, and this is the last point at which finding out
+        // costs the user nothing.
+        refreshAnswerRuntimeAvailability()
         guard answerAvailability.isAvailable else {
             answerResult = nil
             answerSnapshot = nil
@@ -774,11 +778,22 @@ final class AppModel {
         await openSearchResult(citation.searchResult)
     }
 
-#if DEBUG
-    func setAnswerRuntimeAvailabilityForTesting(_ availability: AnswerRuntimeAvailability) {
-        answerAvailability = availability
+    /// Re-reads the runtime's own answer instead of trusting the copy taken in
+    /// the initializer. A local model that becomes ready mid-session -- Apple
+    /// Intelligence switched on, or the model finishing its first download --
+    /// is a system fact that changes while the app runs, and reading it once at
+    /// launch made a relaunch the only way to notice.
+    ///
+    /// Synchronous and cheap on purpose: the runtime's query is a local
+    /// framework read, so this belongs on the two boundaries a user can
+    /// actually observe -- appearing on the Agents surface, and pressing Ask.
+    /// There is no poller, because nothing about a timer is more truthful than
+    /// asking at the moment the answer matters. It touches only availability,
+    /// never the phase, the result or the live task, so refreshing mid-run
+    /// cannot cancel or rewrite a run the user is watching.
+    func refreshAnswerRuntimeAvailability() {
+        answerAvailability = answerRunner.currentAvailability()
     }
-#endif
 
     // MARK: - Local persistence settings
 

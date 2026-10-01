@@ -249,6 +249,45 @@ private func makeAnswerModel(
     )
 }
 
+/// Availability that can change mid-session, which is the whole point: the
+/// sealed stubs above pin one value forever, and a runner whose availability is
+/// decided once at construction cannot express modelNotReady -> available.
+/// Unchecked Sendable rather than an actor because currentAvailability() is
+/// nonisolated and must stay the cheap synchronous read production makes; every
+/// mutation here happens on the main actor in these tests.
+private final class MutableAvailabilityRunner: AnswerRunning, @unchecked Sendable {
+    private var availability: AnswerRuntimeAvailability
+    private(set) var availabilityQueries = 0
+    private(set) var answerCalls = 0
+
+    init(_ availability: AnswerRuntimeAvailability) {
+        self.availability = availability
+    }
+
+    func setAvailability(_ next: AnswerRuntimeAvailability) {
+        availability = next
+    }
+
+    func currentAvailability() -> AnswerRuntimeAvailability {
+        availabilityQueries += 1
+        return availability
+    }
+
+    func answer(
+        question: String, snapshot: AnswerEvidenceSnapshot
+    ) async throws -> AnswerRunResult {
+        answerCalls += 1
+        return try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [1],
+            input: AnswerModelInput.build(
+                question: question, rows: snapshot.rows, contextSize: 8_192
+            )
+        )
+    }
+}
+
 // MARK: - Runtime input shaping
 
 @Suite("On-device answer runtime input")
@@ -860,10 +899,14 @@ struct OnDeviceAnswerAppModelTests {
         let evidence = RecordingEvidenceRunner(outcomes: [
             .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
         ])
-        let model = makeAnswerModel(evidence: evidence, answer: StubAnswerRunner())
-        model.setAnswerRuntimeAvailabilityForTesting(.unavailable(.appleIntelligenceNotEnabled))
+        // The stub now reports unavailable for real, rather than being told so
+        // through the cached copy: production re-reads the runtime before a run,
+        // so a value injected behind the runtime's back no longer describes it.
+        let runner = MutableAvailabilityRunner(.unavailable(.appleIntelligenceNotEnabled))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
         await model.askArchiveQuestion("问题？", now: Date())
         #expect(evidence.calls.isEmpty)
+        #expect(runner.answerCalls == 0)
         #expect(model.answerPhase == .failed(.runtimeUnavailable(.appleIntelligenceNotEnabled)))
     }
 
@@ -1191,6 +1234,241 @@ struct OnDeviceAnswerRunLifecycleTests {
             return
         }
         #expect(!appModel[from.lowerBound...].contains("Expiry("))
+    }
+
+    private static var sourceRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("WeChatCompanion")
+    }
+}
+
+// MARK: - Availability refresh
+
+/// The defect this suite holds shut: availability was read once in AppModel's
+/// initializer and never again, so a local model that became ready during the
+/// session stayed invisible until a relaunch. The runtime's own answer is
+/// always fresh; only the host's cached copy was stale.
+@MainActor
+@Suite("On-device answer availability refresh")
+struct OnDeviceAnswerAvailabilityRefreshTests {
+    @Test("AppModel starts from the runtime's answer, not a hardcoded state")
+    func startsFromRuntime() {
+        let runner = MutableAvailabilityRunner(.unavailable(.modelNotReady))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        #expect(model.answerAvailability == .unavailable(.modelNotReady))
+        #expect(!model.canAskArchiveQuestion)
+    }
+
+    @Test("A model that becomes ready is picked up without a relaunch")
+    func picksUpReadiness() {
+        let runner = MutableAvailabilityRunner(.unavailable(.modelNotReady))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        #expect(!model.canAskArchiveQuestion)
+
+        runner.setAvailability(.available(contextSize: 8_192))
+        model.refreshAnswerRuntimeAvailability()
+
+        #expect(model.answerAvailability == .available(contextSize: 8_192))
+        #expect(model.canAskArchiveQuestion)
+    }
+
+    @Test("Each unavailable reason is reported as itself, not one generic state")
+    func reasonsAreNotCollapsed() {
+        let runner = MutableAvailabilityRunner(.unavailable(.modelNotReady))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        for reason: AnswerRuntimeUnavailableReason in [
+            .modelNotReady,
+            .appleIntelligenceNotEnabled,
+            .deviceNotEligible,
+            .frameworkUnavailable,
+        ] {
+            runner.setAvailability(.unavailable(reason))
+            model.refreshAnswerRuntimeAvailability()
+            #expect(model.answerAvailability == .unavailable(reason))
+            #expect(model.answerAvailability.reason == reason)
+        }
+    }
+
+    @Test("A reason change while still unavailable is not hidden by the old one")
+    func unavailableReasonChangesTruthfully() {
+        let runner = MutableAvailabilityRunner(.unavailable(.appleIntelligenceNotEnabled))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        runner.setAvailability(.unavailable(.modelNotReady))
+        model.refreshAnswerRuntimeAvailability()
+        #expect(model.answerAvailability.reason == .modelNotReady)
+    }
+
+    @Test("A model that stops being available is reflected too")
+    func availabilityCanBeLost() {
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        #expect(model.canAskArchiveQuestion)
+        runner.setAvailability(.unavailable(.modelNotReady))
+        model.refreshAnswerRuntimeAvailability()
+        #expect(model.answerAvailability == .unavailable(.modelNotReady))
+        #expect(!model.canAskArchiveQuestion)
+    }
+
+    @Test("Refreshing repeatedly is a cheap query, not growing work")
+    func refreshIsIdempotent() {
+        let runner = MutableAvailabilityRunner(.unavailable(.modelNotReady))
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(outcomes: []),
+            answer: runner
+        )
+        for _ in 0..<5 { model.refreshAnswerRuntimeAvailability() }
+        #expect(model.answerAvailability == .unavailable(.modelNotReady))
+        #expect(runner.availabilityQueries == 1 + 5)
+    }
+
+    @Test("Refreshing never discards an answer the user is reading")
+    func refreshKeepsACompletedAnswer() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(model.answerPhase == .answered)
+        let answered = model.answerResult
+
+        model.refreshAnswerRuntimeAvailability()
+        model.refreshAnswerRuntimeAvailability()
+
+        #expect(model.answerPhase == .answered)
+        #expect(model.answerResult == answered)
+        #expect(model.answerResult != nil)
+    }
+
+    @Test("A refresh during a live run neither cancels it nor changes its phase")
+    func refreshDoesNotDisturbAnActiveRun() async throws {
+        let held = HeldEvidenceRunner()
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(evidence: held, answer: runner)
+        let run = Task { await model.askArchiveQuestion("问题？", now: Date()) }
+        await held.waitUntilStarted()
+        #expect(model.answerPhase == .running)
+
+        runner.setAvailability(.unavailable(.modelNotReady))
+        model.refreshAnswerRuntimeAvailability()
+
+        #expect(model.answerPhase == .running)
+        #expect(model.isAnswerRunActive)
+        await held.finish(.failed(.workerFailed(state: "worker_unavailable")))
+        await run.value
+    }
+
+    @Test("Ask rechecks availability before reading any evidence")
+    func askRechecksBeforeAnyWork() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let runner = MutableAvailabilityRunner(.unavailable(.modelNotReady))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        // Availability moved after the model was built; nothing refreshed it.
+        runner.setAvailability(.available(contextSize: 8_192))
+
+        await model.askArchiveQuestion("问题？", now: Date())
+
+        #expect(model.answerAvailability == .available(contextSize: 8_192))
+        #expect(evidence.calls.count == 1)
+        #expect(runner.answerCalls == 1)
+        #expect(model.answerPhase == .answered)
+    }
+
+    @Test("An Ask-time check that finds the model gone starts nothing at all")
+    func askRefusesWhenRuntimeWentAway() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [
+            .ready(evidenceSnapshot(rows: [evidenceRow(1, text: "原文")]))
+        ])
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        // The runtime reports itself unavailable between surface refresh and Ask.
+        runner.setAvailability(.unavailable(.appleIntelligenceNotEnabled))
+
+        await model.askArchiveQuestion("问题？", now: Date())
+
+        #expect(evidence.calls.isEmpty)
+        #expect(runner.answerCalls == 0)
+        #expect(model.answerPhase == .failed(.runtimeUnavailable(.appleIntelligenceNotEnabled)))
+        #expect(model.answerResult == nil)
+        #expect(!model.isAnswerRunActive)
+    }
+
+    @Test("The refusal carries the runtime's own reason, never a stale one")
+    func refusalUsesTheCurrentReason() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [])
+        let runner = MutableAvailabilityRunner(.unavailable(.appleIntelligenceNotEnabled))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        runner.setAvailability(.unavailable(.deviceNotEligible))
+        await model.askArchiveQuestion("问题？", now: Date())
+        #expect(model.answerPhase == .failed(.runtimeUnavailable(.deviceNotEligible)))
+    }
+
+    @Test("The empty-question refusal still precedes the availability check")
+    func emptyQuestionStillCostsNothing() async {
+        let evidence = RecordingEvidenceRunner(outcomes: [])
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(evidence: evidence, answer: runner)
+        await model.askArchiveQuestion("  \n ", now: Date())
+        #expect(evidence.calls.isEmpty)
+        #expect(runner.answerCalls == 0)
+        #expect(model.answerPhase == .idle)
+    }
+
+    @Test("A second Ask still cannot start while a run is in flight")
+    func refreshDoesNotBreakSingleFlight() async {
+        let held = HeldEvidenceRunner()
+        let runner = MutableAvailabilityRunner(.available(contextSize: 8_192))
+        let model = makeAnswerModel(evidence: held, answer: runner)
+        let first = Task { await model.askArchiveQuestion("第一个？", now: Date()) }
+        await held.waitUntilStarted()
+
+        model.refreshAnswerRuntimeAvailability()
+        await model.askArchiveQuestion("第二个？", now: Date())
+
+        #expect(await held.calls == 1)
+        await held.finish(.failed(.workerFailed(state: "worker_unavailable")))
+        await first.value
+    }
+
+    @Test("Nothing polls availability in the background")
+    func noBackgroundPolling() {
+        let appModel = (try? String(
+            contentsOf: Self.sourceRoot.appendingPathComponent("AppModel.swift"),
+            encoding: .utf8
+        )) ?? ""
+        let start = "MARK: - Agents: on-device archive answer"
+        let end = "MARK: - Local persistence settings"
+        guard let from = appModel.range(of: start),
+              let to = appModel.range(of: end, range: from.upperBound..<appModel.endIndex)
+        else {
+            Issue.record("AppModel.swift could not be read")
+            return
+        }
+        let agents = String(appModel[from.upperBound..<to.lowerBound])
+        // A timer here would refresh on no user boundary at all, which is the
+        // polling this defectfix was told not to introduce.
+        for forbidden in ["Timer.", "Timer.publish", "AsyncStream"] {
+            #expect(!agents.contains(forbidden))
+        }
     }
 
     private static var sourceRoot: URL {

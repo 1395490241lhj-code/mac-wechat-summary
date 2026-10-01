@@ -3256,6 +3256,11 @@ private struct AgentsView: View {
             .frame(maxWidth: 920, alignment: .leading)
         }
         .navigationTitle("Agents")
+        .onAppear {
+            // Availability is ephemeral system state, so it is re-read when
+            // the surface appears rather than only at launch.
+            model.refreshAnswerRuntimeAvailability()
+        }
     }
 
     private func unavailable(_ reason: AnswerRuntimeUnavailableReason) -> some View {
