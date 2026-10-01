@@ -28,7 +28,10 @@ private func evidenceSnapshot(
     rows: [AnswerEvidenceRow],
     truncated: Bool = false,
     excludedUnanchored: Int = 0,
-    textTruncatedCount: Int = 0
+    textTruncatedCount: Int = 0,
+    coverage: FollowUpCoverage = FollowUpCoverage(
+        status: "complete", trustworthyEmpty: true, caveats: []
+    )
 ) -> AnswerEvidenceSnapshot {
     AnswerEvidenceSnapshot(
         start: Date(timeIntervalSince1970: 1_700_000_000),
@@ -38,7 +41,7 @@ private func evidenceSnapshot(
         excludedUnanchored: excludedUnanchored,
         textTruncatedCount: textTruncatedCount,
         truncated: truncated,
-        coverage: FollowUpCoverage(status: "complete", trustworthyEmpty: true, caveats: []),
+        coverage: coverage,
         freshness: nil,
         rows: rows
     )
@@ -119,8 +122,9 @@ private actor StubAnswerRunner: AnswerRunning {
         if hangs {
             try await Task.sleep(for: .seconds(600))
         }
-        return AnswerRunResult.validating(
+        return try AnswerRunResult.validating(
             answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
             returnedIndices: returnedIndices,
             input: AnswerModelInput.build(
                 question: question, rows: snapshot.rows, contextSize: 8_192
@@ -151,8 +155,10 @@ private actor ProductionShapedCancellingRunner: AnswerRunning {
         } catch is CancellationError {
             throw AnswerFailure.cancelled
         }
-        return AnswerRunResult.validating(
-            answer: "回答", returnedIndices: [],
+        return try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [],
             input: AnswerModelInput.build(question: question, rows: [], contextSize: 8_192)
         )
     }
@@ -188,8 +194,10 @@ private actor ControllableAnswerRunner: AnswerRunning {
             arrivalWaiters.removeAll()
         }
         finishedCalls += 1
-        return AnswerRunResult.validating(
-            answer: "回答-\(index)", returnedIndices: [],
+        return try AnswerRunResult.validating(
+            answer: "回答-\(index)",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [],
             input: AnswerModelInput.build(question: question, rows: [], contextSize: 8_192)
         )
     }
@@ -344,10 +352,11 @@ struct OnDeviceAnswerRuntimeInputTests {
 @Suite("On-device answer citations")
 struct OnDeviceAnswerCitationTests {
     @Test("Valid indices map to the sealed anchors in order, de-duplicated")
-    func mapsValidIndices() {
+    func mapsValidIndices() throws {
         let rows = (1...3).map { evidenceRow($0, text: "消息\($0)") }
-        let result = AnswerRunResult.validating(
+        let result = try AnswerRunResult.validating(
             answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
             returnedIndices: [2, 2, 3],
             input: modelInput(rows)
         )
@@ -359,10 +368,11 @@ struct OnDeviceAnswerCitationTests {
     }
 
     @Test("Out-of-range indices are dropped")
-    func dropsOutOfRange() {
+    func dropsOutOfRange() throws {
         let rows = (1...2).map { evidenceRow($0, text: "消息\($0)") }
-        let result = AnswerRunResult.validating(
+        let result = try AnswerRunResult.validating(
             answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
             returnedIndices: [0, -1, 3, 99, 1],
             input: modelInput(rows)
         )
@@ -370,10 +380,11 @@ struct OnDeviceAnswerCitationTests {
     }
 
     @Test("All-invalid citations leave the answer explicitly unverified")
-    func allInvalidIsUnverified() {
+    func allInvalidIsUnverified() throws {
         let rows = (1...2).map { evidenceRow($0, text: "消息\($0)") }
-        let result = AnswerRunResult.validating(
+        let result = try AnswerRunResult.validating(
             answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
             returnedIndices: [7, 9],
             input: modelInput(rows)
         )
@@ -382,10 +393,13 @@ struct OnDeviceAnswerCitationTests {
     }
 
     @Test("A citation exposes its own row's sender, time and text")
-    func citationCarriesRow() {
+    func citationCarriesRow() throws {
         let rows = [evidenceRow(4, text: "原文", sender: "王经理")]
-        let result = AnswerRunResult.validating(
-            answer: "回答", returnedIndices: [1], input: modelInput(rows)
+        let result = try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [1],
+            input: modelInput(rows)
         )
         let citation = result.citations[0]
         #expect(citation.sender == "王经理")
@@ -394,25 +408,31 @@ struct OnDeviceAnswerCitationTests {
     }
 
     @Test("A citation naming a row dropped for context is dropped, not resolved")
-    func omittedRowIsNotCitable() {
+    func omittedRowIsNotCitable() throws {
         // 70 rows, 40 supplied. Token 55 exists in the sealed window and is
         // the most tempting wrong answer: resolving it would reveal a row the
         // model was never shown.
         let rows = (1...70).map { evidenceRow($0, text: "消息\($0)") }
         let input = modelInput(rows)
         #expect(input.rows.count == 40)
-        let result = AnswerRunResult.validating(
-            answer: "回答", returnedIndices: [55, 1], input: input
+        let result = try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [55, 1],
+            input: input
         )
         #expect(result.citations.map(\.token) == [1])
         #expect(result.citations[0].archiveEvidence == ArchiveEvidenceAnchor(importID: 7, sequence: 1))
     }
 
     @Test("Distinct citations carry distinct anchors and distinct reveal requests")
-    func distinctCitationsRevealDistinctRows() {
+    func distinctCitationsRevealDistinctRows() throws {
         let rows = (1...3).map { evidenceRow($0, text: "消息\($0)") }
-        let result = AnswerRunResult.validating(
-            answer: "回答", returnedIndices: [1, 3], input: modelInput(rows)
+        let result = try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [1, 3],
+            input: modelInput(rows)
         )
         #expect(result.citations.count == 2)
         let targets: [ArchiveEvidenceAnchor?] = result.citations.map {
@@ -430,10 +450,13 @@ struct OnDeviceAnswerCitationTests {
     }
 
     @Test("A citation reveals through the one existing search-result path")
-    func citationUsesCanonicalRevealShape() {
+    func citationUsesCanonicalRevealShape() throws {
         let rows = [evidenceRow(4, text: "原文")]
-        let citation = AnswerRunResult.validating(
-            answer: "回答", returnedIndices: [1], input: modelInput(rows)
+        let citation = try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: AnswerDisposition.answered.rawValue,
+            returnedIndices: [1],
+            input: modelInput(rows)
         ).citations[0]
         #expect(citation.searchResult.target == .archiveRecord(
             importID: 7, sequence: 4, provenance: .archiveAttributed
@@ -442,6 +465,261 @@ struct OnDeviceAnswerCitationTests {
         #expect(citation.searchResult.conversationLabel == "Imported archive export")
     }
 }
+
+// MARK: - Grounding disposition
+
+/// The v1 contract had no way to tell an honest refusal from an unsupported
+/// claim: both were `citations.isEmpty`. The disposition token is the model's
+/// own machine-readable statement about whether the supplied evidence answered
+/// the question, and the host validates it exactly -- never inferred from the
+/// answer prose, and never inferred from the citation array alone.
+@Suite("On-device answer grounding disposition")
+struct OnDeviceAnswerDispositionTests {
+    private func validated(
+        _ disposition: String,
+        indices: [Int],
+        rows: [AnswerEvidenceRow] = [evidenceRow(1, text: "消息1"), evidenceRow(2, text: "消息2")]
+    ) throws -> AnswerRunResult {
+        try AnswerRunResult.validating(
+            answer: "回答",
+            disposition: disposition,
+            returnedIndices: indices,
+            input: modelInput(rows)
+        )
+    }
+
+    @Test("Answered with a valid citation is grounded")
+    func answeredIsGrounded() throws {
+        let result = try validated(AnswerDisposition.answered.rawValue, indices: [2])
+        #expect(result.disposition == .answered)
+        #expect(result.hasVerifiableSource)
+        #expect(result.citations.map(\.token) == [2])
+    }
+
+    @Test("Answered with no citation is answered but unverified")
+    func answeredWithoutCitation() throws {
+        let result = try validated(AnswerDisposition.answered.rawValue, indices: [])
+        #expect(result.disposition == .answered)
+        #expect(!result.hasVerifiableSource)
+        // Grounding is a fact about citations, never a fact about disposition.
+        #expect(result.hasVerifiableSource == !result.citations.isEmpty)
+    }
+
+    @Test("Answered with only invalid indices keeps the disposition and loses the citations")
+    func answeredWithAllIndicesInvalid() throws {
+        let result = try validated(AnswerDisposition.answered.rawValue, indices: [0, -1, 7, 99])
+        #expect(result.disposition == .answered)
+        #expect(result.citations.isEmpty)
+        #expect(!result.hasVerifiableSource)
+    }
+
+    @Test("An honest refusal is accepted with no citations and no integrity warning")
+    func refusalWithEmptyCitations() throws {
+        let result = try validated(AnswerDisposition.insufficientEvidence.rawValue, indices: [])
+        #expect(result.disposition == .insufficientEvidence)
+        #expect(result.citations.isEmpty)
+        #expect(!result.hasVerifiableSource)
+    }
+
+    @Test(
+        "A refusal that also cites is refused before the indices are dropped",
+        arguments: [[1], [99], [0], [1, 99], [-1, 2]]
+    )
+    func refusalWithAnyCitationFailsClosed(indices: [Int]) {
+        // Dropping invalid indices first would turn `insufficientEvidence` plus
+        // `[999]` into a clean refusal, silently repairing a model that broke
+        // the contract in the one way the user cannot see.
+        #expect(throws: AnswerFailure.self) {
+            try AnswerRunResult.validating(
+                answer: "回答",
+                disposition: AnswerDisposition.insufficientEvidence.rawValue,
+                returnedIndices: indices,
+                input: modelInput([evidenceRow(1, text: "消息1")])
+            )
+        }
+    }
+
+    @Test("An unknown disposition token fails closed with no default")
+    func unknownDispositionFailsClosed() throws {
+        #expect(throws: AnswerFailure.self) {
+            try AnswerRunResult.validating(
+                answer: "回答",
+                disposition: "probably_fine",
+                returnedIndices: [],
+                input: modelInput([evidenceRow(1, text: "消息1")])
+            )
+        }
+    }
+
+    @Test("The instruction budget covers the disposition clause")
+    func dispositionInstructionIsBudgeted() {
+        #expect(answerInstructions.contains("insufficientEvidence"))
+        // The question is the hard boundary, and the instruction text is part
+        // of what it is measured against.
+        #expect(!AnswerModelInput.fitsQuestion(String(repeating: "问", count: 9_000), contextSize: 8_192))
+        #expect(AnswerModelInput.fitsQuestion("问题", contextSize: 8_192))
+    }
+
+    @Test("The prompt still carries tokens only, never canonical identity")
+    func promptStaysIdentityBlind() {
+        let input = modelInput([evidenceRow(1, text: "原文")])
+        for secret in ["msg-1", "conv-1", "importID", "import_id", "sequence", "canonical"] {
+            #expect(!input.prompt.contains(secret))
+        }
+    }
+}
+
+/// Coverage is host-known, so it is presented from data the snapshot already
+/// carries. Nothing here asks the model anything, and nothing here weakens the
+/// narrower claim Memory coverage actually supports.
+@Suite("On-device answer coverage disclosure")
+struct OnDeviceAnswerCoverageDisclosureTests {
+    private func lines(
+        rows: [AnswerEvidenceRow],
+        coverage: FollowUpCoverage
+    ) -> [String] {
+        AnswerCoverageDisclosure(
+            coverage: coverage,
+            rowCount: rows.count
+        ).lines
+    }
+
+    @Test("A raw coverage status never reaches the surface")
+    func humanReadableStatus() {
+        for (status, expected) in [
+            ("complete", "Complete"),
+            ("partial", "Partial"),
+            ("unavailable", "Unavailable"),
+            ("not_observed", "Not observed"),
+        ] {
+            // The label is what the Coverage row renders, so it is asserted on
+            // the label itself rather than on the caveat lines beside it.
+            let label = AnswerCoverageDisclosure(
+                coverage: FollowUpCoverage(
+                    status: status, trustworthyEmpty: true, caveats: []
+                ),
+                rowCount: 1
+            ).statusLabel
+            #expect(label == expected)
+            if status != "complete" {
+                #expect(!label.contains(status))
+                #expect(!label.contains("_"))
+            }
+            #expect(!label.isEmpty)
+            let rendered = lines(
+                rows: [evidenceRow(1, text: "消息")],
+                coverage: FollowUpCoverage(
+                    status: status, trustworthyEmpty: true, caveats: []
+                )
+            )
+            #expect(!rendered.contains { $0.contains("_") })
+        }
+    }
+
+    @Test("An untrustworthy empty window does not read as no messages happened")
+    func untrustworthyEmptyIsNotAbsence() {
+        let rendered = lines(
+            rows: [],
+            coverage: FollowUpCoverage(
+                status: "partial", trustworthyEmpty: false, caveats: []
+            )
+        )
+        #expect(rendered.contains { $0.contains("no messages happened") })
+        #expect(rendered.contains { $0.contains("Coverage is not complete") })
+    }
+
+    @Test("A covered empty window says the window holds nothing")
+    func trustworthyEmptyIsAbsence() {
+        let rendered = lines(
+            rows: [],
+            coverage: FollowUpCoverage(
+                status: "complete", trustworthyEmpty: true, caveats: []
+            )
+        )
+        #expect(rendered.contains { $0.contains("no stored messages") })
+        #expect(!rendered.contains { $0.contains("no messages happened") })
+    }
+
+    @Test("Caveats are surfaced individually and stay readable")
+    func caveatsAreSurfaced() {
+        let rendered = lines(
+            rows: [evidenceRow(1, text: "消息")],
+            coverage: FollowUpCoverage(
+                status: "partial",
+                trustworthyEmpty: false,
+                caveats: ["Archive import is still running.", "Some days are unindexed."]
+            )
+        )
+        #expect(rendered.contains("Archive import is still running."))
+        #expect(rendered.contains("Some days are unindexed."))
+    }
+
+    @Test("A covered window with rows adds no absence claim")
+    func populatedWindowStaysQuiet() {
+        let rendered = lines(
+            rows: [evidenceRow(1, text: "消息")],
+            coverage: FollowUpCoverage(
+                status: "complete", trustworthyEmpty: true, caveats: []
+            )
+        )
+        #expect(!rendered.contains { $0.contains("no messages happened") })
+        #expect(!rendered.contains { $0.contains("no stored messages") })
+    }
+
+    @Test("Coverage never claims more than Memory observed")
+    func coverageDoesNotOverclaim() {
+        let rendered = lines(
+            rows: [],
+            coverage: FollowUpCoverage(
+                status: "not_observed", trustworthyEmpty: false, caveats: []
+            )
+        )
+        for line in rendered {
+            #expect(!line.lowercased().contains("wechat was fully"))
+            #expect(!line.lowercased().contains("complete coverage of all"))
+        }
+    }
+}
+
+#if canImport(FoundationModels)
+import FoundationModels
+
+/// The generated contract itself, checked without a model: a payload that
+/// omits `disposition` must not decode into a usable answer, because the host
+/// has no second source to fall back on.
+@Suite(
+    "On-device generated answer contract",
+    .enabled(
+        if: ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
+        )
+    )
+)
+struct GeneratedArchiveAnswerContractTests {
+    @available(macOS 26.0, *)
+    static func decode(_ json: String) throws -> GeneratedArchiveAnswer {
+        try GeneratedArchiveAnswer(GeneratedContent(json: json))
+    }
+
+    @Test("A payload without disposition fails to decode")
+    func missingDispositionFailsDecode() throws {
+        guard #available(macOS 26.0, *) else { return }
+        do {
+            _ = try Self.decode(#"{"answer": "回答", "citations": [1]}"#)
+            Issue.record("a payload without disposition must not decode")
+        } catch {}
+    }
+
+    @Test("A payload with a closed disposition decodes")
+    func closedDispositionDecodes() throws {
+        guard #available(macOS 26.0, *) else { return }
+        let generated = try Self.decode(
+            #"{"answer": "回答", "citations": [1], "disposition": "answered"}"#
+        )
+        #expect(generated.disposition == AnswerDisposition.answered.rawValue)
+    }
+}
+#endif
 
 // MARK: - Architectural boundaries
 

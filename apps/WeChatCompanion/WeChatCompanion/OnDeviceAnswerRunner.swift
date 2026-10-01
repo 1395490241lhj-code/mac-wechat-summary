@@ -169,7 +169,10 @@ let answerInstructions = """
     Answer only from the evidence supplied below.
 
     - Do not invent a fact, a time, or a name that the evidence does not contain.
-    - If the evidence does not answer the question, say so plainly.
+    - If the evidence answers the question, set disposition to answered and cite the
+      supporting row numbers.
+    - If it does not, set disposition to insufficientEvidence, say so plainly, and
+      leave citations empty.
     - citations may contain only the row numbers listed in this prompt.
     - Answer in the language of the question.
     """
@@ -218,6 +221,7 @@ struct AnswerCitation: Identifiable, Equatable, Sendable {
     /// host's own bounds check, de-duplication and token map.
 struct AnswerRunResult: Equatable, Sendable {
     let answer: String
+    let disposition: AnswerDisposition
     let citations: [AnswerCitation]
     let input: AnswerModelInput
 
@@ -230,9 +234,26 @@ struct AnswerRunResult: Equatable, Sendable {
     /// the host dropped for context was never shown, so a citation naming it
     /// is dropped too rather than resolved against a row the model could not
     /// have read.
+    /// `disposition` is the model's own statement about whether the supplied
+    /// evidence answered the question, taken from a closed two-value token.
+    /// It is validated by exact equality and never inferred from the answer
+    /// text; an unknown or absent token is a generation failure, not a guess.
     static func validating(
-        answer: String, returnedIndices: [Int], input: AnswerModelInput
-    ) -> AnswerRunResult {
+        answer: String,
+        disposition: String,
+        returnedIndices: [Int],
+        input: AnswerModelInput
+    ) throws -> AnswerRunResult {
+        guard let disposition = AnswerDisposition(rawValue: disposition) else {
+            throw AnswerFailure.generationFailed
+        }
+        // The refusal contract says citations are empty. That is checked on the
+        // raw array, before any index is dropped: otherwise `insufficient` plus
+        // `[999]` would be repaired into a clean refusal, hiding a model that
+        // broke the one rule the user cannot check.
+        if disposition == .insufficientEvidence, !returnedIndices.isEmpty {
+            throw AnswerFailure.generationFailed
+        }
         var seen: Set<Int> = []
         var citations: [AnswerCitation] = []
         for index in returnedIndices {
@@ -250,7 +271,58 @@ struct AnswerRunResult: Equatable, Sendable {
                 archiveEvidence: row.archiveEvidence
             ))
         }
-        return AnswerRunResult(answer: answer, citations: citations, input: input)
+        return AnswerRunResult(
+            answer: answer, disposition: disposition, citations: citations, input: input
+        )
+    }
+}
+
+/// What the model itself reported about the evidence it was given.
+///
+/// The model never sees this type: `@Generable` takes a `String`, constrained
+/// by `.anyOf`, and the host maps the token back here by exact `rawValue`.
+enum AnswerDisposition: String, Equatable, Sendable, CaseIterable {
+    /// The supplied evidence answered the question. Grounded-ness still depends
+    /// on surviving citations, never on this value.
+    case answered
+    /// The supplied evidence did not answer the question. An honest refusal,
+    /// which must never read as an integrity warning.
+    case insufficientEvidence
+}
+
+/// What the sealed window actually covered, in words a person can act on.
+///
+/// Every value here is host-known: the model is never asked, and never asked
+/// to confirm, whether the window was empty. The two emptiness claims stay
+/// apart on purpose -- "Memory saw the whole window and it was empty" is a
+/// fact, while "the window is not fully covered" means absence proves nothing.
+struct AnswerCoverageDisclosure: Equatable, Sendable {
+    let coverage: FollowUpCoverage
+    let rowCount: Int
+
+    var statusLabel: String {
+        switch coverage.status {
+        case "complete": "Complete"
+        case "partial": "Partial"
+        case "unavailable": "Unavailable"
+        case "not_observed": "Not observed"
+        default: coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    var lines: [String] {
+        var lines: [String] = []
+        if rowCount == 0 {
+            lines.append(
+                coverage.trustworthyEmpty
+                    ? "Memory reports complete coverage for the selected source and window,"
+                        + " and it holds no stored messages."
+                    : "Coverage is not complete, so this cannot be interpreted as"
+                        + " “no messages happened.”"
+            )
+        }
+        lines.append(contentsOf: coverage.caveats)
+        return lines
     }
 }
 
@@ -406,8 +478,9 @@ struct SystemLanguageModelAnswerRunner: AnswerRunning {
                 let generated = try await session.respond(
                     to: input.prompt, generating: GeneratedArchiveAnswer.self
                 ).content
-                return AnswerRunResult.validating(
+                return try AnswerRunResult.validating(
                     answer: generated.answer,
+                    disposition: generated.disposition,
                     returnedIndices: generated.citations,
                     input: input
                 )
@@ -443,6 +516,17 @@ struct GeneratedArchiveAnswer {
             """
     )
     var citations: [Int]
+    /// A closed token, not free prose: the host maps it back to
+    /// `AnswerDisposition` by exact equality and refuses to guess when the
+    /// model returns anything else.
+    @Guide(
+        description: """
+            answered when the supplied evidence answers the question.
+            insufficientEvidence when it does not, in which case citations must be empty.
+            """,
+        .anyOf(AnswerDisposition.allCases.map(\.rawValue))
+    )
+    var disposition: String
 }
 #endif
 

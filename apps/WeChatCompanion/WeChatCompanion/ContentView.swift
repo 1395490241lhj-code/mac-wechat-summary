@@ -3362,9 +3362,16 @@ private struct AgentsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text(result.answer)
                         .textSelection(.enabled)
-                    if !result.hasVerifiableSource {
+                    if result.disposition == .insufficientEvidence {
                         Label(
-                            "Unverified: no supplied evidence row backed this answer, so it is not grounded in the Archive.",
+                            "The evidence supplied for this window did not answer the question.",
+                            systemImage: "info.circle"
+                        )
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    } else if !result.hasVerifiableSource {
+                        Label(
+                            "No verifiable source: no supplied evidence row backed this answer, so it is not grounded in the Archive.",
                             systemImage: "exclamationmark.triangle"
                         )
                         .font(.callout)
@@ -3428,6 +3435,9 @@ private struct AgentsView: View {
             }
 
             if let snapshot = model.answerSnapshot {
+                let coverage = AnswerCoverageDisclosure(
+                    coverage: snapshot.coverage, rowCount: snapshot.rows.count
+                )
                 GroupBox("Source Window") {
                     VStack(spacing: 0) {
                         summaryRow(
@@ -3437,7 +3447,7 @@ private struct AgentsView: View {
                                 + snapshot.end.formatted(date: .abbreviated, time: .shortened)
                         )
                         Divider()
-                        summaryRow("Coverage", snapshot.coverage.status)
+                        summaryRow("Coverage", coverage.statusLabel)
                         Divider()
                         summaryRow("Rows read", String(snapshot.returnedEvidence))
                         if let freshness = snapshot.freshness,
@@ -3450,6 +3460,19 @@ private struct AgentsView: View {
                         }
                     }
                     .padding(.vertical, 4)
+                }
+
+                if !coverage.lines.isEmpty {
+                    GroupBox("Window Coverage") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(coverage.lines, id: \.self) { line in
+                                Label(line, systemImage: "info.circle")
+                            }
+                        }
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 6)
+                    }
                 }
             }
         }
