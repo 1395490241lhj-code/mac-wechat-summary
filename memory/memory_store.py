@@ -947,16 +947,34 @@ class MemoryStore:
         return logical_id
 
     def observations_of(self, kind: str, logical_id: str) -> list[sqlite3.Row]:
-        """Every source observation explicitly linked to one logical object."""
+        """Every source observation explicitly linked to one logical object.
+
+        Membership is read from ``equivalence_links`` -- the assertions --
+        with the observation left-joined on, not from the observation's own
+        ``logical_*`` column. ``equivalence_links`` holds no foreign key to the
+        observation tables, so a link whose observation has since been deleted
+        is still an assertion the store holds: it returns as a row whose
+        observation columns are all NULL, with the linked id in
+        ``canonical_id``. A caller that needs surviving observations filters on
+        ``source`` being present; a caller that needs to *see* a vanished member
+        reads the id. A dangling member is reported, never counted. The
+        ``source IS NULL`` test is the whole sentinel: both tables declare
+        ``source NOT NULL``, so an empty source can only mean "no joined row".
+        """
         table = "conversations" if kind == LINK_KIND_CONVERSATION else "messages"
-        column = (
-            "logical_conversation_id" if kind == LINK_KIND_CONVERSATION
-            else "logical_message_id"
-        )
         return list(
             self.connection.execute(
-                f"SELECT * FROM {table} WHERE {column} = ? ORDER BY source, canonical_id;",
-                (logical_id,),
+                # ponytail: the three columns any caller needs, named
+                # explicitly. o.* also carries canonical_id, and the duplicate
+                # only works because sqlite3 resolves a name to the first
+                # occurrence. Widen this list when a caller needs more.
+                f"SELECT link.observation_canonical_id AS canonical_id,"
+                f" link.logical_id AS logical_id, o.source AS source"
+                f" FROM equivalence_links link LEFT JOIN {table} o"
+                f" ON o.canonical_id = link.observation_canonical_id"
+                f" WHERE link.kind = ? AND link.logical_id = ?"
+                f" ORDER BY link.observation_canonical_id;",
+                (kind, logical_id),
             )
         )
 

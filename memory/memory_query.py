@@ -42,6 +42,30 @@ observation and every citation. Unlinked observations stay separate items
 however alike they look: there is no heuristic grouping here, and there will
 not be. The representative observation for a group is chosen by a fixed rule
 (see :func:`representative_of`) so the same store answers the same way twice.
+
+Logical conversation scope
+--------------------------
+
+A logical conversation is an additive grouping relation *above* source
+observations; snapshot canonical identity stays permanent row-level
+provenance, and querying by logical id adds no new identity, no deduplication
+and no merging of Archive snapshots. Membership is read from the explicit link
+layer (:meth:`MemoryStore.observations_of`), intersected with **one explicit
+source**, and the surviving list is used twice: as the evidence filter and as
+the per-member coverage set. One list, never two.
+
+The source is not optional, because the coverage rule below is authorized only
+*within* one source and a cross-source aggregate is a different question this
+slice does not answer. A logical query with no source fails closed rather than
+widening to every source the store knows.
+
+Coverage is SEMANTIC-1 / ANY-COMPLETE **inside that one source**: the group is
+complete for a window iff at least one surviving member's own verdict for that
+source is complete over that whole window. No interval union -- two
+members each covering half a window stay partial, because neither observed the
+window; combining them would invent an observation nobody made. A weaker
+sibling neither erases a stronger complete member nor vetoes it; it stays
+visible as a caveat naming that member and its verdict.
 """
 
 from __future__ import annotations
@@ -58,6 +82,7 @@ from memory_store import (
     COVERAGE_NOT_OBSERVED,
     COVERAGE_PARTIAL,
     COVERAGE_UNAVAILABLE,
+    LINK_KIND_CONVERSATION,
     TIME_SOURCE_CREATED,
     CoverageVerdict,
     MemoryStore,
@@ -141,6 +166,12 @@ class QueryScope:
     ``kind`` names the query; ``window`` is the time range the coverage verdict
     is about, ``None`` on either side meaning unbounded; ``policy`` is the
     resolved source policy, never the caller's omission.
+
+    ``logical_conversation_id`` is an optional internal selector for a logical
+    group. It is not serialised anywhere: the public scope representations in
+    the worker and the MCP server are hand-written field lists, and the
+    resolved member ids stay internal, because snapshot canonical identity is
+    what every existing reader sees.
     """
 
     kind: str
@@ -153,6 +184,7 @@ class QueryScope:
     sender: str | None = None
     ownership: str | None = None
     anchor: str | None = None
+    logical_conversation_id: str | None = None
 
 
 # --- Coverage ------------------------------------------------------------------
@@ -241,6 +273,133 @@ def report_coverage(
         ),
         caveats=tuple(dict.fromkeys(caveats)),
     )
+
+
+@dataclass(frozen=True)
+class _LogicalGroup:
+    """One resolved logical conversation, split by what the store can still say.
+
+    ``members`` are the surviving observations from the requested source -- the
+    list used twice, as evidence filter and as coverage set. ``dangling`` are
+    links whose observation has since been deleted: kept, because a vanished
+    member is something the reader must be told about, and excluded, because a
+    member the store cannot read cannot support a coverage claim. ``linked`` is
+    every id the group ever asserted, and is what tells the three empty cases
+    apart.
+    """
+
+    logical_id: str
+    source: str
+    members: tuple[str, ...]
+    dangling: tuple[str, ...] = ()
+    linked: tuple[str, ...] = ()
+
+
+# --- Logical conversation coverage --------------------------------------------
+
+
+@dataclass(frozen=True)
+class LogicalCoverage:
+    """What one logical group says about a window, inside one source.
+
+    Deliberately not a :class:`CoverageReport`: that report's identity is a
+    *source*, and here the identity is a set of conversation observations. A
+    canonical conversation id must never be filed under ``required_sources``,
+    ``supplemental_sources``, ``complete_sources`` or ``per_source``, so the
+    two shapes stay apart.
+
+    ``members`` is the surviving, source-intersected membership -- the exact
+    list the evidence query filtered on. ``complete_members`` are those members
+    whose own coverage verdict for this source is ``observed_complete``, and
+    their presence is what makes ``status`` complete: SEMANTIC-1 is
+    ANY-COMPLETE, never a union of member windows. "Any complete" is one
+    member reaching complete on its own, not N members combining; a member
+    promoted by a source-wide record the store holds is complete by that
+    store's definition of the source, not by evidence of its own. Every
+    non-complete member stays attributable in ``caveats`` and, when it says
+    why, in ``member_status``.
+    """
+
+    status: str
+    source: str
+    members: tuple[str, ...]
+    complete_members: tuple[str, ...] = ()
+    member_status: tuple[tuple[str, str], ...] = ()
+    caveats: tuple[str, ...] = ()
+
+    @property
+    def trustworthy_empty(self) -> bool:
+        """May an empty item list be read as "nothing in this window"?
+
+        True only when a member's own verdict for this source is complete over
+        the whole window. A group of partial members never earns this, however
+        many partial intervals they cover between them.
+        """
+        return self.status == COVERAGE_COMPLETE
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "source": self.source,
+            "trustworthy_empty": self.trustworthy_empty,
+            "members": list(self.members),
+            "complete_members": list(self.complete_members),
+            "member_status": dict(self.member_status),
+            "caveats": list(self.caveats),
+        }
+
+
+def report_logical_coverage(
+    per_member: dict[str, CoverageVerdict], *, source: str
+) -> LogicalCoverage:
+    """SEMANTIC-1 over one source's members: complete iff one member is.
+
+    Every member is looked at before the aggregate is decided, so the order
+    members were linked in cannot change a verdict.
+    Below complete the ordering follows :func:`memory_store.compose_coverage`:
+    one member that observed part of the window makes the group partial, and
+    ``unavailable`` only when every member refused.
+    """
+    members = tuple(per_member)
+    complete = tuple(
+        name for name in members if per_member[name].status == COVERAGE_COMPLETE
+    )
+    caveats: list[str] = []
+    for name in members:
+        verdict = per_member[name]
+        if verdict.status == COVERAGE_COMPLETE:
+            continue
+        caveats.append(f"{name}:{verdict.status}")
+        caveats.extend(f"{name}:{reason}" for reason in verdict.reasons)
+    if complete:
+        status = COVERAGE_COMPLETE
+    elif any(per_member[name].status == COVERAGE_PARTIAL for name in members):
+        status = COVERAGE_PARTIAL
+    elif any(per_member[name].status == COVERAGE_UNAVAILABLE for name in members):
+        status = COVERAGE_UNAVAILABLE
+    else:
+        status = COVERAGE_NOT_OBSERVED
+    return LogicalCoverage(
+        status=status,
+        source=source,
+        members=members,
+        complete_members=complete,
+        member_status=tuple((name, per_member[name].status) for name in members),
+        caveats=tuple(dict.fromkeys(caveats)),
+    )
+
+
+#: Exactly the identity the store mints for a conversation link: "logc:"
+#: plus a 128-bit blake2b digest in lowercase hex. One format, checked here
+#: rather than invented a second time at the query boundary.
+LOGICAL_CONVERSATION_PREFIX: str = "logc:"
+
+
+def _is_logical_conversation_id(value: object) -> bool:
+    if not isinstance(value, str) or not value.startswith(LOGICAL_CONVERSATION_PREFIX):
+        return False
+    digest = value[len(LOGICAL_CONVERSATION_PREFIX):]
+    return len(digest) == 32 and all(c in "0123456789abcdef" for c in digest)
 
 
 # --- Items ---------------------------------------------------------------------
@@ -333,10 +492,22 @@ class MemoryQueryResult:
     freshness: MemoryFreshness
     #: For ``context_around``: the canonical id of the focal observation.
     focal_canonical_id: str | None = None
+    #: For a logical-scope query: coverage over the surviving members of that
+    #: one group inside the one requested source. ``None`` for every existing
+    #: query kind, and not part of any serialised envelope.
+    logical_coverage: LogicalCoverage | None = None
 
     @property
     def is_empty_and_trustworthy(self) -> bool:
-        return not self.items and self.coverage.trustworthy_empty
+        # A logical query answers "is this window empty *for these members*",
+        # and only logical_coverage was assessed over those members. Reading
+        # the source-level report instead would let a well-formed but unknown
+        # logical id look trustworthy on the strength of an unfiltered source
+        # report that never saw the selector.
+        governing = (
+            self.coverage if self.logical_coverage is None else self.logical_coverage
+        )
+        return not self.items and governing.trustworthy_empty
 
     @property
     def citations(self) -> tuple[MessageCitation, ...]:
@@ -740,10 +911,113 @@ class MemoryQueryService:
 
     # -- recent context ------------------------------------------------------
 
+    def _logical_group(
+        self,
+        logical_id: str,
+        *,
+        source: str | None,
+        conversation_canonical_id: str | None,
+    ) -> "_LogicalGroup":
+        """Resolve the group once, into the one list evidence and coverage share.
+
+        The order of operations is fixed and each step can only remove a member,
+        never add one: validate the selector, resolve the group from the link
+        layer, intersect with the requested source, then drop links whose
+        observation no longer exists. Members of other sources are not
+        "missing" -- they were never in this query -- while a link whose
+        observation has vanished stays visible as a count.
+        """
+        if not _is_logical_conversation_id(logical_id):
+            raise MemoryStoreError(
+                "logical_conversation_id_malformed",
+                "A logical conversation id is 'logc:' followed by 32 lowercase"
+                " hex characters.",
+            )
+        if conversation_canonical_id is not None:
+            raise MemoryStoreError(
+                "logical_scope_conflicts_conversation_scope",
+                "A logical scope selects the conversation itself; pass either"
+                " logical_conversation_id or conversation_canonical_id, not both.",
+            )
+        # ``not source`` rather than ``source is None``: an empty string is the
+        # same intent -- no source named -- and must refuse identically, not
+        # reach the query as a phantom source that matches nothing.
+        if not source:
+            raise MemoryStoreError(
+                "logical_scope_requires_source",
+                "A logical scope needs one explicit source: logical coverage is"
+                " defined only within a single source.",
+            )
+        rows = self._store.observations_of(LINK_KIND_CONVERSATION, logical_id)
+        return _LogicalGroup(
+            logical_id=logical_id,
+            source=source,
+            members=tuple(
+                row["canonical_id"] for row in rows if row["source"] == source
+            ),
+            dangling=tuple(row["canonical_id"] for row in rows if row["source"] is None),
+            linked=tuple(row["canonical_id"] for row in rows),
+        )
+
+    def _logical_coverage(
+        self, group: "_LogicalGroup", *, since: float | None, until: float | None
+    ) -> LogicalCoverage:
+        """SEMANTIC-1 over the surviving members, plus what was dropped.
+
+        Every member is assessed against the same window with the same source
+        the evidence query used, and the empty-group cases say which of the
+        three things happened: the id names nothing, the group holds nothing
+        from this source, or every member it held has since vanished.
+        """
+        per_member = {
+            name: self._store.assess_coverage(
+                source=group.source,
+                conversation_canonical_id=name,
+                start=since,
+                end=until,
+            )
+            for name in group.members
+        }
+        coverage = report_logical_coverage(per_member, source=group.source)
+        # ``dangling`` are reported without their ids: the link layer keeps no
+        # source and the observation row is gone, so the store cannot say which
+        # source a vanished member belonged to. Naming the id here would put a
+        # possibly-foreign observation into a single-source answer, which is the
+        # one thing this scope exists to prevent.
+        dangling = (
+            (f"{group.logical_id}:dangling_member",) if group.dangling else ()
+        )
+        if per_member:
+            return LogicalCoverage(
+                status=coverage.status,
+                source=coverage.source,
+                members=coverage.members,
+                complete_members=coverage.complete_members,
+                member_status=coverage.member_status,
+                caveats=coverage.caveats + dangling,
+            )
+        if not group.linked:
+            return LogicalCoverage(
+                status=COVERAGE_NOT_OBSERVED, source=group.source, members=(),
+                caveats=(f"{group.logical_id}:logical_conversation_unknown",),
+            )
+        if not group.dangling:
+            return LogicalCoverage(
+                status=COVERAGE_NOT_OBSERVED, source=group.source, members=(),
+                caveats=(f"no_{group.source}_member",),
+            )
+        return LogicalCoverage(
+            status=COVERAGE_NOT_OBSERVED, source=group.source, members=(),
+            caveats=(
+                *dangling, f"{group.logical_id}:logical_conversation_dangling"
+            ),
+        )
+
     def recent_context(
         self,
         *,
         conversation_canonical_id: str | None = None,
+        logical_conversation_id: str | None = None,
         since: float | None = None,
         until: float | None = None,
         limit: int = DEFAULT_LIMIT,
@@ -757,14 +1031,44 @@ class MemoryQueryService:
         same newest-``limit`` set in chronological order, for callers that want
         to read a context top to bottom. Either way the *selection* is the
         newest messages in scope.
+
+        ``logical_conversation_id`` selects one explicitly linked group inside
+        one explicit ``source``, and requires that source: see the module
+        docstring. The resolved member ids are used as the evidence filter and
+        as the per-member coverage set, from the same list. Resolved members
+        are not query-scope identity -- the scope names the logical id, and
+        every row keeps the snapshot canonical id it was stored with.
         """
         limit = _clamp(limit)
+        group: _LogicalGroup | None = None
+        if logical_conversation_id is not None:
+            group = self._logical_group(
+                logical_conversation_id,
+                source=source,
+                conversation_canonical_id=conversation_canonical_id,
+            )
         resolved = self.resolve_policy(policy, source)
         clauses: list[str] = []
         parameters: list[Any] = []
+        if group is not None:
+            # An empty membership filters to nothing rather than to everything:
+            # an unmatched IN () must never widen the query.
+            if group.members:
+                # ponytail: one bound placeholder per member; SQLite's variable
+                # ceiling (~32k) would raise rather than misread, and a group
+                # that large needs chunking or a temp table.
+                clauses.append(
+                    "m.conversation_canonical_id IN (%s)" % ", ".join("?" * len(group.members))
+                )
+                parameters.extend(group.members)
+            else:
+                clauses.append("0")
         _add_filters(
             clauses, parameters,
-            conversation_canonical_id=conversation_canonical_id, source=source,
+            conversation_canonical_id=(
+                conversation_canonical_id if group is None else None
+            ),
+            source=source,
             start=since, end=until,
         )
         rows = self._rows(
@@ -778,7 +1082,10 @@ class MemoryQueryService:
         items, _ = self._items(rows, None)
         scope = QueryScope(
             kind="recent", policy=resolved,
-            conversation_canonical_id=conversation_canonical_id,
+            conversation_canonical_id=(
+                conversation_canonical_id if group is None else None
+            ),
+            logical_conversation_id=logical_conversation_id,
             window=(since, until), limit=limit, order=order,
         )
         return MemoryQueryResult(
@@ -786,6 +1093,10 @@ class MemoryQueryService:
             coverage=self._coverage(
                 resolved, conversation_canonical_id=conversation_canonical_id,
                 start=since, end=until,
+            ),
+            logical_coverage=(
+                None if group is None
+                else self._logical_coverage(group, since=since, until=until)
             ),
         )
 
@@ -965,6 +1276,7 @@ __all__ = [
     "ConversationCoverage", "ConversationDiscoveryResult", "ConversationItem",
     "ConversationObservation", "CoverageReport", "MemoryItem", "normalize_name",
     "MemoryQueryResult", "MemoryQueryService", "MessageCitation", "Observation",
+    "LOGICAL_CONVERSATION_PREFIX", "LogicalCoverage",
     "QueryScope", "SourcePolicy", "TimelineCursor", "report_coverage",
-    "representative_of",
+    "report_logical_coverage", "representative_of",
 ]
