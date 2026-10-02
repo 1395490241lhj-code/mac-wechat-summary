@@ -636,6 +636,51 @@ def test_an_unrecognised_database_also_caps_the_read(tmp_path):
     assert source.list_conversations(10).coverage.reason == REASON_PARTIAL_INVENTORY
 
 
+def test_the_publicly_documented_message_resource_store_is_not_a_coverage_hole(tmp_path):
+    """message/message_resource.db is attachment metadata, not unread history.
+
+    Three independent public sources document that exact path as resource
+    metadata (A10 gate document section 18.5), so the message-directory
+    inventory classifies it as media. This is a deliberate change to the live
+    completeness claim: before it, the name looked like an unsupported message
+    candidate and capped every read to ``partial_inventory``.
+    """
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    (message_dir / "message_resource.db").write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    listed = source.list_conversations(10)
+    assert listed.items
+    assert listed.coverage.status == COVERAGE_COMPLETE
+
+
+def test_an_indexed_message_resource_name_still_caps_the_read(tmp_path):
+    # No public source documents an indexed variant: it stays message-shaped risk.
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    (message_dir / "message_resource_1.db").write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    assert source.list_conversations(10).coverage.reason == REASON_PARTIAL_INVENTORY
+
+
 def test_recognised_auxiliary_databases_leave_a_complete_read_complete(tmp_path):
     """A search, media or auxiliary database is not a coverage hole.
 

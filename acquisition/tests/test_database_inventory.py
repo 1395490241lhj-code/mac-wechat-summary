@@ -432,3 +432,74 @@ def test_a_source_set_spanning_two_directories_is_left_alone(tmp_path):
     # A split source set is not a directory this refresher is entitled to
     # choose, so it inspects neither end.
     assert refresher.inventory(source_set).entries == ()
+
+
+# -- message/message_resource.db: one publicly documented companion shape -----
+#
+# Three independent public sources spell the exact path message/message_resource.db
+# and describe it as message-attachment resource metadata (ledger: the A10
+# classification doc). The message-directory inventory is, by definition, the
+# message/ location, so it recognises that exact name as media. The location-free
+# basename classifier stays untouched: the same name anywhere else is still an
+# explicit message-shaped candidate, and an indexed variant has no public proof.
+
+
+def test_message_resource_is_media_in_the_message_directory_inventory(tmp_path):
+    message_dir = _directory(tmp_path, ["message_0.db", "message_resource.db"])
+
+    inventory = inventory_message_directory(message_dir)
+
+    assert inventory.by_role(ROLE_MEDIA) == ("message_resource.db",)
+    assert inventory.by_role(ROLE_ORDINARY_MESSAGE) == ("message_0.db",)
+    assert inventory.message_shards == ("message_0.db",)
+    assert inventory.gaps == ()
+
+
+def test_message_resource_never_becomes_a_message_shard(tmp_path):
+    message_dir = _directory(tmp_path, ["message_resource.db"])
+
+    inventory = inventory_message_directory(message_dir)
+
+    assert inventory.message_shards == ()
+    assert not inventory.supports_message_read
+
+
+def test_the_location_free_classifier_still_treats_the_name_as_a_candidate():
+    from acquisition.database_inventory import classify_database_name
+
+    assert classify_database_name("message_resource.db") == ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
+
+
+@pytest.mark.parametrize("name", [
+    "message_resource_1.db", "message_resource_0.db", "Message_Resource.db",
+    "xmessage_resource.db", "message_resource.db.bak",
+])
+def test_only_the_exact_message_resource_name_is_recognised(tmp_path, name):
+    message_dir = _directory(tmp_path, ["message_0.db", name])
+
+    inventory = inventory_message_directory(message_dir)
+
+    assert inventory.by_role(ROLE_MEDIA) == ()
+
+
+@pytest.mark.parametrize("name", ["message_resource_1.db", "message_resource_0.db"])
+def test_an_indexed_resource_variant_stays_a_visible_candidate(tmp_path, name):
+    message_dir = _directory(tmp_path, ["message_0.db", name])
+
+    inventory = inventory_message_directory(message_dir)
+
+    assert inventory.by_role(ROLE_UNSUPPORTED_MESSAGE_CANDIDATE) == (name,)
+    assert inventory.gaps == (GAP_UNSUPPORTED_MESSAGE_CANDIDATE,)
+
+
+def test_a_refused_message_resource_carries_no_message_claim(tmp_path):
+    # Consistent with every other recognised non-message name: refusing it is a
+    # refusal and nothing more.
+    message_dir = _directory(tmp_path, ["message_0.db", "message_resource.db"])
+    (message_dir / "message_resource.db").unlink()
+    (message_dir / "message_resource.db").symlink_to(message_dir / "message_0.db")
+
+    inventory = inventory_message_directory(message_dir)
+
+    assert inventory.rejections == (("message_resource.db", REJECTED_NOT_REGULAR_FILE),)
+    assert inventory.gaps == ()

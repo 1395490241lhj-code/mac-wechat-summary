@@ -42,6 +42,7 @@ from .database_inventory import (
     ROLE_UNSUPPORTED_MESSAGE_CANDIDATE,
     _is_candidate,
     classify_database_name,
+    classify_message_directory_name,
 )
 
 #: What this module claims about a source: it read names and never contents.
@@ -138,13 +139,28 @@ CONTAINER_DOMAIN_CLASSES: frozenset[str] = frozenset({
 #:   container root, and an explicit feature purpose that is not message or
 #:   identity truth. No v2 production path reads it.
 #:
-#: Nothing else is added here. GreenBubbles/wx-cli material recognises
-#: ``hardlink_*.db``/``chatbot.db``/``sns.db`` as database *basenames*; no
-#: accepted evidence establishes the parent directory of any of them, so they
-#: stay database-role knowledge and never become a directory-domain entry.
+#: Every other entry is Tier 3B/4 public provenance and needs BOTH (1) the exact
+#: root-relative directory spelled in at least two independent public sources, and
+#: (2) at least two sources that characterise its contents as non-message feature
+#: data, with none describing chat/message rows. One row per entry, with source
+#: URLs, pinned revisions and licenses, in the A10 classification doc sections
+#: 17.3 and 18; this comment only names the evidence class.
+#:
+#:   ``sns`` (Moments), ``favorite`` (saved items), ``head_image`` (avatars),
+#:   ``hardlink`` (attachment link index), ``bizchat`` (business-chat group/user
+#:   metadata), ``third_app_icon`` (third-party app icons).
+#:
+#: Deliberately NOT here: ``chatbot`` (sources describe chatbot *messages*),
+#: ``general`` (its documented tables hold message-event records such as recalled
+#: message content), and ``solitaire`` (only one source characterises it).
+#: ``weclaw.db`` semantics are uncertain, and a basename alone -- ``sns.db``,
+#: ``hardlink_*.db``, ``chatbot.db`` -- never becomes a directory-domain entry.
 #: There is deliberately no inference helper: no prefix, substring, case-folding
 #: or fuzzy matching, because a look-alike name is not the proven domain.
-_PHYSICAL_ONLY_DOMAIN_NAMES = frozenset({"emoticon"})
+_PHYSICAL_ONLY_DOMAIN_NAMES = frozenset({
+    "emoticon", "sns", "favorite", "head_image", "hardlink", "bizchat",
+    "third_app_icon",
+})
 
 KNOWN_PHYSICAL_ONLY_DIRECTORIES: frozenset[str] = _PHYSICAL_ONLY_DOMAIN_NAMES
 
@@ -255,6 +271,12 @@ def _container_role(location: str, name: str) -> str:
     """
     if name == _LOCATION_ANCHOR.get(location):
         return _LOCATION_ROLE[location]
+    # `message/message_resource.db` is the one publicly proven resource store, at
+    # that exact location. Elsewhere the same basename is still message-shaped
+    # risk: keep the exemption exactly as wide as its proof, and let the inventory
+    # and this layer share one definition of it.
+    if location == LOCATION_MESSAGE_DIRECTORY:
+        return classify_message_directory_name(name)
     role = classify_database_name(name)
     if role == ROLE_ORDINARY_MESSAGE and location != LOCATION_MESSAGE_DIRECTORY:
         return ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
@@ -419,6 +441,10 @@ class ContainerAccounting:
             "candidate_count": 0,
             "nested_unexamined_count": 0,
             "unreadable_count": 0,
+            "blocking_unknown_count": 0,
+            "blocking_candidate_count": 0,
+            "blocking_nested_count": 0,
+            "blocking_unreadable_count": 0,
             "role_counts": {},
         } for boundary in sorted(CONTAINER_DOMAIN_CLASSES)}
         for row in self.databases:
@@ -441,6 +467,12 @@ class ContainerAccounting:
                 entry["unreadable_count"] += 1
             elif row.reason == NESTED_DIRECTORY or row.is_directory:
                 entry["nested_unexamined_count"] += 1
+        # What actually blocks acceptance, from the same pass that decides it. The
+        # plain counts above say what is present; these say what the verdict
+        # counted, so an observation outside the identity claim or a proven
+        # physical-only domain is distinguishable without naming anything.
+        for boundary, kind in _blocking_observations(self):
+            summary[boundary]["blocking_%s_count" % kind] += 1
         return summary
 
     def accounts_for(self, keys) -> bool:
@@ -530,9 +562,15 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
             # A subdirectory is not a database, but if it holds one then part of
             # the boundary was not walked. Failing closed is the only honest
             # reading of "every database accounted exactly once".
-            if not child.name.startswith(".") and _is_directory(child):
+            if _is_directory(child):
                 rejections.append(ContainerRejection(
                     location, child.name, NESTED_DIRECTORY, directory.name))
+            elif not _is_regular_file(child):
+                # A symlink is neither a plain file nor a real directory. Ignoring
+                # it would let it alias content this pass never reads, under a name
+                # it never classifies. A hidden regular file is sidecar noise.
+                rejections.append(ContainerRejection(
+                    location, child.name, REJECTED_NOT_REGULAR_FILE, directory.name))
             continue
         if not _is_regular_file(child):
             rejections.append(ContainerRejection(
@@ -564,9 +602,10 @@ def account_container(source_root) -> ContainerAccounting:
     except OSError:
         raise ValueError("container accounting invalid") from None
     for child in children:
-        if child.name.startswith("."):
-            continue
         if _is_directory(child):
+            # A hidden directory is accounted like any other: the root is the
+            # strictest location, so an unentered subtree there is fail-closed
+            # too. Only hidden *files* stay ignorable as sidecar noise.
             location = _NAMED_DIRECTORIES.get(child.name, LOCATION_OTHER_DIRECTORY)
             examined.append(ExaminedDirectory(child.name, location))
             databases += _account_directory(child, location, rejections)
@@ -580,6 +619,9 @@ def account_container(source_root) -> ContainerAccounting:
             else:
                 rejections.append(ContainerRejection(
                     LOCATION_ROOT, child.name, REJECTED_NOT_REGULAR_FILE))
+        elif not _is_regular_file(child):
+            rejections.append(ContainerRejection(
+                LOCATION_ROOT, child.name, REJECTED_NOT_REGULAR_FILE))
     return ContainerAccounting(
         tuple(sorted(databases, key=lambda row: (
             row.location, row.directory_identity, row.name))),
@@ -587,6 +629,92 @@ def account_container(source_root) -> ContainerAccounting:
         tuple(sorted(rejections, key=lambda row: (
             row.location, row.directory_identity, row.name, row.reason))),
     )
+
+
+#: The row-level blocking kinds and the one requirement token each raises. The
+#: aggregate report counts by kind; acceptance raises the token. Same pass, so
+#: the two cannot disagree.
+_BLOCKING_KIND_REQUIREMENT = {
+    "unknown": GAP_UNKNOWN_DATABASE,
+    "candidate": GAP_UNSUPPORTED_MESSAGE_CANDIDATE,
+    "nested": DIRECTORY_UNEXAMINED,
+    "unreadable": DIRECTORY_UNEXAMINED,
+}
+
+_ROLE_BLOCKING_KIND = {
+    ROLE_UNKNOWN: "unknown",
+    ROLE_UNSUPPORTED_MESSAGE_CANDIDATE: "candidate",
+}
+
+
+def _blocking_observations(accounting):
+    """Every observation that blocks acceptance, as ``(boundary class, kind)``.
+
+    This is the one place a row or a refusal is judged. ``unmet_requirements``
+    reads it for the verdict and ``domain_summary`` reads it for the aggregate
+    report, so there is no second policy engine to drift from.
+
+    Boundary-class aware. An unexamined structure inside a domain independently
+    proven outside the Reader boundary is visible physical structure, not a gap in
+    Reader completeness: nothing inside it was looked at, nothing inside it counts
+    as truth, and no recursion is implied either way. An unreadable directory
+    stays blocking everywhere, because a directory that could not be listed is not
+    the same claim as one that was listed and held nothing needed.
+
+    Visible gaps and acceptance blockers are still different: business is excluded
+    by D-040, and unknown/candidate risk blocks only where its parent domain is
+    required or ambiguous. The role is never relabelled -- it stays visible and
+    unsupported either way.
+
+    Identity truth is the exact anchor, not the parent directory. Production opens
+    session/session.db and contact/contact.db by name and never enumerates their
+    siblings, so once a directory's own anchor is proven, an unrecognised
+    regular-file entry beside it is outside the identity claim: still visible,
+    still unsupported, but not a Reader-completeness blocker. Everything that stops
+    the anchor being proven -- missing, refused, unlistable parent -- keeps the
+    directory in scope, and a message-bearing candidate blocks regardless.
+    """
+    established_anchors = {
+        row.directory_identity for row in accounting.databases
+        if row.role in _LOCATION_ROLE_BY_ROLE
+    }
+    for row in accounting.databases:
+        kind = _ROLE_BLOCKING_KIND.get(row.role)
+        if kind is None:
+            continue
+        if _is_outside_reader_boundary(row.directory_identity, row.location):
+            continue
+        # A candidate is message-bearing risk, not merely an unrecognised name:
+        # it stays a blocker wherever it was found, including beside a valid anchor.
+        if (kind == "unknown"
+                and row.location in _LOCATION_ROLE
+                and row.directory_identity in established_anchors):
+            continue
+        yield domain_boundary_class(row.directory_identity, row.location), kind
+    for row in accounting.rejections:
+        boundary = domain_boundary_class(row.directory_identity, row.location)
+        outside = boundary == DOMAIN_KNOWN_PHYSICAL_ONLY
+        if row.reason == UNREADABLE_DIRECTORY:
+            yield boundary, "unreadable"
+            continue
+        if row.reason == NESTED_DIRECTORY or row.is_directory:
+            # Nothing inside an unentered directory was looked at, so it cannot be
+            # shown to hold no message-bearing risk. Anchor scope covers what sits
+            # beside the anchor, not structures this pass never entered.
+            if not outside:
+                yield boundary, "nested"
+            continue
+        role = _container_role(row.location, row.name)
+        if role == ROLE_ORDINARY_MESSAGE:
+            # A refused shard-shaped name is a candidate, never a shard: this
+            # reader did not and may not open it.
+            role = ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
+        # Only the two conditions in CONTAINER_REQUIREMENTS may come from here.
+        # A refused business-shaped name is classified and reported as a gap, but
+        # D-040 keeps business message excluded from required truth, so it can
+        # never become an acceptance blocker.
+        if role in _REQUIREMENT_ROLE_GAPS and not outside:
+            yield boundary, _ROLE_BLOCKING_KIND[role]
 
 
 def unmet_requirements(accounting) -> tuple[str, ...]:
@@ -613,47 +741,8 @@ def unmet_requirements(accounting) -> tuple[str, ...]:
             # hold it. That is a different failure from the role never existing,
             # and it is what tells a future capsule where to look.
             unmet.add(REQUIRED_ROLE_UNCLASSIFIED)
-    # Boundary-class aware. One pass over every row that could be a blocker, so
-    # there is still exactly one place where acceptance is decided.
-    #
-    # An unexamined structure inside a domain independently proven outside the
-    # Reader boundary is visible physical structure, not a gap in Reader
-    # completeness: nothing inside it was looked at, nothing inside it counts as
-    # truth, and no recursion is implied either way. An unreadable directory
-    # stays blocking everywhere, because a directory that could not be listed is
-    # not the same claim as one that was listed and held nothing needed.
-    #
-    # Visible gaps and acceptance blockers are still different: business is
-    # excluded by D-040, and unknown/candidate risk blocks only where its parent
-    # domain is required or ambiguous. The role is never relabelled -- it stays
-    # visible and unsupported either way.
-    for row in accounting.databases:
-        if row.role not in (ROLE_UNKNOWN, ROLE_UNSUPPORTED_MESSAGE_CANDIDATE):
-            continue
-        if _is_outside_reader_boundary(row.directory_identity, row.location):
-            continue
-        unmet.add(_ROLE_GAPS[row.role])
-    for row in accounting.rejections:
-        outside = _is_outside_reader_boundary(row.directory_identity, row.location)
-        if row.reason == UNREADABLE_DIRECTORY:
-            unmet.add(DIRECTORY_UNEXAMINED)
-            continue
-        if row.reason == NESTED_DIRECTORY or row.is_directory:
-            if not outside:
-                unmet.add(DIRECTORY_UNEXAMINED)
-            continue
-        role = _container_role(row.location, row.name)
-        if role == ROLE_ORDINARY_MESSAGE:
-            # A refused shard-shaped name is a candidate, never a shard: this
-            # reader did not and may not open it.
-            role = ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
-        # Only the two conditions in CONTAINER_REQUIREMENTS may come from here.
-        # A refused business-shaped name is classified and reported as a gap, but
-        # D-040 keeps business message excluded from required truth, so it can
-        # never become an acceptance blocker. Intersecting with the closed
-        # vocabulary also keeps this predicate from inventing a condition.
-        if role in _REQUIREMENT_ROLE_GAPS and not outside:
-            unmet.add(_REQUIREMENT_ROLE_GAPS[role])
+    for _boundary, kind in _blocking_observations(accounting):
+        unmet.add(_BLOCKING_KIND_REQUIREMENT[kind])
     return tuple(sorted(unmet))
 
 

@@ -87,7 +87,14 @@ REJECTION_REASONS: frozenset[str] = frozenset({REJECTED_NOT_REGULAR_FILE})
 #   message_fts        already in this repository's v1 reader (core/wechat_db.py)
 #   media, session,
 #   contact            conventional WeChat store names; recognising them only
-#                       stops them looking anomalous
+#                       stops them looking anomalous. `message/message_resource.db`
+#                       is Tier 4 public provenance -- GreenBubbles' database
+#                       reference records it as rows connecting a message to media
+#                       metadata, ids, hashes or packed information, and
+#                       raclen/wechat-suite reads the same packed_info blob for
+#                       image md5 lookup -- but only for that exact location, so
+#                       `classify_message_directory_name` narrows it there
+#                       instead of editing this location-free classifier.
 #   hardlink, chatbot,
 #   sns                named in docs/v2/GREENBUBBLES_ASSIMILATION_AUDIT.md as
 #                       stores a comparable reader recognises. Behavioural
@@ -128,6 +135,25 @@ def classify_database_name(name: str) -> str:
     if _MESSAGE_LIKE.match(name):
         return ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
     return ROLE_UNKNOWN
+
+
+#: The one exact name, inside ``message/`` only, that public provenance documents
+#: as message-attachment resource metadata (ledger: the A10 classification doc).
+#: Exact match: an indexed variant has no public proof and stays a candidate.
+MESSAGE_RESOURCE_STORE_NAME = "message_resource.db"
+
+
+def classify_message_directory_name(name: str) -> str:
+    """The role a direct child of ``message/`` carries.
+
+    ``classify_database_name`` stays location-free on purpose: the same basename
+    elsewhere is still message-shaped risk. This is the narrow view for the one
+    location the public evidence names, so the message-directory inventory and
+    container accounting cannot disagree about it.
+    """
+    if name == MESSAGE_RESOURCE_STORE_NAME:
+        return ROLE_MEDIA
+    return classify_database_name(name)
 
 
 #: Which role raises which gap. Deliberately small: a recognised auxiliary
@@ -207,7 +233,7 @@ class DatabaseInventory:
         """
         present = {entry.role for entry in self.entries}
         for name, _ in self.rejections:
-            role = classify_database_name(name)
+            role = classify_message_directory_name(name)
             if role == ROLE_ORDINARY_MESSAGE:
                 # A refused shard-shaped name is a candidate, never a shard:
                 # this reader did not and may not open it. A refused media or
@@ -265,5 +291,6 @@ def inventory_message_directory(message_dir: Path) -> DatabaseInventory:
             rejections.append((child.name, REJECTED_NOT_REGULAR_FILE))
             continue
         entries.append(
-            DatabaseInventoryEntry(child.name, classify_database_name(child.name)))
+            DatabaseInventoryEntry(
+                child.name, classify_message_directory_name(child.name)))
     return DatabaseInventory(tuple(entries), tuple(rejections))

@@ -136,8 +136,8 @@ def test_no_db_bearing_directory_is_left_unexamined(tmp_path):
     # A nested directory is not walked, so its presence is a fail-closed
     # condition rather than a silent omission.
     root = _root(tmp_path)
-    (root / "hardlink" / "shards").mkdir(parents=True)
-    (root / "hardlink" / "shards" / "x.db").write_bytes(b"synthetic")
+    (root / "some_domain" / "shards").mkdir(parents=True)
+    (root / "some_domain" / "shards" / "x.db").write_bytes(b"synthetic")
 
     accounting = account_container(root)
 
@@ -520,7 +520,11 @@ def test_root_listing_error_is_sanitized(tmp_path, monkeypatch):
 
 # -- boundary/gap semantics: one machine acceptance truth --------------------
 
-@pytest.mark.parametrize("directory", [None, "message", "session", "contact", "extra_domain"])
+# Identity parents are absent on purpose: their unknown siblings are visible but
+# outside the anchor-scoped identity claim, and the candidate case there is
+# covered by the anchor-scope group below. Both remain blocking in every domain
+# that *is* ambiguous.
+@pytest.mark.parametrize("directory", [None, "message", "extra_domain"])
 @pytest.mark.parametrize("name,gap", [
     ("neutral_store.db", GAP_UNKNOWN_DATABASE),
     ("message_future.db", GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
@@ -856,7 +860,6 @@ def test_a_similar_looking_directory_name_stays_ambiguous(tmp_path, spoofed):
 
 
 def test_the_policy_mapping_is_exact_matching_only():
-    assert container.KNOWN_PHYSICAL_ONLY_DIRECTORIES == frozenset({"emoticon"})
     assert container.KNOWN_PHYSICAL_ONLY_DIRECTORIES == frozenset(
         container._PHYSICAL_ONLY_DOMAIN_NAMES)
 
@@ -923,3 +926,611 @@ def test_a_refused_message_shape_outside_a_physical_only_domain_is_accounted_onl
 
     assert accounting.rejections
     assert accounting.meets_requirements()
+
+
+# -- Workstream A: identity truth is anchor-scoped, not directory-scoped ------
+#
+# Production opens session/session.db and contact/contact.db by exact name and
+# never enumerates their siblings (bridge/acquired_database_source.py,
+# acquisition/source_refresher.py, wechatdb/provider/identity_catalog.py). So the
+# required identity claim is the anchor, not the whole parent directory. These
+# tests hold that line: an unknown sibling beside a proven anchor is visible and
+# unsupported but outside the identity claim, while every way of failing to
+# *prove* the anchor keeps blocking.
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_an_unknown_sibling_beside_a_proven_anchor_is_visible_but_not_a_blocker(tmp_path, directory):
+    root = _root(tmp_path)
+    (root / directory / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    # Visible and honestly labelled: nothing is relabelled or dropped.
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert GAP_UNKNOWN_DATABASE in accounting.gaps
+    # The anchor alone carries the identity role, and it is still proven.
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 1
+    # But an unrecognised basename beside the anchor does not make the Reader's
+    # identity claim untrue.
+    assert unmet_requirements(accounting) == ()
+    assert accounting.evidence()["unmet_requirements"] == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+@pytest.mark.parametrize("nested_names", [
+    ("neutral_store.db",),
+    ("message_0.db", "message_1.db", "biz_message_9.db"),
+])
+def test_a_sibling_directory_inside_an_identity_parent_still_blocks(tmp_path, directory, nested_names):
+    # Anchor scope only covers what sits *beside* the anchor and is a regular
+    # file the listing already named. A directory is a structure this accounting
+    # never entered, so it cannot be shown to hold no message-bearing risk -- and
+    # claiming otherwise would let session/archive/message_*.db pass unexamined.
+    root = _root(tmp_path)
+    nested = root / directory / "deeper"
+    nested.mkdir(parents=True)
+    for name in nested_names:
+        (nested / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    # Visible as unentered physical structure; no recursion was implied.
+    assert accounting.evidence()["rejections"].count(container.NESTED_DIRECTORY) == 1
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_a_refused_unknown_sibling_beside_a_proven_anchor_still_blocks(tmp_path, directory):
+    # The exemption is for an *unknown regular-file* sibling: one this listing
+    # named and classified. A refused entry is not that, so it stays blocking.
+    root = _root(tmp_path)
+    sibling = root / directory / "neutral_store.db"
+    sibling.symlink_to(root / "message" / "message_0.db")
+
+    accounting = account_container(root)
+
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_identity_anchor_scope_still_fails_when_the_exact_anchor_is_missing(tmp_path, directory):
+    root = _root(tmp_path)
+    (root / directory / f"{directory}.db").unlink()
+    (root / directory / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert REQUIRED_ROLE_UNCLASSIFIED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_identity_anchor_scope_still_fails_when_the_exact_anchor_is_a_symlink(tmp_path, directory):
+    root = _root(tmp_path)
+    anchor = root / directory / f"{directory}.db"
+    anchor.unlink()
+    anchor.symlink_to(root / "message" / "message_0.db")
+
+    accounting = account_container(root)
+
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_identity_anchor_scope_still_fails_when_the_exact_anchor_is_a_directory(tmp_path, directory):
+    root = _root(tmp_path)
+    anchor = root / directory / f"{directory}.db"
+    anchor.unlink()
+    anchor.mkdir()
+
+    accounting = account_container(root)
+
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+def test_identity_anchor_scope_still_fails_when_the_parent_cannot_be_listed(tmp_path, directory):
+    root = _root(tmp_path)
+    (root / directory).chmod(0o000)
+    try:
+        accounting = account_container(root)
+    finally:
+        (root / directory).chmod(0o700)
+
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact"])
+@pytest.mark.parametrize("name", ["message_future.db", "message_8.db"])
+def test_identity_anchor_scope_does_not_excuse_a_message_bearing_candidate(tmp_path, directory, name):
+    # A sibling whose own shape says it may carry ordinary message truth is a
+    # cross-domain message risk. D-040 keeps it an explicit gap, so it blocks.
+    root = _root(tmp_path)
+    (root / directory / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
+    assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_a_misplaced_ordinary_shard_beside_a_valid_anchor_stays_a_candidate(tmp_path):
+    root = _root(tmp_path)
+    (root / "session" / "message_8.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
+    assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_a_misplaced_identity_basename_never_satisfies_an_identity(tmp_path):
+    root = _root(tmp_path)
+    (root / "session" / "contact.db").write_bytes(b"synthetic")
+    (root / "contact" / "session.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_AUXILIARY] == 2
+    assert accounting.meets_requirements()
+
+
+def test_identity_anchor_scope_leaves_the_message_domain_fail_closed(tmp_path):
+    # Anchor scope is about identity only. message/ keeps its whole-directory
+    # claim: an unknown beside the shards is still a completeness blocker.
+    root = _root(tmp_path)
+    (root / "message" / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+# -- Workstream B: root domains and message shapes with public provenance ----
+#
+# A domain entry needs BOTH (1) the exact root-relative first path component under
+# db_storage in at least two independent public sources, and (2) at least two
+# sources that characterise its contents as non-message feature data, with no
+# source describing it as holding chat/message rows. Ledger and revisions: the A10
+# classification doc, sections 17.3 and 18.
+#
+# chatbot fails (2): the sources describe chatbot *messages*. general fails (2):
+# its documented tables hold message-event records (recalled-message content,
+# red-envelope and transfer rows tied to a message id, friend-request content).
+# solitaire fails (2): only one source characterises its contents; the other gives
+# a feature name, not a description of the rows. All three stay ambiguous.
+
+PROVEN_PHYSICAL_ONLY = frozenset({
+    "emoticon", "sns", "favorite", "head_image", "hardlink", "bizchat",
+    "third_app_icon",
+})
+NEW_PHYSICAL_ONLY = sorted(PROVEN_PHYSICAL_ONLY - {"emoticon"})
+STILL_AMBIGUOUS = ("chatbot", "solitaire", "general", "weclaw", "MMKV", "unproven_store")
+
+
+def test_the_proven_physical_only_set_is_exactly_the_ledger():
+    assert container.KNOWN_PHYSICAL_ONLY_DIRECTORIES == PROVEN_PHYSICAL_ONLY
+
+
+@pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
+@pytest.mark.parametrize("name,role", [
+    ("neutral_store.db", ROLE_UNKNOWN),
+    ("message_future.db", ROLE_UNSUPPORTED_MESSAGE_CANDIDATE),
+    ("message_0.db", ROLE_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_a_proven_domain_is_accounted_visible_and_non_blocking(tmp_path, domain, name, role):
+    root = _root(tmp_path, directories=(domain,))
+    placeholder = root / domain / "a.db"
+    placeholder.unlink()
+    placeholder.with_name(name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert container.domain_boundary_class(
+        domain, LOCATION_OTHER_DIRECTORY) == BOUNDARY_KNOWN_PHYSICAL_ONLY
+    # Still exactly the honest role: not relabelled, not supported, not dropped.
+    assert accounting.role_counts[role] == 1
+    assert accounting.gaps
+    assert accounting.accounts_for([(row.directory_identity, row.name)
+                                    for row in accounting.databases])
+    # It can never become required truth from a physical-only domain.
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 2
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
+def test_a_proven_domain_cannot_supply_required_truth_or_coverage(tmp_path, domain):
+    root = _root(tmp_path, message=(), session=False, contact=False, directories=(domain,))
+    (root / domain / "message_0.db").write_bytes(b"synthetic")
+    (root / domain / "session.db").write_bytes(b"synthetic")
+    (root / domain / "contact.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 0
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 0
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
+def test_a_proven_domain_nested_directory_is_visible_without_blocking(tmp_path, domain):
+    root = _root(tmp_path, directories=(domain,))
+    (root / domain / "deeper").mkdir()
+
+    accounting = account_container(root)
+
+    assert container.ContainerRejection(LOCATION_OTHER_DIRECTORY, "deeper",
+                                       container.NESTED_DIRECTORY, domain) in accounting.rejections
+    assert DIRECTORY_UNEXAMINED not in unmet_requirements(accounting)
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
+def test_an_unreadable_proven_domain_still_fails_closed(tmp_path, domain):
+    root = _root(tmp_path, directories=(domain,))
+    (root / domain).chmod(0o000)
+    try:
+        accounting = account_container(root)
+    finally:
+        (root / domain).chmod(0o700)
+
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
+def test_a_proven_domain_cannot_inject_a_required_identity(domain):
+    for role in (ROLE_SESSION_IDENTITY, ROLE_CONTACT_IDENTITY):
+        with pytest.raises(ValueError, match='^container database invalid$'):
+            container.ContainerDatabase(LOCATION_OTHER_DIRECTORY, "anchor.db", role, domain)
+
+
+@pytest.mark.parametrize("domain", STILL_AMBIGUOUS)
+def test_a_domain_without_sufficient_provenance_stays_ambiguous_and_blocking(tmp_path, domain):
+    root = _root(tmp_path)
+    (root / domain).mkdir()
+    (root / domain / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert container.domain_boundary_class(
+        domain, LOCATION_OTHER_DIRECTORY) == BOUNDARY_AMBIGUOUS
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("spoofed", [
+    "Favorite", "FAVORITE", "favorite2", "favorites", "favorite_", "xfavorite", "fav",
+    "head_images", "headimage", "Head_Image", "hardlink_0", "hardlinks",
+    "bizchat2", "BizChat", "biz", "third_app_icons", "third_app", "SNS", "sns_",
+])
+def test_a_similar_looking_proven_domain_name_stays_ambiguous(tmp_path, spoofed):
+    root = _root(tmp_path)
+    (root / spoofed).mkdir()
+    (root / spoofed / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert container.domain_boundary_class(
+        spoofed, LOCATION_OTHER_DIRECTORY) == BOUNDARY_AMBIGUOUS
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+def test_a_proven_domain_name_is_not_proven_at_the_container_root_or_as_a_basename(tmp_path):
+    # A root-level database named like a domain, and a basename inside another
+    # domain, are not the proven directory.
+    root = _root(tmp_path, root_files=("favorite.db", "general.db"))
+    (root / "some_domain").mkdir()
+    (root / "some_domain" / "favorite.db").write_bytes(b"synthetic")
+    (root / "some_domain" / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_the_contact_search_index_beside_the_anchor_is_visible_and_non_blocking(tmp_path):
+    # contact/contact_fts.db is a publicly documented identity-parent sibling. It
+    # needs no role of its own: anchor scope already leaves it visible, unsupported
+    # and outside the identity claim, and it can never satisfy a required role.
+    root = _root(tmp_path)
+    (root / "contact" / "contact_fts.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert unmet_requirements(accounting) == ()
+
+
+# message-directory shapes: message_resource.db is attachment/resource
+# metadata in both independent sources, so it is media -- not an unread
+# message-shaped candidate, and never ordinary message truth.
+
+@pytest.mark.parametrize("name,role", [
+    ("media.db", ROLE_MEDIA),
+    ("media_0.db", ROLE_MEDIA),
+    ("message_fts.db", ROLE_SEARCH_INDEX),
+    ("biz_message_0.db", ROLE_BUSINESS_MESSAGE),
+    ("message_0.db", ROLE_ORDINARY_MESSAGE),
+])
+def test_known_message_directory_shapes_keep_their_role(name, role):
+    assert classify_database_name(name) == role
+
+
+def test_message_resource_is_recognised_media_and_adds_no_message_truth(tmp_path):
+    root = _root(tmp_path, message=("message_0.db", "message_resource.db"))
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_MEDIA] == 1
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 1
+    assert accounting.gaps == ()
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+def test_a_weclaw_shaped_name_stays_unknown(tmp_path):
+    # One source calls it WeChat internal state with no usable content tables.
+    # Uncertain semantics stay unknown: mapping it to auxiliary merely because it
+    # is not a message store would be the inference this policy refuses.
+    root = _root(tmp_path, message=("message_0.db", "weclaw.db"))
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+# -- review corrections: the exemptions must be exactly as wide as the evidence
+
+@pytest.mark.parametrize("place", ["message", "session", "contact", None])
+def test_the_resource_shape_is_recognised_only_inside_the_message_directory(tmp_path, place):
+    # Both cited sources document message/message_resource.db. Nothing documents
+    # that name in the container root or an identity parent, so there the honest
+    # reading is still message-shaped risk beside or under an anchor.
+    root = _root(tmp_path)
+    target = root if place is None else root / place
+    (target / "message_resource.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    if place == "message":
+        assert accounting.role_counts[ROLE_MEDIA] == 1
+        assert accounting.meets_requirements()
+    else:
+        assert accounting.role_counts[ROLE_MEDIA] == 0
+        assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in unmet_requirements(accounting)
+        assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["session", "contact", "extra_domain"])
+def test_a_hidden_directory_holding_shards_still_blocks(tmp_path, directory):
+    # A dot prefix is how sidecar noise is excluded, but it must not let an
+    # unentered directory pass: nothing inside it was looked at either way.
+    root = _root(tmp_path, directories=(directory,) if directory == "extra_domain" else ())
+    nested = root / directory / ".archive"
+    nested.mkdir(parents=True)
+    (nested / "message_0.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.evidence()["rejections"].count(container.NESTED_DIRECTORY) == 1
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_a_hidden_anchor_is_reported_missing_rather_than_silently_absent(tmp_path):
+    root = _root(tmp_path)
+    (root / "session" / "session.db").unlink()
+    (root / "session" / ".session.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert REQUIRED_ROLE_UNCLASSIFIED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("name", [".archive", ".message", ".session"])
+def test_a_hidden_directory_at_the_root_is_not_skipped(tmp_path, name):
+    # The root is the strictest location -- its boundary class is ambiguous --
+    # so a hidden directory there cannot be the one place an unentered subtree
+    # goes unaccounted. It is accounted like any other root domain, so its
+    # message-shaped child is classified and blocks. A hidden *file* is ignored.
+    root = _root(tmp_path)
+    nested = root / name
+    nested.mkdir()
+    (nested / "message_0.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert name in {row.identity for row in accounting.examined_directories}
+    assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
+    assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("where", ["root", "session", "message"])
+def test_a_symlink_named_like_nothing_in_particular_is_still_refused(tmp_path, where):
+    # A symlink is neither a plain file nor a real directory. Ignoring it would
+    # let it alias message-bearing content under a name this pass never reads.
+    root = _root(tmp_path)
+    target = root / "message" if where == "root" else root
+    (target / "link").symlink_to(root / "message")
+
+    accounting = account_container(root)
+
+    assert REJECTED_NOT_REGULAR_FILE in accounting.evidence()["rejections"]
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("where", ["root", "session"])
+def test_a_hidden_sidecar_file_is_still_ignored(tmp_path, where):
+    root = _root(tmp_path)
+    target = root if where == "root" else root / "session"
+    (target / ".DS_Store").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.evidence()["rejections"] == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("where", ["root", "session", "message"])
+def test_a_hidden_symlink_to_a_directory_is_still_refused(tmp_path, where):
+    # Hidden is not the same as sidecar. A dot-prefixed *file* is noise, but a
+    # dot-prefixed symlink can still alias message content under a name this
+    # pass never classifies, so hiding it must not buy it a pass.
+    root = _root(tmp_path)
+    target = root if where == "root" else root / where
+    (target / ".link").symlink_to(root / "message")
+
+    accounting = account_container(root)
+
+    assert REJECTED_NOT_REGULAR_FILE in accounting.evidence()["rejections"]
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+# -- aggregate blocking evidence: derived from the one acceptance policy ------
+#
+# The next real gate must tell a visible-but-outside-the-claim observation from a
+# blocking one without naming anything. Those counts are read from the same pass
+# that decides acceptance; there is no second verdict implementation.
+
+BLOCKING_KEYS = ("blocking_unknown_count", "blocking_candidate_count",
+                 "blocking_nested_count", "blocking_unreadable_count")
+
+
+def _blocking(summary, boundary):
+    return {key: summary[boundary][key] for key in BLOCKING_KEYS}
+
+
+def _no_blocking():
+    return {key: 0 for key in BLOCKING_KEYS}
+
+
+def test_an_unknown_beside_a_proven_anchor_is_counted_but_not_blocking(tmp_path):
+    root = _root(tmp_path)
+    (root / "session" / "neutral_store.db").write_bytes(b"synthetic")
+
+    summary = account_container(root).evidence()["domain_summary"]
+
+    assert summary[BOUNDARY_REQUIRED_IDENTITY]["unknown_count"] == 1
+    assert _blocking(summary, BOUNDARY_REQUIRED_IDENTITY) == _no_blocking()
+
+
+def test_an_unknown_in_an_identity_directory_without_its_anchor_is_blocking(tmp_path):
+    root = _root(tmp_path, session=False)
+    (root / "session").mkdir()
+    (root / "session" / "neutral_store.db").write_bytes(b"synthetic")
+
+    summary = account_container(root).evidence()["domain_summary"]
+
+    assert _blocking(summary, BOUNDARY_REQUIRED_IDENTITY)["blocking_unknown_count"] == 1
+
+
+def test_blocking_counts_split_by_condition_and_boundary_class(tmp_path):
+    root = _root(tmp_path, message=("message_0.db", "neutral_store.db", "message_future.db"),
+                 directories=("emoticon",))
+    (root / "some_domain" / "deeper").mkdir(parents=True)
+    (root / "some_domain" / "neutral_store.db").write_bytes(b"synthetic")
+    (root / "emoticon" / "neutral_store.db").write_bytes(b"synthetic")
+    (root / "emoticon" / "deeper").mkdir()
+    (root / "contact" / "deeper").mkdir()
+
+    summary = account_container(root).evidence()["domain_summary"]
+
+    assert _blocking(summary, BOUNDARY_REQUIRED_MESSAGE) == {
+        "blocking_unknown_count": 1, "blocking_candidate_count": 1,
+        "blocking_nested_count": 0, "blocking_unreadable_count": 0}
+    assert _blocking(summary, BOUNDARY_AMBIGUOUS) == {
+        "blocking_unknown_count": 1, "blocking_candidate_count": 0,
+        "blocking_nested_count": 1, "blocking_unreadable_count": 0}
+    assert _blocking(summary, BOUNDARY_REQUIRED_IDENTITY) == {
+        "blocking_unknown_count": 0, "blocking_candidate_count": 0,
+        "blocking_nested_count": 1, "blocking_unreadable_count": 0}
+    # Counted and visible, never blocking.
+    assert _blocking(summary, BOUNDARY_KNOWN_PHYSICAL_ONLY) == _no_blocking()
+    # a.db (the fixture's own) and neutral_store.db: both counted, neither blocking.
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["unknown_count"] == 2
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["nested_unexamined_count"] == 1
+
+
+def test_an_unreadable_directory_blocks_even_inside_a_physical_only_domain(tmp_path):
+    root = _root(tmp_path, directories=("emoticon",))
+    (root / "emoticon").chmod(0o000)
+    try:
+        summary = account_container(root).evidence()["domain_summary"]
+    finally:
+        (root / "emoticon").chmod(0o700)
+
+    assert _blocking(summary, BOUNDARY_KNOWN_PHYSICAL_ONLY)["blocking_unreadable_count"] == 1
+
+
+def test_a_refused_unknown_sibling_beside_an_anchor_is_a_blocking_unknown(tmp_path):
+    root = _root(tmp_path)
+    (root / "session" / "linked.db").symlink_to(root / "message" / "message_0.db")
+
+    summary = account_container(root).evidence()["domain_summary"]
+
+    assert _blocking(summary, BOUNDARY_REQUIRED_IDENTITY)["blocking_unknown_count"] == 1
+
+
+@pytest.mark.parametrize("build", [
+    lambda root: None,
+    lambda root: (root / "message" / "neutral_store.db").write_bytes(b"x"),
+    lambda root: (root / "message" / "message_future.db").write_bytes(b"x"),
+    lambda root: (root / "session" / "neutral_store.db").write_bytes(b"x"),
+    lambda root: (root / "contact" / "message_9.db").write_bytes(b"x"),
+    lambda root: (root / "session" / "deeper").mkdir(),
+    lambda root: (root / "some_domain").mkdir() or (root / "some_domain" / "x.db").write_bytes(b"x"),
+    lambda root: (root / "favorite").mkdir() or (root / "favorite" / "x.db").write_bytes(b"x"),
+    lambda root: (root / "favorite").mkdir() or (root / "favorite" / "deeper").mkdir(),
+    lambda root: (root / "stray.db").write_bytes(b"x"),
+    lambda root: (root / "message" / "biz_message_0.db").write_bytes(b"x"),
+])
+def test_the_summary_blocking_counts_agree_with_the_single_acceptance_predicate(tmp_path, build):
+    root = _root(tmp_path)
+    build(root)
+
+    accounting = account_container(root)
+    summary = accounting.evidence()["domain_summary"]
+    totals = {key: sum(summary[b][key] for b in summary) for key in BLOCKING_KEYS}
+    derived = set()
+    if totals["blocking_unknown_count"]:
+        derived.add(GAP_UNKNOWN_DATABASE)
+    if totals["blocking_candidate_count"]:
+        derived.add(GAP_UNSUPPORTED_MESSAGE_CANDIDATE)
+    if totals["blocking_nested_count"] or totals["blocking_unreadable_count"]:
+        derived.add(DIRECTORY_UNEXAMINED)
+
+    # The role-level conditions are not row observations; everything else is.
+    row_conditions = set(unmet_requirements(accounting)) - {
+        REQUIRED_ROLE_MISSING, REQUIRED_ROLE_UNCLASSIFIED}
+    assert derived == row_conditions
+    assert accounting.meets_requirements() == (unmet_requirements(accounting) == ())

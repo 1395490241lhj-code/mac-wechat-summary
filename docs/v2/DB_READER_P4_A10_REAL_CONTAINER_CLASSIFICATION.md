@@ -1129,3 +1129,458 @@ Next step only: **provenance-only / synthetic reconciliation of the remaining
 ambiguous blocker classes**, with no additional real-source access until a new
 independent domain policy is sealed. Not started here, and not automatically
 authorized.
+
+---
+
+## 17. Residual blocker reconciliation — identity anchor scope and public layout provenance (2026-10-02)
+
+### 17.1 Designation and evidence class
+
+This phase is **strictly synthetic and public-provenance-only**. No real source
+was accessed: the WeChat container was not listed, stat'ed, searched, hashed or
+opened, the previously operator-designated root was not touched, and no name,
+directory or count from the §16 real run was used to derive any rule here. The
+13 / 1 / 2 aggregate figures of §16 are historical input only. Nothing in this
+phase was written to make them green.
+
+Two independent questions were answered. **Workstream A:** is required identity
+truth the whole `session/`/`contact/` directory, or only the exact anchors?
+**Workstream B:** do additional root domains and `message/` shapes have enough
+*independent public* provenance to be pre-classified?
+
+### 17.2 Identity anchor scope (Workstream A)
+
+Recovered from committed production routing, not from physical layout:
+
+- `bridge/acquired_database_source.py` passes explicitly prepared handles under
+  `"session.db"` and `"contact.db"`.
+- `acquisition/source_refresher.py` refreshes only message shards and states that
+  identity anchors are never discovered or changed.
+- `wechatdb/provider/identity_catalog.py` `IdentityCatalog.build()` consumes
+  explicitly supplied `ShardEntry` objects for the two roles and infers nothing
+  from siblings.
+- Repository search finds no production enumeration of `session/`/`contact/`
+  siblings.
+
+So production requires the **parent location** and the **exact anchor**. It
+never claims that every other database in that directory is identity truth.
+D-040 requires the two identity *roles*, and its operative wording keeps a
+message-bearing unsupported or unknown structure an explicit gap; it does not
+claim the entire directory. The two claims are now separated:
+
+| Observation | Visible | Blocking | Can satisfy required identity |
+|---|---|---|---|
+| exact valid anchor | yes | no | its own role only |
+| missing anchor | yes | **yes** (`required_role_missing`, `required_role_unclassified`) | no |
+| refused anchor (symlink, directory, non-regular) | yes | **yes** | no |
+| unreadable parent | yes | **yes** (`directory_unexamined`, `required_role_missing`) | no |
+| unknown regular-file sibling beside a proven anchor | yes | no — outside the anchor claim | no |
+| refused unknown sibling (symlink) beside a proven anchor | yes | **yes** (`unknown_database`) | no |
+| message-bearing candidate sibling | yes | **yes** (`unsupported_message_candidate`) | no |
+| nested sibling inside an identity parent | yes | **yes** (`directory_unexamined`) | no |
+| misplaced ordinary shard (`session/message_0.db`) | yes | **yes** (candidate) | no |
+| misplaced identity basename (`session/contact.db`) | yes | no | no — auxiliary, never identity |
+
+`message/` keeps its whole-directory claim: an unknown beside the shards is
+still a completeness blocker. Ambiguous and root-level behaviour is unchanged.
+
+Anchor scope reaches only what the listing already named. A *directory* beside
+the anchor is different from a regular-file sibling: nothing inside it was
+entered, so this accounting cannot show that it holds no message-bearing risk,
+and exempting it would let `session/archive/message_0.db` pass unexamined. Nested
+structures inside identity parents therefore stay `directory_unexamined`
+blockers, exactly as in every other non-exempt domain — including a dot-prefixed
+directory such as `session/.archive/`, which is recorded like any other. This
+narrowing came out of an independent read-only review of this capsule (see
+§17.10).
+
+### 17.3 Root-domain provenance ledger (Workstream B)
+
+Tier 1–3 were re-read from committed material. Tier 4 added two independent
+public repositories, consulted only for layout and behavioural facts — no code,
+SQL, fixture, credential method or identifier-derivation algorithm was copied.
+
+| Source | Revision | License |
+|---|---|---|
+| `https://github.com/bojieli/greenbubbles` | `69f19c7089d7ef011e9ba43d44c6fb4e6e5be98b` | MIT (repo `LICENSE`; an earlier draft of this row said GPL-3.0, which was wrong and is corrected in §18.1) |
+| `https://github.com/raclen/wechat-suite` | `68235fb4308d71b1462e78e533850162849562a1` | MIT |
+| `https://github.com/fanyuantaier/wechatauto-replica` | `204f1296e5cae158b0fbc1a3f97819fa1b77d487` | Apache-2.0 |
+
+Corroboration actually established:
+
+| Domain | Exact root layout proven? | Purpose | Source(s) | Confidence | Boundary class |
+|---|---|---|---|---|---|
+| `emoticon/` | yes | sticker md5 to CDN mapping | Tier 2 committed `core/wechat_db.py` | high | `known_physical_only` (unchanged) |
+| `sns/` | yes | Moments feature data, not chat rows | GreenBubbles `docs/WECHAT_DATABASE_FORMAT.md` (`sns/sns.db` in the observed `db_storage` tree) + raclen `wechat-decrypt/export_sns.py` (`os.path.join(DECRYPTED_DIR, "sns", "sns.db")`) | high | `known_physical_only` (**new**) |
+| `bizchat/`, `chatbot/`, `favorite/`, `general/`, `hardlink/`, `head_image/` | yes, but **single-source** | feature data (business chat, chatbot, favourites, system events, attachment link indexes, avatars) | GreenBubbles only | **one source — insufficient** | `ambiguous` (unchanged, fail-closed) |
+| `message/`, `session/`, `contact/` | yes | required roles | Tier 1 production routing | high | `required_message` / `required_identity` |
+| container root | no | — | — | — | `ambiguous` (unchanged) |
+
+The corroboration bar was deliberately not lowered. **This table is the first
+pass and is partly superseded by §18**: it consulted Tier 4 incompletely (the
+pinned Tier 3B reader and two further public layout listings were not read), so
+its "single-source" row and its note that Replica names `sns.db` by basename only
+were wrong. §18 holds the corrected ledger; the six rows above are re-decided
+there under an explicit two-part admission rule.
+
+### 17.4 Message-directory provenance ledger (Workstream B)
+
+| Shape | Role | Purpose | Public provenance | Reader effect |
+|---|---|---|---|---|
+| `message_<n>.db` | `ordinary_message` | chat shards | Tier 2 committed reader + GreenBubbles + raclen | the only message truth |
+| `biz_message_<n>.db` | `business_message` | business-account/chat shards | Tier 2 + GreenBubbles | visible gap, excluded by D-040 |
+| `message_fts.db` | `search_index` | full-text index | Tier 2 + GreenBubbles | optional, no coverage |
+| `media.db`, `media_<n>.db` | `media` | voice/attachment metadata | Tier 2 + GreenBubbles + raclen + Replica | optional, no coverage |
+| `message/message_resource.db` | `media` | rows connecting a message to media metadata, ids, hashes, packed info | GreenBubbles database reference + raclen `decode_image.py` / `export_messages.py` reading the same `packed_info` blob | optional, no coverage (**new**) |
+| `weclaw.db` | `unknown` | "WeChat internal state"; no usable content tables on the inspected account | GreenBubbles only, semantics uncertain | stays a visible blocker |
+
+No new role was created. `message_resource.db` joins the existing `media` role
+because that vocabulary already truthfully covers attachment/resource metadata,
+and it must be matched before the message-like pattern or it would be misread as
+an unread message-shaped candidate. The mapping is **location-scoped to
+`message/`**, because that is the exact location the sources name: it is applied
+in the container layer's routing, not in the location-free basename classifier,
+so the same basename at the container root or in an identity parent is still an
+explicit message-shaped candidate and still blocks. `weclaw.db` was deliberately
+**not** mapped: calling it auxiliary merely because it is not a message store is
+exactly the inference this policy refuses. `message_resource_<n>.db` stays a
+candidate — the proven shape carries no index suffix, and an indexed variant is
+unproven either way.
+
+### 17.5 Remaining ambiguity — still fail-closed
+
+`required_message` unknowns and candidates, every ambiguous domain (including
+the container root and every domain §18 leaves out), every message-shaped name
+outside `message/`, and every nested structure outside a proven physical-only
+domain remain blocking. Physical-only domains are exempt from *completeness*
+blocking only; their contents stay visible, keep their honest role, cannot
+satisfy any required role and cannot strengthen coverage. Exact-match only: no
+prefix, suffix, substring, case-folding or fuzzy matching. Each exemption is
+exactly as wide as its evidence: each proven domain by exact directory name (§18.4), the resource
+store by exact `message/` location, and anchor scope by exact parent location.
+
+### 17.6 One acceptance truth
+
+Unchanged: `ContainerAccounting.meets_requirements()` delegates to
+`unmet_requirements()`, and `evidence()["unmet_requirements"]` renders the same
+tuple. The anchor-scope rule was added **inside** that single predicate, as two
+conditions on rows that were already being evaluated — there is no wrapper, no
+second verdict and no second policy engine. `domain_summary` needed no schema
+change; the existing boundary-class aggregates already report these rows.
+
+### 17.7 RED-first evidence
+
+- **RED-A (identity scope)** — 4 failed / 118 passed. The failures were exactly
+  the two anchor-scope groups: unknown sibling beside a proven anchor, and nested
+  sibling inside an identity parent.
+- **RED-B (root-domain provenance)** — 4 failed / 125 passed: the `sns`
+  physical-only set assertion and the three `sns` non-blocking cases.
+- **RED-C (message shape)** — 2 failed / 125 passed: `message_resource.db` role
+  and its no-coverage effect.
+
+Two pre-existing tests encoded the old whole-directory identity claim and were
+corrected rather than worked around; their identity-parent coverage is now
+explicit in the anchor-scope group.
+
+- **RED-D (review correction)** — 4 failed / 131 passed, after review found the
+  nested-directory exemption too broad. The failures were the nested-sibling
+  group, parametrized over both identity parents and both a benign and a
+  message-bearing fixture. A refused (symlink) unknown sibling was pinned at
+  the same time and was already green.
+- **RED-E (second review correction)** — 6 failed / 137 passed, after the
+  re-review found two exemptions wider than their evidence: the resource-store
+  mapping applied by basename outside `message/`, and a dot-prefixed directory
+  bypassed the nested-directory rejection entirely. The failures were three
+  location cases for the resource shape and three domains for the hidden
+  directory. The hidden-anchor case was pinned at the same time and was already
+  green.
+- **RED-F (third review correction)** — 6 failed / 144 passed, after the
+  review found two more silent skips: a dot-prefixed *directory at the root*
+  (`_is_directory` matched it, but nothing in the root loop treated it as a
+  domain, so it was never entered and never recorded), and a non-dot symlink
+  pointing at a directory, which is neither a real directory nor a plain file
+  and therefore fell through both branches. Three root domains and three
+  locations were pinned; the hidden-anchor case was re-pinned and was green.
+- **RED-G (fourth review correction)** — 3 failed / 150 passed, after the
+  re-review found the same fall-through reached back into dot-prefixed names:
+  `session/.link -> ../message` and `root/.link` were skipped by the hidden-name
+  exemption, because that exemption tested the *name* rather than the *type*.
+  The exemption now tests only `S_ISREG`, so hiding a symlink buys it nothing
+  while `.DS_Store` and other hidden regular files stay ignored as sidecar
+  noise. Three locations were pinned, and the existing hidden-sidecar test
+  (root and `session/`) was the counter-check that still passes.
+
+### 17.8 Synthetic verification
+
+Focused container accounting **153 passed**; full acquisition **326 passed**;
+wechatdb **514 passed**; bridge **270 passed**. `git diff --check` and the
+populated `git diff --cached --check` passed. All tests synthetic.
+
+### 17.9 What this phase did not do
+
+No real rerun, no source access of any kind, no credential/keychain/decryption/
+attach/re-sign work, no Database Mode, no P5, no UI/MCP/Swift/crypto/parser/query
+change, no source-selector or standing-enrollment change, no recursion, no
+traversal widening, and **no change to D-040**. Real rerun evidence is required
+before any of this is claimed to hold against a real container.
+
+### 17.10 Independent review of this capsule
+
+A separate read-only reviewer worked only from committed code and synthetic
+fixtures in `/tmp`. It confirmed the anchor-scope premise (production exact-opens
+both anchors and enumerates no identity sibling), confirmed every failure mode
+still fails closed, found no provenance finding and no acceptance-policy
+finding. Its first Important finding was the nested-directory exemption described
+in §17.2, corrected under RED-D; its re-review confirmed that fix and no other
+path became permissive. That re-review raised two further Minors, both real and
+both fail-open, both corrected under RED-E: the resource-store mapping applied by
+basename outside `message/` (now location-scoped), and a dot-prefixed directory
+bypassing the nested-directory rejection (now recorded like any other
+directory). It also corrected an imprecise note: a dot-prefixed `.session.db` is
+not proven as the anchor, but it *is* reported missing — `required_role_missing`
+and `required_role_unclassified` both fire from the directory being examined,
+independently of whether a candidate was named. Two earlier Minor notes were
+adopted as documentation or test hygiene: the sibling row is qualified as a
+*regular-file* sibling, and the duplicated physical-only set literal was
+dropped. `message_resource_<n>.db` remains a candidate, because the proven shape
+carries no index suffix.
+
+Round 3 produced two more Important findings, both corrected under RED-F: a
+dot-prefixed directory at the root was skipped entirely (root domains are now
+accounted like any other directory), and a non-dot symlink to a directory was
+silently ignored (it now produces `REJECTED_NOT_REGULAR_FILE` and blocks as
+`unknown_database`). Symlinks are never followed. Round 4 produced one more
+Important finding on the same code path, corrected under RED-G: the hidden-name
+exemption was a name test where it had to be a type test, so a dot-prefixed
+symlink to a directory still passed. The precise invariant now sealed is: only a
+dot-prefixed **plain file** is ignored; any non-regular entry is recorded
+regardless of its name, in the root and in every direct directory.
+
+---
+
+## 18. Second public-provenance pass — corrected census and aggregate blocking evidence (2026-10-02)
+
+This section supersedes §17.3's single-source conclusion and extends §17.4. It is
+**still strictly synthetic and public-provenance-only: no real source was
+accessed**, no name, directory or count from §16 was used, and every candidate
+below came from public documentation and public code. The search was seeded only
+by public WeChat database-layout material, never by any local layout.
+
+### 18.1 Why a second pass, and what it corrected
+
+The first pass did not read the pinned Tier 3B reader (`wechat-cli`) and stopped
+at three repositories. A bounded public search then found further independent
+layout listings. Re-fetching every cited source at its pinned revision also
+corrected three statements in §17:
+
+- **GreenBubbles is MIT-licensed**, not GPL-3.0 (its `LICENSE` at the pinned
+  revision begins "MIT License"; the project's own
+  `GREENBUBBLES_ASSIMILATION_AUDIT.md` already said MIT).
+- **WeChat Auto Replica does spell root-relative paths** — its Chinese README's
+  `db_storage` tree lists `sns\sns.db`, `message\message_resource.db`,
+  `message\media_0.db`, `session\session.db` and `contact\contact.db`. §17.3 said
+  it named `sns.db` by basename only, which was incorrect.
+- **`favorite/` was not single-source**: the pinned `wechat-cli` reader opens
+  `os.path.join("favorite", "favorite.db")` relative to the `db_storage`
+  directory.
+
+### 18.2 Sources (behavioural and layout facts only)
+
+No implementation, SQL, fixture, credential method or identifier derivation was
+copied; nothing is imported. All are public GitHub repositories, fetched at the
+exact commit shown.
+
+| ID | Source | Revision | Commit date | License | Evidence used |
+|---|---|---|---|---|---|
+| S1 | `https://github.com/bojieli/greenbubbles` | `69f19c7089d7ef011e9ba43d44c6fb4e6e5be98b` | 2026-10-01 | MIT | `docs/WECHAT_DATABASE_FORMAT.md`: `db_storage` tree and per-database purpose table (macOS-oriented) |
+| S2 | `https://github.com/raclen/wechat-suite` | `68235fb4308d71b1462e78e533850162849562a1` | 2026-07-11 | MIT | `wechat-decrypt/`: `export_sns.py` (`sns`/`sns.db`), `emoticons.py` (`emoticon`/`emoticon.db`), `decode_image.py` and `export_messages.py` (`message/message_resource.db`), `session`/`contact` anchors |
+| S3 | `https://github.com/fanyuantaier/wechatauto-replica` | `204f1296e5cae158b0fbc1a3f97819fa1b77d487` | 2026-10-01 | Apache-2.0 | `README.zh-CN.md` §二 `db_storage` tree (Windows 4.x) |
+| S4 | `https://github.com/huohuoer/wechat-cli` (pinned in `WECHAT_CLI_BACKEND_AUDIT.md`) | `a3789232d4f79bf0b30634d9dadbce71e4acd601` | 2026-04-06 | Apache-2.0 | `commands/favorites.py` (`favorite`/`favorite.db`, `fav_db_item`), `session`/`contact` anchors; `DBCache` keys relative to `db_dir`, documented in `core/messages.py` as the `db_storage` directory |
+| S5 | `https://github.com/CatchLee/wechat_wish_agent` | `069fdd9448695ed604a789a9921b85614cea2b10` | 2026-02-23 | **no license file** — facts only, nothing reusable | `src/core/weixin_db_arch.md`: the author's own `db_storage` listing and notes |
+| S6 | `https://github.com/Glory0707/wx-qq-decrypt` | `f9b3c7f9e69205d45d6ea8bdabe4444fd1f9c4a5` | 2026-09-07 | MIT | `docs/database_inventory.md`: WeChat 4.1.13.12 on Windows 11, 27 databases, "directory structure consistent with the client's original layout" |
+
+These are different authors and repositories whose documents each describe their
+own inspection; that is the independence this ledger relies on. It is weaker than
+it looks: independent review found a shared lineage — S4's README says it is built
+on `ylytdeng/wechat-decrypt`, S2's `wechat-decrypt/` has the same file set, S6
+vendors a copy of the same lineage, and S3 and S5 cite shared community material.
+Admission still holds because every admitted domain has an independent pair (S1 is
+not part of that lineage, and S3 and S5 are separate), but it is not a claim of
+fully independent observation, and it is not a claim about any real container.
+Layout agrees across a macOS-oriented source (S1) and Windows 4.x sources (S3,
+S6), which is corroboration of the `db_storage` layout rather than a platform
+claim.
+
+### 18.3 Admission rule (both parts required)
+
+1. **Layout** — the exact root-relative directory `<domain>/<db>` is spelled in at
+   least two independent sources. A basename alone never counts.
+2. **Semantics** — at least two sources *describe what the rows are* (metadata,
+   index, resource, saved items, icons, avatars) as non-message feature data. A
+   bare feature name is not a description. No source may describe chat or
+   message rows, or message-event records (recalled-message content, per-message
+   system events), in the domain.
+
+A domain failing either part stays `ambiguous` and fail-closed.
+
+### 18.4 Root-domain ledger
+
+| Domain | Layout sources | Semantics (sources) | Decision |
+|---|---|---|---|
+| `emoticon/` | Tier 2 `core/wechat_db.py`; S1, S2 (`emoticons.py`), S5, S6 | stickers: md5 to CDN mapping (Tier 2, S2), sticker packages (S1) | `known_physical_only` (unchanged) |
+| `sns/` | S1, S2, S3, S5, S6 | Moments timeline (S1, S3, S6) | `known_physical_only` |
+| `favorite/` | S1, S4, S5, S6 | saved items, "not chat history" (S1); S4 lists saved items with their sender and source chat; 收藏 (S6); S5 guesses saved messages. A saved copy, not the chat store | `known_physical_only` (**new**, judgment call §18.9) |
+| `head_image/` | S1, S5, S6 | avatar blobs keyed by username and MD5 (S1, S5); 头像 (S6) | `known_physical_only` (**new**) |
+| `hardlink/` | S1, S5, S6 | MD5-to-file attachment index (S1); 文件硬链接索引, "file hardlink index" (S6). S5 admits it does not understand it. S6 describes the rows, so it counts | `known_physical_only` (**new**) |
+| `bizchat/` | S1, S5, S6 | business-chat group and user metadata (S1); 企业微信的基本信息 (S5); S6 gives only a label, so S1 and S5 carry the semantics | `known_physical_only` (**new**, judgment call §18.9) |
+| `third_app_icon/` | S1 (table; not in its tree), S6 | third-party app icon images (S1); 第三方应用图标, "third-party app icons" (S6) | `known_physical_only` (**new**) |
+| `general/` | S1, S5, S6 | S5 and S6 call it miscellaneous settings, but S1 documents message-event records in it: a recall table with a message `content` column, red-envelope and transfer tables keyed by a message id, friend-request content (found by independent review) | `ambiguous` — fails part 2 (first admitted, then **withdrawn** before commit) |
+| `chatbot/` | S1, S6 | S1: "chatbot sessions and chatbot messages" — **message-bearing** | `ambiguous` — fails part 2 |
+| `solitaire/` | S1, S6 | only S1 characterises the contents (接龙 content, folds, validity); S6 gives a feature name only | `ambiguous` — fails part 2 |
+| `message/`, `session/`, `contact/` | Tier 1; S1–S6 | required roles | required classes (unchanged) |
+| container root | no | — | `ambiguous` (unchanged) |
+
+Exemption is exactly the existing one: a physical-only domain's unknown or
+candidate databases and unentered nested directories stop being
+Reader-completeness blockers, while they stay visible with their honest role,
+cannot satisfy any required role, cannot strengthen coverage, and an unreadable
+directory still blocks. Exact match only.
+
+### 18.5 Message-directory provenance ledger (additions)
+
+| Shape | Role | Public provenance | Reader effect |
+|---|---|---|---|
+| `message/message_resource.db` | `media` | S1 (tree + table), S2 (`cache.get("message/message_resource.db")`, `os.path.join(..., "message", "message_resource.db")`), S3 (`message\message_resource.db`), S6 | optional, no coverage — four sources, location `message/` only |
+| `message/media_<n>.db` | `media` | S1, S3 (`message\media_0.db`), S5, S6 | unchanged |
+| `message/biz_message_<n>.db` | `business_message` | S1, S5, S6 | unchanged: visible gap, excluded by D-040 |
+| `message/message_fts.db` | `search_index` | S1, S5, S6 | unchanged |
+| `message/weclaw.db` | `unknown` | S1: "internal state, no usable content tables"; S6: "resource/auxiliary" — the two characterisations differ | stays a visible blocker; no role is justified |
+| `message/*.kvdb` | none | S5 | not a `.db` candidate, already outside the inventory |
+| `contact/contact_fts.db` | none needed | S1, S5, S6: contact search index | beside a proven anchor it is visible, unsupported and non-blocking by anchor scope (§17.2); it can never satisfy a role |
+| `favorite/favorite_fts.db` | none needed | S1, S5, S6 | covered by the `favorite/` domain |
+
+No new role was created and `_MESSAGE_LIKE` was not loosened.
+`message_resource_<n>.db` stays a candidate: no source documents an indexed
+variant.
+
+### 18.6 One definition of the resource store
+
+The message-directory inventory (`inventory_message_directory`, consumed by the
+refresher and by `acquired_database_source` for the Reader's compatibility
+gaps) still classified `message/message_resource.db` as an unsupported message
+candidate, while container accounting called it `media`. One physical file had
+two answers. `classify_message_directory_name` in `database_inventory.py` is now
+the single definition of the exact-name rule and both layers use it; the
+location-free `classify_database_name` is unchanged, so the same basename
+anywhere else is still a candidate. A refused (symlink) `message_resource.db` in
+`message/` carries no message claim in the inventory, like any refused media
+name; container accounting still records it as a refusal.
+
+### 18.7 Aggregate blocking evidence
+
+Under anchor scope `required_identity.unknown_count` can no longer say whether an
+unknown observation blocked. `domain_summary` now carries four further counts per
+boundary class — `blocking_unknown_count`, `blocking_candidate_count`,
+`blocking_nested_count`, `blocking_unreadable_count` — and they are **read from
+the same pass that decides acceptance**: acceptance logic moved into one
+`_blocking_observations` generator that both `unmet_requirements` and
+`domain_summary` consume. There is still one predicate,
+`ContainerAccounting.meets_requirements()` delegating to `unmet_requirements()`;
+the report cannot disagree with it because it is not a second implementation.
+A parametrized test pins that the summary's blocking totals imply exactly the
+row-level tokens of `unmet_requirements`. Two reading notes from review:
+`blocking_unknown_count` can exceed `unknown_count`, because the plain count covers
+database rows only while the blocking count also includes refused (for example
+symlinked) unknowns; and zero blocking counts do not imply the predicate is met,
+because the required-role tokens (`required_role_missing`,
+`required_role_unclassified`) are not row observations.
+
+### 18.8 RED-first evidence for this pass
+
+- **RED-H (inventory consistency)** — 2 failed / 32 passed
+  (`test_database_inventory.py`): the message-directory inventory classified the
+  resource store as a candidate, and a refused one left a candidate gap. The five
+  pinning tests around it were green.
+- **RED-I (root-domain provenance)** — 25 failed / 201 passed: the ledger set
+  assertion, and each of the seven domains then admitted (`general` was withdrawn later, RED-K) for unknown, candidate and
+  ordinary-shaped names plus a nested directory. One earlier test used
+  `hardlink/` as an arbitrary directory name and was moved to a neutral name; the
+  old "single-source stays ambiguous" test, which encoded the superseded
+  conclusion, was replaced by tests for the domains that still fail the rule.
+- **RED-J (blocking aggregates)** — 16 failed / 226 passed: the new keys and the
+  agreement property.
+
+- **RED-K (review correction)** — 2 failed / 232 passed, after independent review
+  found that `general/` documents message-event records: the set assertion and
+  the still-ambiguous case. `general` was withdrawn from the proven set.
+- Two bridge tests pin the live effect of §18.6 (a complete read stays complete
+  beside `message_resource.db`; an indexed variant still caps it). They are
+  characterisation tests of an already-implemented inventory change, covered
+  RED-first at the inventory level by RED-H.
+
+Final synthetic counts: `acquisition/tests` 418 passed, `wechatdb` 514 passed,
+`bridge` 272 passed. `git diff --check` and the populated staged check passed.
+No real source, credential, Keychain, decryption, process, WeChat or Database
+Mode action was taken.
+
+### 18.9 Judgment calls and accepted risks for the operator
+
+- **Withdrawn: `general/`.** It was admitted by the first draft of this pass and
+  withdrawn after independent review showed that S1 documents message-event
+  records in it. It stays ambiguous.
+- **`favorite/`** is admitted as a saved copy of items (some saved from chats,
+  with sender and source chat), not the chat store; S1 says "not chat history".
+  A reasonable reader could keep it ambiguous; revert by deleting its name from
+  `_PHYSICAL_ONLY_DOMAIN_NAMES`.
+- **`bizchat/`** is business-chat group/user metadata; business messages live in
+  `biz_message_<n>.db`, handled separately and unchanged.
+- **Evidence is per file, the exemption is per directory.** The sources describe
+  specific databases (`favorite/favorite.db`, ...), but the policy exempts the
+  whole proven directory, including an unrecognised database or nested structure
+  inside it. S1 itself warns WeChat may add a numeric suffix, create a new feature
+  database or move a feature into another store. The same was already true of
+  `emoticon/` before this pass. This is an **accepted risk**, not a proof;
+  restricting the exemption to named basenames would be a separate decision.
+- **Anchor scope relies on a narrow name regex.** An unknown regular-file sibling
+  beside a proven anchor is non-blocking, while a name matching the message-like
+  pattern (`message*.db`, `biz_message*.db`) still blocks as a candidate. A
+  message-bearing store with another name (`msg_0.db`, `chat_0.db`, a different
+  case) beside an anchor stays visible as `unknown` but passes. Production never
+  reads it, so this cannot cause a misread; it does mean the claim is "no known
+  message-shaped structure escapes", not "no message-bearing structure escapes".
+- **Hidden directories now block.** A hidden directory at the root (a stray
+  `.Trash`-like entry) is accounted as an ambiguous domain and blocks, where
+  before it was silently skipped. That is a liveness cost, not a safety one;
+  hidden regular files (`.DS_Store`) stay ignored.
+- **Case-insensitive filesystems.** `Session.db` is listed under its stored name
+  and is reported missing, while production might open it. That fails closed.
+- **Live Reader completeness changes (needs explicit operator sign-off).** The
+  message-directory inventory now treats `message/message_resource.db` as media.
+  `bridge/acquired_database_source.py::_accounted` capped every complete read to
+  `partial_inventory` when the inventory held an unsupported-candidate gap, so a
+  `message/` containing that file no longer carries that cap. The file is
+  attachment metadata in four public sources, but this is a change to a live
+  coverage claim, not only to A10 accounting.
+
+### 18.10 Verification performed
+
+This pass re-fetched every cited path at its pinned revision through the public
+GitHub API, and re-read the production routing it depends on
+(`bridge/acquired_database_source.py`, `acquisition/source_refresher.py`,
+`wechatdb/provider/identity_catalog.py`). A separate read-only reviewer then ran
+about fifty hand-built synthetic cases and 400 random fixtures with no real-source
+access, re-fetched all six sources, and re-checked the acceptance refactor:
+**APPROVED WITH MINORS**, no Critical finding, no fail-open path. Its three
+Important findings (the `general/` message-event records, the per-file versus
+per-directory evidence scope, and the live-completeness change) and its minors are
+recorded in §18.9 or corrected in §18.3–18.7; `general/` was withdrawn under RED-K.
+The aggregate-versus-verdict check found 0 mismatches over the random sweep.
+The reviewer could not run the bridge suite from its working directory; it was run
+here (272 passed).
+
+### 18.11 Status
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. This is policy and
+public provenance, not real evidence: a fresh structural rerun under this sealed
+policy, with separate explicit operator authorization, is the only way to learn
+whether it holds against a real container.

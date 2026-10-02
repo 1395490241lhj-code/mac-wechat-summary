@@ -735,3 +735,86 @@ remains 9/10; P4-B remains MET 4/4.** See the A10 gate document §16 for the
 current real evidence. Next only: provenance-only / synthetic reconciliation of
 the remaining ambiguous blocker classes, with no additional real-source access
 until a new independent domain policy is sealed.
+
+## 14. Residual reconciliation under the sealed residual policy (2026-10-02)
+
+A **synthetic, public-provenance-only** capsule has now answered the two
+questions §13 left open. **No real source was accessed**, no §16 count was used to
+derive a rule, and no A10 evidence was re-run. Full ledger, sources, revisions and
+licenses: A10 gate document §17.
+
+**Identity truth is anchor-scoped.** Production opens `session/session.db` and
+`contact/contact.db` by exact name, supplies them explicitly to the identity
+catalog, refreshes only message shards, and never enumerates identity siblings.
+Required identity is therefore the anchor, not the parent directory. An unknown
+regular-file sibling beside a proven anchor stays visible and unsupported but no
+longer blocks. Every way of failing to *prove* the anchor — missing, symlinked, a
+directory, or an unlistable parent — still blocks, as does a message-bearing
+candidate sibling, a refused (symlink) unknown sibling and a misplaced ordinary
+shard. `message/` retains its whole-directory claim.
+
+An unentered nested directory inside an identity parent still blocks. Anchor
+scope covers what the listing already named, not structures this accounting never
+opened; exempting them would let `session/archive/message_0.db` pass unexamined.
+An independent read-only review of the capsule found that over-broad exemption,
+and it was narrowed under a fourth RED group (4 failed / 131 passed). A dot
+prefix does not exempt a directory either: `session/.archive/` is recorded as an
+unentered structure like any other.
+
+The same rule applies to symlinks. A symlink is neither a real directory nor a
+plain file, so it aliases content this pass never reads under a name it never
+classifies; symlinks are never followed and every one is recorded as
+`REJECTED_NOT_REGULAR_FILE` and blocks as `unknown_database`, in the root and in
+every direct directory. A dot prefix does not exempt one. What a dot prefix does
+exempt is a plain file: only a dot-prefixed **regular file** is sidecar noise and
+is ignored. Two further review rounds found three more silent skips on that
+path — a dot-prefixed directory at the root, a non-dot symlink to a directory,
+and a dot-prefixed symlink to a directory. They are recorded in the gate
+document §17.7 as RED-F (6 failed / 144 passed) and RED-G (3 failed / 150
+passed).
+
+**Six new root domains.** `sns/`, `favorite/`, `head_image/`, `hardlink/`,
+`bizchat/` and `third_app_icon/` are now `known_physical_only`, under a
+two-part admission rule: the exact root-relative directory is spelled in at least
+two independent public sources, and at least two sources characterise it as
+non-message feature data with none describing chat rows. A second pass (A10 gate
+document §18) re-fetched every source at its pinned revision, read the pinned
+`wechat-cli` reader the first pass had skipped, and corrected three first-pass
+statements (GreenBubbles is MIT, not GPL; WeChat Auto Replica does spell
+root-relative paths; `favorite/` is not single-source). `chatbot/` stays
+`ambiguous` because its sources describe chatbot *messages*, `general/` because
+it documents message-event records (admitted by a first draft, withdrawn after
+independent review), and `solitaire/` because only one source characterises it.
+The container root is unchanged and still ambiguous. `favorite/` rests on a
+reading of the semantics, the exemption is per directory while the evidence is per
+file, and a change to the live `message_resource.db` completeness claim needs
+explicit operator sign-off (A10 §18.9).
+
+**One new message shape.** `message/message_resource.db` is classified `media` —
+independently documented as attachment/resource metadata in at least three
+sources, and already truthfully inside the existing role vocabulary. The mapping is scoped to
+that exact location, because that is what both sources name: elsewhere the same
+basename is still an explicit message-shaped candidate and still blocks. No new
+role was created.
+`weclaw.db` stays `unknown`: its semantics are uncertain, and mapping it to
+auxiliary merely because it is not a message store is the inference this policy
+refuses.
+
+Acceptance remains a single predicate, `unmet_requirements()`; the new rules were
+added inside it rather than beside it. `domain_summary` now also reports
+`blocking_unknown/candidate/nested/unreadable` counts per boundary class, read from
+the same `_blocking_observations` pass that decides acceptance, so the next real
+rerun can tell an observation outside the identity claim from a blocking one
+without naming anything. The message-directory inventory and container accounting
+now share one definition of the resource-store rule (A10 §18.6).
+
+Synthetic verification: `acquisition/tests` 418 passed, `wechatdb` 514 passed,
+`bridge` 272 passed. RED-first groups A–G are recorded in A10 §17.7, and H (2
+failed / 32 passed), I (25 failed / 201 passed) and J (16 failed / 226 passed) in
+§18.8, then K (2 failed / 232 passed) after a fifth independent review. Five review
+rounds found eight over-broad exemptions, all corrected RED-first; each exemption is exactly as wide as the evidence behind it.
+
+**This is policy, not real evidence.** A10 remains **UNMET**, P4-A remains
+**9/10**, and P4-B remains **MET 4/4**. A fresh real structural rerun under this
+sealed policy is required before any of it is claimed to hold against a real
+container, and that rerun needs separate explicit operator authorization.
