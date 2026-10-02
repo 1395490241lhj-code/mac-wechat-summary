@@ -40,6 +40,7 @@ from .discovery import SHARD_READABLE, SHARD_UNAVAILABLE, SHARD_UNKNOWN
 from .identity import IdentityResolver
 from .compatibility import SchemaCompatibilityReport, require_supported_surface
 from .message_identity import message_sequence
+from .query import MAX_READ_LIMIT
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 from .routing import STOP_EXHAUSTED, STOP_SAFE, STOP_UNSAFE, ShardRouter
 
@@ -82,9 +83,18 @@ def _order(record: MessageRecord) -> tuple[int, str]:
     return (message_sequence(record), record.session_id)
 
 
-def _positive(limit: int) -> int:
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-        raise ValueError("limit must be a positive integer")
+def _bounded(limit: int) -> int:
+    """One limit, bounded at both ends, defined once for the whole package.
+
+    The query surface publishes the same bound and validates it into a typed
+    refusal; the provider keeps raising because that is what its own callers
+    already handle. What matters is that there is a single number: a consumer
+    that bypasses the surface and calls the provider directly finds no wider
+    door than one that goes through it.
+    """
+    if (isinstance(limit, bool) or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_READ_LIMIT):
+        raise ValueError("limit must be an integer within the shared bound")
     return limit
 
 
@@ -120,7 +130,7 @@ class ShardedMessageProvider:
     # -- the three reads -----------------------------------------------------
 
     def list_conversations(self, limit: int) -> ReadResult[NormalizedConversation]:
-        limit = _positive(limit)
+        limit = _bounded(limit)
         trail = self._traverse(None, None, None, None, None)
         reads = trail.reads
         newest: dict[str, tuple[MessageRecord, str]] = {}
@@ -160,7 +170,7 @@ class ShardedMessageProvider:
         requested_start: float | None = None,
         requested_end: float | None = None,
     ) -> ReadResult[NormalizedMessage]:
-        limit = _positive(limit)
+        limit = _bounded(limit)
         trail = self._traverse(requested_start, requested_end, conversation_id,
                               before_sequence, limit)
         return self._answer(trail, requested_start, requested_end, limit)
@@ -168,7 +178,7 @@ class ShardedMessageProvider:
     def get_recent_messages(
         self, since_observed_at: float, limit: int
     ) -> ReadResult[NormalizedMessage]:
-        limit = _positive(limit)
+        limit = _bounded(limit)
         trail = self._traverse(since_observed_at, None, None, None, limit)
         return self._answer(trail, since_observed_at, None, limit)
 
