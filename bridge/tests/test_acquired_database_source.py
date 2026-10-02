@@ -40,6 +40,7 @@ from message_source import (  # noqa: E402
     COVERAGE_PARTIAL,
     REASON_CALLER_LIMIT,
     REASON_FULL_WINDOW_OBSERVED,
+    REASON_PARTIAL_INVENTORY,
     SOURCE_DATABASE,
     SOURCE_VISUAL,
     MessageSourceError,
@@ -98,6 +99,18 @@ def _session_database(path: Path, conversation: str = CONVERSATION) -> None:
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE SessionTable (username TEXT)")
     connection.execute("INSERT INTO SessionTable VALUES (?)", (conversation,))
+    connection.commit()
+    connection.close()
+
+
+def _second_message(path: Path, conversation: str = CONVERSATION) -> None:
+    """One more message in an existing fixture database, so a limit can bind."""
+    digest = hashlib.md5(conversation.encode("utf-8")).hexdigest()
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO Msg_" + digest + " "
+        "(local_id, server_id, local_type, real_sender_id, create_time, message_content) "
+        "VALUES (2, 102, 1, 1, 200, X'66697874757265')")
     connection.commit()
     connection.close()
 
@@ -578,6 +591,100 @@ def test_a_successful_database_read_states_its_full_coverage(tmp_path):
     assert recent.coverage.status == COVERAGE_COMPLETE
     assert recent.coverage.reason == REASON_FULL_WINDOW_OBSERVED
     assert recent.coverage.freshness is ReadFreshness.UNKNOWN
+
+
+def test_an_unread_message_bearing_database_cannot_let_a_read_claim_complete(tmp_path):
+    """Excluding a non-shard must not turn an honest partial into a complete.
+
+    The inventory keeps this directory's business-message database out of the
+    source set, so the provider never sees it and would otherwise report a
+    complete read over history it cannot account for.
+    """
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    (message_dir / "biz_message_0.db").write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    listed = source.list_conversations(10)
+    assert listed.items, "the ordinary shard is still read"
+    assert listed.coverage.status == COVERAGE_PARTIAL
+    assert listed.coverage.reason == REASON_PARTIAL_INVENTORY
+
+
+def test_an_unrecognised_database_also_caps_the_read(tmp_path):
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    (message_dir / "zzz_unknown.db").write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    assert source.list_conversations(10).coverage.reason == REASON_PARTIAL_INVENTORY
+
+
+def test_recognised_auxiliary_databases_leave_a_complete_read_complete(tmp_path):
+    """A search, media or auxiliary database is not a coverage hole.
+
+    Auxiliary presence must never weaken a read either: it carries no messages
+    this reader claims to have accounted for.
+    """
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    for name in ("message_fts.db", "media.db", "session.db", "contact.db"):
+        (message_dir / name).write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    listed = source.list_conversations(10)
+    assert listed.coverage.status == COVERAGE_COMPLETE
+    assert listed.coverage.reason == REASON_FULL_WINDOW_OBSERVED
+
+
+def test_an_inventory_gap_never_rewrites_a_stronger_partial_reason(tmp_path):
+    """The inventory ceiling applies to a complete claim, and only to that.
+
+    A read already cut short by the caller has a stronger, already-partial
+    reason; replacing it with ``partial_inventory`` would lose the truncation
+    the caller needs.
+    """
+    home = tmp_path / "home"
+    message_dir = tmp_path / "message"
+    message_dir.mkdir()
+    shard = message_dir / "message_0.db"
+    _message_database(shard)
+    _second_message(shard)
+    (message_dir / "biz_message_0.db").write_bytes(b"synthetic")
+    session = tmp_path / "session.sqlite"
+    _session_database(session)
+    _write_manifest(home, shard, session)
+
+    source = open_database_source(
+        _Visual, home=home, key_store=_KeyStore(), decryptor=_Decryptor())
+
+    limited = source.get_recent_messages(0, 1)
+    assert limited.coverage.truncated is True
+    assert limited.coverage.reason == REASON_CALLER_LIMIT
 
 
 def test_a_fallback_answer_carries_the_visual_coverage_verbatim(tmp_path):

@@ -55,10 +55,14 @@ except ImportError:  # pragma: no cover - bridge launched from another cwd
     from acquisition.source_refresher import BoundedSourceRefresher
     from acquisition.coordinator import AcquisitionCleanupError
 from message_source import (
+    COVERAGE_COMPLETE,
+    COVERAGE_PARTIAL,
+    REASON_PARTIAL_INVENTORY,
     SOURCE_DATABASE,
     SOURCE_VISUAL,
     MessageSource,
     MessageSourceError,
+    ReadCoverage,
     ReadResult,
     SourceStatus,
     database_conversation_id,
@@ -181,6 +185,41 @@ def _tagged_messages(result: ReadResult) -> ReadResult:
     )
 
 
+def _accounted(result: ReadResult, inventory_gaps: tuple[str, ...]) -> ReadResult:
+    """Cap the coverage when the inventory left a message-bearing database out.
+
+    A business-message, unknown or unsupported-candidate database is
+    deliberately not read, so the provider cannot see it and would otherwise
+    report a complete read over history it never accounted for. The items
+    stand -- they are what the ordinary shards really produced -- but the claim
+    drops to ``partial_inventory``, which is the existing reason for a source
+    that could not read everything its own directory holds. This is a ceiling
+    applied to an existing envelope, not a second coverage model.
+
+    Only a *complete* claim is capped. A read that is already partial for a
+    stronger reason -- a measured caller cut, a source limit, an unsafe stop --
+    keeps that reason and its truncation: it is already not claiming the whole
+    window, and rewriting it would discard evidence the caller needs.
+    """
+    if not inventory_gaps or result.coverage.status != COVERAGE_COMPLETE:
+        return result
+    coverage = result.coverage
+    return ReadResult(
+        items=result.items,
+        coverage=ReadCoverage(
+            status=COVERAGE_PARTIAL,
+            reason=REASON_PARTIAL_INVENTORY,
+            requested_start=coverage.requested_start,
+            requested_end=coverage.requested_end,
+            observed_through=coverage.observed_through,
+            complete_through=None,
+            freshness=coverage.freshness,
+            truncated=False,
+            item_count=coverage.item_count,
+        ),
+    )
+
+
 class AcquiredDatabaseSource:
     """Build and fully consume one provider inside each acquisition lease."""
 
@@ -234,7 +273,18 @@ class AcquiredDatabaseSource:
                 # A part the request required could not be read. The read is
                 # not the source's to claim, and no partial answer escapes.
                 raise _DatabaseUnavailable()
-            return result
+            return _accounted(result, self._inventory_gaps(active_set))
+
+    def _inventory_gaps(self, source_set: object) -> tuple[str, ...]:
+        """Which databases this directory holds that the read did not cover.
+
+        Only a refresher that can account for roles reports anything; an
+        injected refresher without that capability reports nothing, and its
+        read is judged exactly as it was before this existed.
+        """
+        if not hasattr(self._refresher, "inventory"):
+            return ()
+        return self._refresher.inventory(source_set).gaps
 
     def _read(self, method: str, *args: object, fallback: bool):
         """One answer, and which source produced it.

@@ -43,6 +43,7 @@ try:
         descriptors_for,
         source_fingerprint,
     )
+    from acquisition.database_inventory import inventory_message_directory
     from acquisition.source_locator import (
         ROLE_CONVERSATION_IDENTITY,
         ROLE_DISPLAY_IDENTITY,
@@ -252,7 +253,14 @@ def candidate_source_set(source_root: Path) -> AcquisitionSourceSet:
         raise BootstrapSourceError(BOOTSTRAP_SOURCE_INVALID) from None
     descriptors = descriptors_for(fingerprint)
     directory = root / MESSAGE_DIRECTORY
-    parts = tuple(sorted(directory.glob("*.db"))) if directory.is_dir() else ()
+    # Only an ordinary message shard is a message part. A business-message,
+    # search, media, auxiliary, unknown or unsupported-candidate database in
+    # the same directory is accounted for by the inventory and never admitted
+    # as one, rather than being handed to the reader as a shard.
+    parts = tuple(
+        directory / name
+        for name in inventory_message_directory(directory).message_shards
+    )
     if not parts:
         raise BootstrapSourceError(BOOTSTRAP_SOURCE_INVALID)
     return AcquisitionSourceSet(

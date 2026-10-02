@@ -208,6 +208,20 @@ def test_descriptors_come_from_the_committed_helper(tmp_path):
         descriptors_for(fingerprint).values())
 
 
+def test_a_candidate_root_admits_only_ordinary_message_shards(tmp_path):
+    # The bootstrap entry point shares the inventory contract: a directory that
+    # also holds a business-message, search, media, auxiliary or unrecognised
+    # database still yields only the ordinary shards as message parts.
+    root = _source_root(tmp_path / "root", parts=2)
+    for name in ("biz_message_0.db", "message_fts.db", "media.db", "zzz.db"):
+        _encrypted(root / "message" / name, b"\x00" * 16)
+
+    source_set = boot.candidate_source_set(root)
+
+    assert [s.main.name for s in source_set.message_sources] == [
+        "message_0.db", "message_1.db"]
+
+
 def test_the_operator_secret_boundary_is_injectable():
     supplied = boot.OperatorSuppliedSecret(lambda: ACCOUNT)
     assert supplied.acquire("f") == SecretBytes(ACCOUNT)
