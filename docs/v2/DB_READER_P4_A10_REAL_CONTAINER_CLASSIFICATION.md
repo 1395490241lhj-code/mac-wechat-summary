@@ -1,13 +1,14 @@
 # DB Reader P4-A A10 — bounded real container-wide structural classification gate
 
-> **Current verdict: A10 UNMET — P4-A remains 9/10.** The fresh real rerun
-> after instrument correction completed accounting, with unchanged pre/post
-> source metadata, but the sealed predicate still fails on explicit gaps.
+> **Current verdict: A10 UNMET — P4-A remains 9/10.** The fresh real run
+> under the reconciled committed `a9b93d9` single predicate completed accounting;
+> the method returned FAIL with three fixed blocking tokens. Source pre/post
+> unchanged: YES. P4-B remains MET 4/4.
 >
-> Four separate evidence phases: **§§1–10 first real run (historical UNMET on
-> instrument defect); §11 synthetic correction (PASS, no real source); §12 fresh
-> real rerun (historical UNMET on returned gaps); §13 synthetic boundary/gap
-> reconciliation (single predicate, fresh real rerun still required).** P4-B remains MET 4/4.
+> Five distinct evidence phases: §§1–10 first real run (instrument defect,
+> UNMET); §11 synthetic instrument correction (PASS); §12 pre-reconciliation
+> fresh real run (UNMET); §13 synthetic boundary/gap reconciliation (PASS);
+> §14 fresh real run under the reconciled single predicate (current UNMET).
 
 ### Historical first real-run overview
 
@@ -587,3 +588,117 @@ bootstrap, process access, WeChat interaction, P5 or product work.
 
 Next step only: **fresh A10 structural rerun under the reconciled single
 acceptance predicate**, under a separate explicit real-source authorization.
+
+
+## 14. Fresh real structural rerun under the reconciled single predicate (2026-10-02)
+
+**Verdict: A10 UNMET — P4-A remains 9/10. P4-B remains MET 4/4.**
+This is the fifth independent evidence event. Historical §§1–13 and Vault
+E-030/F-045, E-031/F-046, E-032/F-047 retain their original scope and results.
+
+### Designation, sealed implementation and one execution
+
+**Exact root explicitly designated by operator.** The one-run, exact-root-only,
+read-only authorization was used for the operator-designated current WeChat
+`db_storage` root. Root validation used `lstat` and required a non-symlink
+directory. The source path/account identifier existed only in execution-local
+memory; no discovery, substitution, sibling/upward walk or alternate account.
+**Persistent enrollment: NO.** No SourceLocator record, app configuration,
+Keychain item, bootstrap or Database Mode activation.
+
+Before any source inspection, local/tracking/live remote all matched
+`a9b93d9dacdef69f58736d58cc6c2fd9e6f0061f`, ahead/behind 0/0, clean tree.
+The loaded container-accounting and generic inventory source bytes were checked
+against that committed implementation. **Fresh reconciled run: YES;
+`account_container()` invocations: exactly 1; accounting completed: YES.**
+An exclusive start marker prevents accidental repetition of the execution.
+No production code or test changed in this real-run capsule.
+
+The structural result comes exclusively from
+`accounting.meets_requirements()`: **FALSE / FAIL**. Component evidence from
+`unmet_requirements(accounting)` and `evidence()["unmet_requirements"]` agrees:
+
+```
+directory_unexamined
+unknown_database
+unsupported_message_candidate
+```
+
+**One authoritative predicate; no wrapper override.** The wrapper renders these
+results and performs mechanical key/directory-set and source-integrity audits;
+it does not combine `.gaps` with unmet conditions to invent another verdict.
+No required-role missing/unclassified condition was returned. Required schema,
+WAL, parsing and identity compatibility remain scoped to the existing sealed
+evidence in §7; this structural run did not open a database or re-prove them.
+
+### Fresh aggregate accounting
+
+| Role | Count | Class | Status |
+|---|---:|---|---|
+| ordinary_message | 7 | required | structurally accounted in the defined message domain |
+| session_identity | 1 | required | sealed location/anchor semantics; structurally accounted |
+| contact_identity | 1 | required | sealed location/anchor semantics; structurally accounted |
+| business_message | 1 | excluded/non-required | explicit unsupported `business_message_unread`; not a blocker by itself |
+| search_index | 1 | optional | accounted; no search or content access |
+| media | 1 | optional | accounted; no content access |
+| auxiliary | 1 | accounting-only | nonrequired; adds no message truth |
+| unknown | 13 | ambiguous/blocking | visible `unknown_database`; no exemption |
+| unsupported_message_candidate | 1 | message-bearing risk/blocking | visible fixed candidate gap; no promotion or whitelist |
+
+| Total accounting | Fresh result |
+|---|---:|
+| DB rows / unique DB keys | 27 / 27 |
+| DB + rejection entries / unique accounting keys | 29 / 29 |
+| Duplicate entries | 0 |
+| Direct directories / examined directories | 15 / 15 |
+| Rejections | 2 |
+| Nested/unexamined entries | 2 |
+
+The returned keys and direct-directory identities mechanically match the
+pre-run bounded entry set. Keys/names remain operation-local and are not
+persisted. This audit adds no classifier or PASS/FAIL gap rule. The **13 unknown,
+1 candidate and 2 nested/unexamined** counts are freshly measured; they
+independently match the earlier aggregate counts. They were not copied from a
+historical receipt. No unknown name or nested content was investigated. No
+ordinary-shaped store outside the message domain was manually promoted.
+
+### Integrity, privacy and stop boundary
+
+**Source pre/post unchanged: YES.** The guard compared existence/entry-set,
+entry type, size, inode and `mtime_ns` for the root, its direct entries and
+children of visible non-symlink direct directories. Both passes use the same
+bounded traversal. Nested directory entries are statted, never entered. No
+content hashes, database opening, SQL/schema/rows, credential/decryption or
+snapshot activity. Only aggregate counts, fixed tokens and booleans survive.
+
+No real source path, account directory, real filename/directory name,
+message/contact identity, username/wxid, table name/digest, content, key, salt,
+passphrase or raw exception is persisted by this capsule. No source mutation,
+sidecar/temp file, permission change, checkpoint or migration. No credential,
+Keychain, bootstrap, decryption, plaintext copy, encrypted snapshot, LLDB,
+Frida, attach/process memory, injection/hooks, re-sign, clone launch or WeChat
+launch/quit/activation/navigation/export/share/account change.
+
+The real-evidence phase stopped after the failed predicate and post-integrity
+guard. No production fix, mapping change, deeper traversal, second invocation,
+P5 or Database Mode work followed. D-040 is unchanged.
+
+### Review and synthetic tests
+
+Focused container-accounting suite, including acceptance/boundary regressions:
+**64 passed**. Full acquisition suite: **237 passed**. All tests synthetic; the
+Keychain adapter checks use injected FakeSecurity. No unrelated real-data gate
+was run. `git diff --check` and populated staged `git diff --cached --check`
+passed before the evidence commit.
+
+Independent read-only review: **APPROVED**, no execution defect or Important
+reporting defect. The reviewer checked the wrapper, sanitized receipt, sealed
+source and both reports, and used in-memory synthetic checks to verify the guard
+can detect bounded entry-set/type/size/inode/mtime changes. Source unchanged YES
+is explicitly limited to that metadata guard. No source re-access, wrapper
+execution, real rerun or edits occurred during review. Suite totals above are
+parent-run evidence; the reviewer did not repeat those suites.
+
+Next step only: **a provenance-based synthetic reconciliation of the remaining
+sanitized blocker categories, without re-accessing the real source**. Not started
+here. The production acquisition blocker remains unchanged and orthogonal.

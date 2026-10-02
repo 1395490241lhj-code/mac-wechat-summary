@@ -11,7 +11,7 @@
 > below; their statements that container accounting is absent or the real gate
 > is unexecuted are superseded by the later accounting/correction and fresh
 > rerun. Current scored evidence is in §13 and
-> `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §12. §8 is no longer a
+> `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §14. §8 is no longer a
 > proposal, §12's original result is historical, and §6's matrix is read against
 > D-040's role table. Where this document and D-040 could be read as disagreeing,
 > D-040 and the spec §15 text win.
@@ -618,7 +618,7 @@ checklist score or D-040 decision changes.
 | A7 | Unsupported/unknown message-bearing structures remain explicit gaps | **MET** | `business_message_unread`, `unknown_database`, `unsupported_message_candidate` (`acquisition/database_inventory.py:62-70`); `test_a_business_message_shard_is_never_absorbed_by_the_ordinary_reader`, `test_a_new_message_bearing_relation_keeps_the_shard_from_claiming_complete`; `test_unknown_and_candidate_roles_keep_their_existing_gap` |
 | A8 | Typed bounded query contract | **MET** | `71b83ac`; `docs/v2/DB_READER_TYPED_BOUNDED_QUERY_SURFACE.md`; 58 test functions in `wechatdb/tests/provider/test_typed_query_surface.py`, incl. the post-review `math.isfinite` refusal fix (`wechatdb/provider/query.py:358`) and four AST guards (`test_typed_query_surface.py:626,806,926,969`). Nothing product-wired. |
 | A9 | Optional FTS/media incompatibility does not weaken ordinary coverage | **MET** | `test_an_optional_role_is_accounted_and_never_probed`, `test_optional_role_states_can_never_strengthen_a_message_claim`, `test_optional_drift_does_not_move_the_message_coverage_verdict`; FTS spike `12a195a` — `native_search` is refused by design. |
-| A10 | Bounded real container-wide classification confirms no unaccounted required/message-bearing role | **UNMET** | **The single remaining P4-A gap.** Fresh real rerun after `906a4d8` completed accounting: 27 DB rows, 0 duplicate keys, 15 direct directories; 13 `unknown_database`, 1 `unsupported_message_candidate`, 2 `nested_directory` → `directory_unexamined`. Source pre/post unchanged. See `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §12. Prior instrument-defect run and synthetic correction remain separate historical phases. |
+| A10 | Bounded real container-wide classification confirms no unaccounted required/message-bearing role | **UNMET** | **The single remaining P4-A gap.** Fresh real rerun under committed `a9b93d9` reconciled single predicate: method returned FAIL; machine unmet = `directory_unexamined`, `unknown_database`, `unsupported_message_candidate`. Accounting completed: 27 DB rows, 29 unique accounting keys, 0 duplicates, 15/15 direct directories; 13 unknown, 1 candidate, 2 nested/unexamined. Source pre/post unchanged. See `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §14. All four earlier phases remain historical evidence; no production changes or retry. |
 
 **P4-A is not yet `MET`.** It is `9 MET / 1 UNMET`, and the one `UNMET` item
 is a real-evidence item, not a design question. Two consequences are recorded
@@ -626,12 +626,13 @@ honestly rather than folded into the verdict:
 
 - **Container structural accounting now exists; complete-container acceptance
   remains UNMET.** The bounded primitive was introduced at `853d481` and its
-  per-directory identity correction sealed at `906a4d8`. The fresh A10 rerun
+  per-directory identity correction sealed at `906a4d8`, with single-predicate
+  reconciliation at `a9b93d9`. The fresh reconciled A10 rerun
   accounts the root and every direct-directory identity exactly once, including
   required identity roles, but retains unknown/candidate gaps and explicit
   unexamined nested entries. This is structural accounting, not new parsing,
   recursive coverage, schema compatibility or a P4-A pass. See the A10 gate
-  document §12; no further production work is authorized by that evidence.
+  document §14; no further production work is authorized by that evidence.
 - **Session/contact accounting parity** (the §6 matrix "remaining action") is
   **documentation-only under D-040**: a required-role declaration plus the
   existing fixed-token refusal is the whole contract. No subsystem is created
@@ -696,7 +697,11 @@ shard shapes outside production `message/` routing remain unsupported candidates
 not required-role evidence. Physical container presence alone does not require
 implementing every store; unknown/nested domains have no independently proven
 exclusion and remain fail-closed. Business stays excluded with a visible gap;
-FTS/media stay optional. No traversal widening or real access occurred. A10
-remains UNMET pending a fresh real rerun under this predicate; P4-A stays 9/10
-and P4-B stays MET 4/4. See §12 for historical real evidence and §13 for the
-current boundary and visible-gap/blocker table.
+FTS/media stay optional. The synthetic reconciliation widened no traversal and
+accessed no real source. The separately authorized §14 real structural run used
+that implementation unchanged. A10
+now remains UNMET after the fresh real rerun under this predicate; P4-A stays
+9/10 and P4-B stays MET 4/4. See the A10 gate document §14 for current real
+evidence, §§1–13 for prior phases, and §13 for the boundary/gap semantics. Next
+only: separately authorized provenance-based synthetic reconciliation of the
+remaining sanitized blocker categories, without source re-access.
