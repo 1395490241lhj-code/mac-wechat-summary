@@ -38,7 +38,7 @@ from .discovery import (
 )
 from .discovery import SHARD_READABLE, SHARD_UNAVAILABLE, SHARD_UNKNOWN
 from .identity import IdentityResolver
-from .compatibility import require_supported_surface
+from .compatibility import SchemaCompatibilityReport, require_supported_surface
 from .message_identity import message_sequence
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 from .routing import STOP_EXHAUSTED, STOP_SAFE, STOP_UNSAFE, ShardRouter
@@ -75,6 +75,7 @@ class _Traversal:
     reads: dict[str, _PartRead]
     stop: str
     inventory_gap: bool
+    schema_report: SchemaCompatibilityReport
 
 
 def _order(record: MessageRecord) -> tuple[int, str]:
@@ -111,6 +112,9 @@ class ShardedMessageProvider:
         #: never inside it, and never an input to the collapse.
         self.diagnostics = ProviderDiagnostics(
             readable=0, unknown=0, unavailable=0, unresolved_identities=0)
+        #: This read's schema accounting. Beside the envelope, never inside it,
+        #: and never an input to the collapse except as one boolean.
+        self.compatibility = SchemaCompatibilityReport({}, {})
         self._router = ShardRouter()
 
     # -- the three reads -----------------------------------------------------
@@ -193,6 +197,8 @@ class ShardedMessageProvider:
         snapshot = tuple(self._locator.entries())
         discovery = ShardDiscovery(ExplicitShardLocator(snapshot), self._opener)
         inventory = discovery.probe(discovery.catalogue())
+        self.compatibility = SchemaCompatibilityReport(
+            discovery.roles(), discovery.compatibility())
         entries = {shard_key(entry.name): entry for entry in snapshot}
         plan = self._router.plan(inventory, requested_start=start, requested_end=end)
         states = [facts.state for facts in inventory.values()]
@@ -217,8 +223,13 @@ class ShardedMessageProvider:
             unresolved_identities=sum(events))
         # Parts that could never be visited were not skipped by the traversal;
         # they are a gap in the inventory, always, and separately from any stop.
-        gap = SHARD_UNKNOWN in states or SHARD_UNAVAILABLE in states
-        return _Traversal(reads=reads, stop=stop, inventory_gap=gap)
+        # The only route from schema evidence into a coverage claim: one
+        # boolean, added to the two gaps discovery already produced. A second
+        # completeness notion is not created here.
+        gap = (SHARD_UNKNOWN in states or SHARD_UNAVAILABLE in states
+               or self.compatibility.required_gap)
+        return _Traversal(reads=reads, stop=stop, inventory_gap=gap,
+                          schema_report=self.compatibility)
 
     @staticmethod
     def _held(reads: dict[str, _PartRead]) -> int:
@@ -257,7 +268,8 @@ class ShardedMessageProvider:
                 # A table that parses is not necessarily the generation this
                 # provider supports. The envelope is checked before any row is
                 # read, so a changed schema fails closed instead of yielding
-                # whatever the old reader could still find in it.
+                # whatever the old reader could still find in it. The refusal
+                # reaches the source as a refusal, not as a quiet empty read.
                 require_supported_surface(connection, table)
                 # The table name goes to the parser unchanged; the parser alone
                 # turns it into the conversation key every record then carries.

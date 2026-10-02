@@ -34,6 +34,14 @@ from urllib.parse import quote
 import wechatdb
 from wechatdb.parser import CONVERSATION_TABLE, MANDATORY_COLUMNS
 
+from .compatibility import (
+    UNASSESSED,
+    assess_schema,
+    classify_shard_name,
+    is_valid_empty_message_part,
+    table_columns,
+)
+
 # -- states, provider-internal only -------------------------------------------
 
 SHARD_KNOWN = "known"
@@ -195,6 +203,8 @@ class ShardDiscovery:
         self._locator = locator
         self._opener = opener
         self._entries: dict[str, ShardEntry] = {}
+        self._roles: dict[str, str] = {}
+        self._compatibility: dict[str, str] = {}
 
     def catalogue(self) -> dict[str, ShardFacts]:
         """Pass one. Classifies by name shape and opens nothing.
@@ -209,11 +219,34 @@ class ShardDiscovery:
             if key in keyed:
                 raise ValueError("two parts share one name")
             keyed[key] = entry
+            self._roles[entry.name] = classify_shard_name(entry.name)
+            self._compatibility[entry.name] = UNASSESSED
             state = SHARD_KNOWN if _MESSAGE_PART.match(entry.name) else SHARD_UNKNOWN
             inventory[key] = ShardFacts(key=key, state=state, bounds_established=False,
                                         min_timestamp=None, max_timestamp=None)
         self._entries = keyed
         return inventory
+
+    def roles(self) -> dict[str, str]:
+        """The role each listed entry earned, keyed by its entry name.
+
+        A name earns a role and nothing more. Read straight off the catalogue
+        pass, so it never depends on a part being opened, and says nothing about
+        compatibility.
+        """
+        return dict(self._roles)
+
+    def compatibility(self) -> dict[str, str]:
+        """One structural outcome per listed entry, keyed by its entry name.
+
+        Decided inside the probe, on the connection the probe had to open anyway,
+        so a read never opens a part twice to ask one question of it, and taken
+        even when this layer goes on to call the part unreadable -- the honest
+        answer to "is this the generation we read?" does not depend on whether
+        discovery could bound it. An entry that was never structurally read is
+        ``unassessed``: accounted for, and never mistaken for a compatible one.
+        """
+        return dict(self._compatibility)
 
     def probe(self, inventory: dict[str, ShardFacts]) -> dict[str, ShardFacts]:
         """Pass two. Opens each known part read-only and reclassifies it.
@@ -239,12 +272,14 @@ class ShardDiscovery:
             return _unavailable(key)
         try:
             tables = tuple(wechatdb.conversation_tables(connection))
-            if not tables and not _is_valid_empty_message_part(connection):
+            # Taken before any early return below, so a part this layer calls
+            # unreadable still carries the structural verdict its own contents
+            # support. Reading the structure is never what makes it fail.
+            self._compatibility[entry.name] = assess_schema(connection)
+            if not tables and not is_valid_empty_message_part(connection):
                 return _unavailable(key)
             for table in tables:
-                present = {row[1] for row in
-                           connection.execute(f'PRAGMA table_info("{table}")')}
-                if not all(column in present for column in MANDATORY_COLUMNS):
+                if not set(MANDATORY_COLUMNS) <= table_columns(connection, table):
                     # One malformed table among good ones is not ignored.
                     return _unavailable(key)
             # Each value is normalised, then the extremes are taken, so a table
@@ -265,12 +300,3 @@ class ShardDiscovery:
                               tables=tables)
         return ShardFacts(key=key, state=SHARD_READABLE, bounds_established=False,
                           min_timestamp=None, max_timestamp=None, tables=tables)
-
-
-def _is_valid_empty_message_part(connection: sqlite3.Connection) -> bool:
-    names = {row[0] for row in connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
-    if not {"TimeStamp", "wcdb_builtin_compression_record"} <= names:
-        return False
-    columns = {row[1] for row in connection.execute("PRAGMA table_info('TimeStamp')")}
-    return "timestamp" in columns

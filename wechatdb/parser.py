@@ -85,7 +85,11 @@ MANDATORY_COLUMNS: tuple[str, ...] = ("local_id", "create_time")
 #: Columns this layer reads. Missing an *optional* one is not fatal: the value
 #: is reported absent, because a 4.1 build that drops one is a coverage gap and
 #: not a reason to refuse every row in the table.
-_WANTED_COLUMNS = (
+#:
+#: Public because it is the one structural truth of this schema: a caller that
+#: has to decide whether a table is the generation it understands reads this
+#: tuple, and never keeps a second copy of it that can drift from this one.
+WANTED_COLUMNS = (
     "local_id",
     "server_id",
     "local_type",
@@ -241,7 +245,7 @@ def parse_conversation(
             f"Conversation table {table} is missing required "
             f"column(s): {', '.join(missing)}."
         )
-    columns = [name for name in _WANTED_COLUMNS if name in available]
+    columns = [name for name in WANTED_COLUMNS if name in available]
     selection = ", ".join(f'"{name}"' for name in columns)
     rows = connection.execute(
         f'SELECT {selection} FROM "{table}"'  # noqa: S608
