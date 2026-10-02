@@ -187,11 +187,11 @@ def test_optional_search_and_media_roles_are_accounted_and_raise_no_gap(tmp_path
     assert accounting.gaps == ()
 
 
-def test_an_unknown_database_is_a_visible_gap_not_a_failure(tmp_path):
+def test_an_unknown_root_database_is_a_visible_gap_and_blocker(tmp_path):
     accounting = account_container(_root(tmp_path, root_files=("zzz.db",)))
 
     assert GAP_UNKNOWN_DATABASE in accounting.gaps
-    assert unmet_requirements(accounting) == ()
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
 
 
 def test_an_unclassified_message_like_name_is_a_visible_candidate_gap(tmp_path):
@@ -281,7 +281,7 @@ def test_the_evidence_summary_carries_no_name_or_path(tmp_path):
                  "stray", "emoticon", "a.db", "/"):
         assert leak not in rendered
     assert evidence["database_count"] == 6
-    assert evidence["unmet_requirements"] == ()
+    assert evidence["unmet_requirements"] == (GAP_UNKNOWN_DATABASE,)
 
 
 def test_reading_a_container_is_read_only_and_classification_only(tmp_path):
@@ -351,7 +351,7 @@ def test_multiple_other_directories_preserve_required_roles_and_database_account
     accounting = account_container(root)
 
     assert len(accounting.examined_directories) == 6
-    assert accounting.meets_requirements()
+    assert not accounting.meets_requirements()
     assert accounting.role_counts[ROLE_UNKNOWN] == 4
     assert accounting.gaps == (GAP_UNKNOWN_DATABASE,)
     assert accounting.accounts_for([
@@ -513,3 +513,95 @@ def test_root_listing_error_is_sanitized(tmp_path, monkeypatch):
         account_container(root)
     assert str(root) not in str(error.value)
     assert error.value.__suppress_context__
+
+
+# -- boundary/gap semantics: one machine acceptance truth --------------------
+
+@pytest.mark.parametrize("directory", [None, "message", "session", "contact", "extra_domain"])
+@pytest.mark.parametrize("name,gap", [
+    ("neutral_store.db", GAP_UNKNOWN_DATABASE),
+    ("message_future.db", GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_ambiguous_database_blocks_in_every_unexcluded_location(tmp_path, directory, name, gap):
+    root = _root(tmp_path)
+    parent = root if directory is None else root / directory
+    parent.mkdir(exist_ok=True)
+    (parent / name).write_bytes(b"synthetic")
+    accounting = account_container(root)
+    assert gap in accounting.gaps
+    assert unmet_requirements(accounting) == (gap,)
+    assert accounting.evidence()["unmet_requirements"] == (gap,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", [None, "session", "contact", "extra_domain"])
+def test_ordinary_shape_outside_message_domain_cannot_supply_required_truth(tmp_path, directory):
+    root = _root(tmp_path, message=())
+    parent = root if directory is None else root / directory
+    parent.mkdir(exist_ok=True)
+    (parent / "message_8.db").write_bytes(b"synthetic")
+    accounting = account_container(root)
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in accounting.gaps
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_mixed_recognized_nonrequired_stores_do_not_block_or_add_message_truth(tmp_path):
+    root = _root(tmp_path, message=("message_0.db", "biz_message_0.db", "message_fts.db", "media.db"))
+    (root / "extra_domain").mkdir()
+    (root / "extra_domain" / "sns.db").write_bytes(b"synthetic")
+    accounting = account_container(root)
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 1
+    assert accounting.role_counts[ROLE_AUXILIARY] == 1
+    assert accounting.gaps == (GAP_BUSINESS_MESSAGE_UNREAD,)
+    assert accounting.evidence()["unmet_requirements"] == unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory", ["message", "extra_domain"])
+def test_nested_domain_has_no_proven_physical_only_exemption(tmp_path, directory):
+    root = _root(tmp_path)
+    (root / directory / "unexamined").mkdir(parents=True)
+    accounting = account_container(root)
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("name,gap", [
+    ("neutral_store.db", GAP_UNKNOWN_DATABASE),
+    ("message_future.db", GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
+    ("message_8.db", GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_refused_database_shape_keeps_its_acceptance_blocker(tmp_path, name, gap):
+    root = _root(tmp_path)
+    (root / "message" / name).symlink_to(root / "contact" / "contact.db")
+    accounting = account_container(root)
+    assert accounting.gaps == (gap,)
+    assert unmet_requirements(accounting) == (gap,)
+    assert not accounting.meets_requirements()
+
+
+def test_refused_optional_database_does_not_become_a_message_blocker(tmp_path):
+    root = _root(tmp_path)
+    (root / "message" / "media.db").symlink_to(root / "contact" / "contact.db")
+    accounting = account_container(root)
+    assert accounting.rejections
+    assert accounting.gaps == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize('directory', [None, 'session', 'contact', 'extra_domain'])
+def test_exported_database_api_cannot_relabel_misplaced_shard_as_required(tmp_path, directory):
+    root = _root(tmp_path, message=())
+    parent = root if directory is None else root / directory
+    parent.mkdir(exist_ok=True)
+    (parent / 'message_8.db').write_bytes(b'synthetic')
+    accounting = account_container(root)
+    row = next(row for row in accounting.databases
+               if row.role == ROLE_UNSUPPORTED_MESSAGE_CANDIDATE)
+    with pytest.raises(ValueError, match='^container database invalid$'):
+        replace(row, role=ROLE_ORDINARY_MESSAGE)
+    with pytest.raises(ValueError, match='^container database invalid$'):
+        container.ContainerDatabase(row.location, row.name, ROLE_ORDINARY_MESSAGE,
+                                    row.directory_identity)

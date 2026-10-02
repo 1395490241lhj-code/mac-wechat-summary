@@ -4,9 +4,10 @@
 > after instrument correction completed accounting, with unchanged pre/post
 > source metadata, but the sealed predicate still fails on explicit gaps.
 >
-> Three separate evidence phases: **§§1–10 first real run (historical UNMET on
+> Four separate evidence phases: **§§1–10 first real run (historical UNMET on
 > instrument defect); §11 synthetic correction (PASS, no real source); §12 fresh
-> real rerun (current UNMET on returned gaps).** P4-B remains MET 4/4.
+> real rerun (historical UNMET on returned gaps); §13 synthetic boundary/gap
+> reconciliation (single predicate, fresh real rerun still required).** P4-B remains MET 4/4.
 
 ### Historical first real-run overview
 
@@ -140,11 +141,12 @@ fail-honest rule these are the output, not silent omissions — and in combinati
 with the crash and the two unexamined nested directories they mean the predicate
 cannot be satisfied on this observation.
 
-## 5. Acceptance predicate (unchanged, sealed)
+## 5. Historical acceptance contract at the first real run
 
-A10 PASS iff **all** hold. `unmet_requirements()` returns the fixed tokens of
-those that do not; each is a closed-vocabulary item assembled from no name and
-no path.
+At that run A10 PASS required **all** conditions below. The later synthetic
+audit (§13) established that `unmet_requirements()` did not encode the
+unknown/candidate blockers: the wrapper added them separately. This historical
+table records the run contract; §13 supplies the current single code predicate.
 
 | # | Condition | Encoded as | Met this run |
 |---|---|---|---|
@@ -453,3 +455,135 @@ stays 9/10; P4-B stays MET 4/4.** D-040 and the production blocker
 Next step only: **a separate synthetic corrective/reconciliation capsule using
 sanitized aggregate gap categories**. It is not started here; this rerun grants
 no standing source access, classifier changes, Reader feature work or P5.
+
+
+## 13. Synthetic Reader-boundary / gap-semantics reconciliation (2026-10-02)
+
+**Verdict: A10 boundary/gap-semantics reconciliation PASS — A10 itself remains
+UNMET pending fresh real rerun. P4-A remains 9/10; P4-B remains MET 4/4.**
+D-040 is unchanged. §§1–12 and Vault E-030/F-045, E-031/F-046 remain historical
+UNMET evidence; no old real observation is retroactively rescored.
+
+### Boundary recovered from production, not physical layout
+
+The required Reader paths are the ordinary shards directly in `message/`,
+`session/session.db`, and `contact/contact.db`. Production provenance:
+`bridge/database_bootstrap.py:candidate_source_set` builds precisely those paths;
+`acquisition/source_refresher.py:BoundedSourceRefresher` refreshes ordinary direct
+message children and never discovers anchors; `bridge/acquired_database_source.py`
+feeds the prepared message handles and two identity handles to the provider and
+`IdentityCatalog`; `wechatdb/provider/identity_catalog.py` consumes the two
+identity schemas. `wechatdb/provider/compatibility.py` requires ordinary message
+parts and refuses unsupported required schemas. These are the current
+`v2/rewrite` paths; historical v1 `core/wechat_db.py` is name-shape provenance
+only, not a v2 access route.
+
+Recognized business messages are excluded/non-required with a standing explicit
+gap. Native FTS and media are optional, never ordinary message truth. Recognized
+auxiliary stores are accounting-only. Their committed basename vocabulary has
+independent provenance in `acquisition/database_inventory.py` and the accepted
+`GREENBUBBLES_ASSIMILATION_AUDIT.md` additional-role section; no new basename or
+directory mapping is introduced here.
+
+**Physical container is not identical to the Reader boundary. P4-A MET never
+means every physical WeChat database is understood.** Recognized nonrequired
+stores need no implementation. But absence from the current routing is not
+proof that an arbitrary parent domain cannot contain required/message-bearing
+truth. No committed architecture or accepted audit establishes an entire
+unnamed directory as physical-only. Consequently no directory-level exemption
+is added: root/other-domain unknowns remain **ambiguous**, not proven
+message-bearing and not proven irrelevant. A genuinely proven physical-only
+unknown or nested domain could be visible/nonblocking under D-040, but that
+category has **no established member in this capsule**. We do not manufacture a
+passing fixture for an unproven exclusion.
+
+An ordinary shard shape outside `message/` is location-incompatible with current
+routing. Container accounting reports it as `unsupported_message_candidate`;
+it cannot satisfy the required ordinary role. This is container policy only:
+the context-free message-directory classifier remains unchanged. The exported
+`ContainerDatabase` constructor also rejects an ordinary role outside
+`message_directory`, so direct construction or `dataclasses.replace` cannot
+bypass this location invariant.
+
+### Visible observations versus blockers
+
+| Condition | Visible? | Blocks structural acceptance? | Reason |
+|---|---|---|---|
+| Unknown in Reader message domain | yes, `unknown_database` | yes | unclassified message truth risk |
+| Unknown in root/other domain | yes, `unknown_database` | yes | exclusion is unestablished; ambiguity stays fail-closed |
+| Unknown in independently proven physical-only domain | would remain visible | would not by presence alone | no such domain is currently established or exempted |
+| Unsupported message candidate, any current location | yes, `unsupported_message_candidate` | yes | no location proves exclusion; ordinary-shaped misplaced stores also belong here |
+| Business message | yes, `business_message_unread` | no by itself | D-040 explicit unsupported excluded capability |
+| FTS / media | yes, role counts or rejection | no by themselves | optional, no contribution to ordinary truth |
+| Recognized auxiliary DB | yes, role count or rejection | no by itself | accounting-only; no new whitelist |
+| Required role absent/misplaced | yes, required-role tokens | yes | current access path has no required input |
+| In-boundary unexamined directory | yes, rejection + `directory_unexamined` | yes | required/message truth could be hidden |
+| Other-domain nested directory | yes, rejection + `directory_unexamined` | yes | parent exclusion is unestablished |
+| Independently proven physical-only nested domain | would remain visible | would not by presence alone | no such parent-domain exemption currently exists |
+
+Rejected unknown/candidate DB-shaped entries retain the same risk blockers.
+A `.db`-shaped directory additionally retains `directory_unexamined`. Recognized
+optional DB-shaped directories also block on their unexamined contents: an
+optional basename cannot prove a directory contains only optional data.
+Business exclusion from A10 does not change the production per-read inventory
+coverage ceiling (`_accounted`); visible unread message evidence still prevents
+an overclaim about all messages.
+
+### One machine truth
+
+`ContainerAccounting.meets_requirements()` delegates exclusively to
+`unmet_requirements(accounting) == ()`. `evidence()["unmet_requirements"]` renders
+that same function. It owns missing/unclassified required roles, unexamined
+risk, unknown risk and unsupported candidates. Conditions are sorted fixed
+tokens; business stays visible in `.gaps` but is not a blocking requirement.
+There is no wrapper-level post-processing of `.gaps` in the current contract.
+A future gate must call this predicate, not replay the obsolete historical
+wrapper's extra blocker logic. Caller designation, source pre/post integrity
+and structural-only reporting remain execution prerequisites, rather than a
+second interpretation of role gaps. Required schema compatibility continues to
+rest on A2–A6; encrypted structural classification cannot prove a schema.
+
+Traversal remains one root listing plus one listing of each visible non-symlink
+direct directory. No recursion, discovery, source selection or content opening
+was added. All unknown observations remain visible; no data outside required
+routing can strengthen required message evidence.
+
+### Synthetic verification
+
+Before production edits: **20 failed / 40 passed**. Exact RED cases:
+
+- `test_an_unknown_root_database_is_a_visible_gap_and_blocker`
+- `test_the_evidence_summary_carries_no_name_or_path`
+- `test_multiple_other_directories_preserve_required_roles_and_database_accounting`
+- `test_ambiguous_database_blocks_in_every_unexcluded_location`: unknown and
+  candidate × root/message/session/contact/neutral extra domain (10 cases)
+- `test_ordinary_shape_outside_message_domain_cannot_supply_required_truth`:
+  root/session/contact/neutral extra domain (4 cases)
+- `test_refused_database_shape_keeps_its_acceptance_blocker`: unknown,
+  unsupported candidate and refused ordinary shape (3 cases)
+
+Initial independent review found one Important API bypass: enumeration enforced
+location semantics, but a caller could reconstruct a misplaced row as ordinary
+through the exported dataclass and obtain false PASS. Corrective RED before
+production edits: **4 failed / 60 passed** —
+`test_exported_database_api_cannot_relabel_misplaced_shard_as_required` at
+root/session/contact/neutral extra domain. The existing constructor now rejects
+that inconsistent ordinary-role/location pair for both direct construction and
+`dataclasses.replace`. No new API or traversal was added.
+
+Final synthetic validation: focused container **64 passed**, full acquisition
+**237 passed**, wechatdb **514 passed**, bridge **270 passed**. Bridge used a
+fresh disposable synthetic `Path.home()` for all tests; acquisition Keychain
+checks use injected FakeSecurity. No real-data tests ran. Memory/shadow have no
+callers of this primitive and were not run. `database_inventory.py` and provider,
+bootstrap, identity, Reader queries and app/MCP product code remain unchanged.
+Final independent read-only re-review: **APPROVED**, no remaining Critical or
+Important findings. The reviewer independently verified the API bypass closure;
+full-suite totals above are parent-run evidence. `git diff --check` and the
+populated staged `git diff --cached --check` passed.
+**Real source access: NO.** The previous operator-designated root was not read,
+resolved or inspected. No real rerun, real names, credentials, Keychain,
+bootstrap, process access, WeChat interaction, P5 or product work.
+
+Next step only: **fresh A10 structural rerun under the reconciled single
+acceptance predicate**, under a separate explicit real-source authorization.

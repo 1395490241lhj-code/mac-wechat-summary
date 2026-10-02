@@ -5,7 +5,10 @@ the children of one selected ``message/`` directory. That is not the same claim
 as accounting for a Reader container: the two identity anchors are opened by
 name and never inventoried, and a real container also holds
 ``message/message_fts.db`` and ``emoticon/emoticon.db``. This is the
-container-level view D-040 accounting needs.
+container-level view D-040 accounting needs. Physical observation is broader
+than required Reader consumption; unnamed domains have no proven exclusion,
+so unknown/candidate and unexamined risks remain blocking. Recognized optional
+and excluded stores remain nonrequired.
 
 Four bounds. The root is supplied, never chosen -- no recursion, no scoring, no
 search above or beside it. The source is still encrypted, so a name shape is the
@@ -122,6 +125,8 @@ CONTAINER_REQUIREMENTS: frozenset[str] = frozenset({
     REQUIRED_ROLE_MISSING,
     REQUIRED_ROLE_UNCLASSIFIED,
     DIRECTORY_UNEXAMINED,
+    GAP_UNKNOWN_DATABASE,
+    GAP_UNSUPPORTED_MESSAGE_CANDIDATE,
 })
 
 UNREADABLE_DIRECTORY = "unreadable_directory"
@@ -140,6 +145,21 @@ _ROLE_GAPS = {
     ROLE_UNKNOWN: GAP_UNKNOWN_DATABASE,
     ROLE_UNSUPPORTED_MESSAGE_CANDIDATE: GAP_UNSUPPORTED_MESSAGE_CANDIDATE,
 }
+
+
+def _container_role(location: str, name: str) -> str:
+    """Match production routing without changing message-directory inventory.
+
+    An ordinary-shaped database outside message/ is not consumed by bootstrap
+    or refresh. Keep it as message-bearing risk, never required-role evidence.
+    No unnamed directory is independently proven outside the Reader boundary.
+    """
+    if name == _LOCATION_ANCHOR.get(location):
+        return _LOCATION_ROLE[location]
+    role = classify_database_name(name)
+    if role == ROLE_ORDINARY_MESSAGE and location != LOCATION_MESSAGE_DIRECTORY:
+        return ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
+    return role
 
 
 def _valid_directory_identity(identity: str, location: str) -> bool:
@@ -167,7 +187,9 @@ class ContainerDatabase:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("container database invalid")
-        if self.role not in CONTAINER_ROLES:
+        if (self.role not in CONTAINER_ROLES
+                or (self.role == ROLE_ORDINARY_MESSAGE
+                    and self.location != LOCATION_MESSAGE_DIRECTORY)):
             raise ValueError("container database invalid")
         if (self.location not in CONTAINER_LOCATIONS
                 or not _valid_directory_identity(self.directory_identity, self.location)):
@@ -268,7 +290,7 @@ class ContainerAccounting:
         for row in self.rejections:
             if row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY):
                 continue
-            role = classify_database_name(row.name)
+            role = _container_role(row.location, row.name)
             if role == ROLE_ORDINARY_MESSAGE:
                 # A refused shard-shaped name is a candidate, never a shard: this
                 # reader did not and may not open it.
@@ -289,7 +311,7 @@ class ContainerAccounting:
                 and len(set(accounted)) == len(accounted))
 
     def meets_requirements(self) -> bool:
-        """Whether every P4-A required-role condition holds for this boundary.
+        """The sole structural A10 acceptance predicate for this boundary.
 
         This is the acceptance predicate, in code. Optional and excluded roles
         never appear in it: a present business message or an unreadable search
@@ -346,9 +368,9 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
     """One boundary directory's database children, accounted exactly once.
 
     A directory that cannot be listed is a named rejection, never an empty
-    result: an unreadable directory must not read as an absent one. Only the
-    identity anchor is re-roled here, so this widens accounting and never changes
-    a message read.
+    result: an unreadable directory must not read as an absent one. Container
+    policy recognizes identity anchors and refuses ordinary shard shapes outside
+    message routing; it never changes a production message read.
     """
     try:
         children = sorted(directory.iterdir(), key=lambda path: path.name)
@@ -356,8 +378,6 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
         rejections.append(ContainerRejection(
             location, directory.name, UNREADABLE_DIRECTORY, directory.name))
         return []
-    role_for = _LOCATION_ROLE.get(location)
-    anchor = _LOCATION_ANCHOR.get(location)
     rows = []
     for child in children:
         if not _is_candidate(child):
@@ -373,8 +393,7 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
                 location, child.name, REJECTED_NOT_REGULAR_FILE, directory.name,
                 is_directory=_is_directory(child)))
             continue
-        role = (role_for if role_for and child.name == anchor
-                else classify_database_name(child.name))
+        role = _container_role(location, child.name)
         rows.append(ContainerDatabase(location, child.name, role, directory.name))
     return rows
 
@@ -411,7 +430,7 @@ def account_container(source_root) -> ContainerAccounting:
             # these would make "every database accounted exactly once" false.
             if _is_regular_file(child):
                 databases.append(ContainerDatabase(
-                    LOCATION_ROOT, child.name, classify_database_name(child.name)))
+                    LOCATION_ROOT, child.name, _container_role(LOCATION_ROOT, child.name)))
             else:
                 rejections.append(ContainerRejection(
                     LOCATION_ROOT, child.name, REJECTED_NOT_REGULAR_FILE))
@@ -451,8 +470,11 @@ def unmet_requirements(accounting) -> tuple[str, ...]:
     if any(row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY) or row.is_directory
            for row in accounting.rejections):
         unmet.add(DIRECTORY_UNEXAMINED)
-    return tuple(token for token in CONTAINER_REQUIREMENTS
-                 if token in unmet)
+    # Visible gaps and acceptance blockers are different: business is excluded
+    # by D-040, while unknown/candidate risk has no proven location exemption.
+    unmet.update(gap for gap in accounting.gaps if gap in {
+        GAP_UNKNOWN_DATABASE, GAP_UNSUPPORTED_MESSAGE_CANDIDATE})
+    return tuple(sorted(unmet))
 
 
 __all__ = [

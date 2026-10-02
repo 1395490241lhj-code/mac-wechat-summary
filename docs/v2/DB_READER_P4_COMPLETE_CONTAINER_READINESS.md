@@ -601,8 +601,9 @@ This is the **one authoritative machine-checkable acceptance contract** for P4.
 It resolves §8; the proposal text in §8 is historical and is not a competing
 definition. Every item is scored `MET` or `UNMET` against committed evidence.
 At the D-040 reconciliation, no real data was re-run to produce the checklist.
-A10's current evidence is updated separately below; its acceptance definition
-and UNMET score are unchanged.
+A10's real evidence remains historical UNMET. Its synthetic interpretation and
+single machine predicate are reconciled in the A10 gate document §13; no
+checklist score or D-040 decision changes.
 
 ### P4-A — current-reader container compatibility (per tested generation)
 
@@ -687,5 +688,15 @@ role declaration plus the existing fixed-token refusal; container structural
 accounting is now supplied by A10's primitive. A10 remains UNMET because the
 fresh returned unknown/candidate/unexamined gaps fail its acceptance predicate,
 not because a future accounting capsule must still reconcile identity roles.
-No role rule, required-role definition or production code changes in this
-reporting capsule. See the A10 gate document §12 for fresh evidence and limits.
+The historical reporting capsule changed no production code. The subsequent
+synthetic reconciliation in the A10 gate document §13 makes
+`ContainerAccounting.meets_requirements()` (via `unmet_requirements`) the sole
+structural acceptance predicate, including unknown/candidate blockers. Ordinary
+shard shapes outside production `message/` routing remain unsupported candidates,
+not required-role evidence. Physical container presence alone does not require
+implementing every store; unknown/nested domains have no independently proven
+exclusion and remain fail-closed. Business stays excluded with a visible gap;
+FTS/media stay optional. No traversal widening or real access occurred. A10
+remains UNMET pending a fresh real rerun under this predicate; P4-A stays 9/10
+and P4-B stays MET 4/4. See §12 for historical real evidence and §13 for the
+current boundary and visible-gap/blocker table.
