@@ -853,10 +853,37 @@ directories block in every domain. A proven store is non-required and can never
 satisfy `ordinary_message`, `session_identity` or `contact_identity`. Domain
 class and row role stay separate axes.
 
+An independent adversarial review of the committed first pass found two classes
+of unproven file that the exact store predicate still could not reach, because it
+was only ever asked about rows that were already `ROLE_UNKNOWN` and already
+selected as `.db` candidates. Both are corrected:
+
+1. A basename the generic, location-free ledger recognises for some other reason
+   - `favorite/sns.db`, `bizchat/chatbot.db`, `favorite/media.db` - kept that
+   borrowed role, so it was visible but never consulted by the exemption. Inside a
+   proven domain an unproven name is now `ROLE_UNKNOWN` and blocks. A
+   message-shaped name still becomes an unsupported candidate and still blocks.
+2. A file that is not a `.db` candidate at all - `favorite/favorite.db.bak`, or a
+   `-wal`/`-journal` companion of a proven store - was silently dropped. Inside a
+   proven domain such a regular file is now accounted as `ROLE_UNKNOWN` and
+   blocks. Hidden files stay ignorable everywhere, and directories, symlinks and
+   unreadable entries keep their existing refusal paths.
+
+Outside a proven physical-only domain nothing changed: `sns.db` in `some_domain/`
+is still a recognised auxiliary basename and still blocks nothing. A proven store
+is not relabelled; only an unproven store is denied a role borrowed from another
+domain. Identity-anchor semantics are untouched.
+
 The change is one exemption predicate inside `_blocking_observations`, so the
 single predicate and the `blocking_*` aggregates still come from the same pass.
-Full table, proven store ledger, RED-M (9 failed / 310 passed) and verification in
-A10 gate document section 19.
+Full table, proven store ledger, RED-M, the second-pass correction RED-N
+(15 failed / 2 passed, against the already-committed first pass) and verification
+in A10 gate document section 19. RED-M is corrective evidence, not a clean RED
+against unmodified `HEAD`: see the correction in A10 gate document 19.5.
+
+Synthetic verification for this second pass: container accounting 336 passed,
+database inventory 34 passed, `acquisition` 520 passed, `wechatdb` 514 passed,
+`bridge` 272 passed; `git diff --check` and the populated staged check passed.
 
 A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**; no historical E-030...E-036
 evidence was rescored.

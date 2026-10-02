@@ -1649,7 +1649,9 @@ stay separate axes; the exemption is a verdict decision and never relabels a row
 | symlink, neutral name | yes | **yes** | `unknown_database` |
 | symlink, message-shaped name | yes | **yes** | `unsupported_message_candidate` |
 | symlink to a directory | yes | **yes** | `unknown_database` |
-| symlink with a recognised non-message name (`media.db`) | yes | no - no message claim, as elsewhere | - |
+| symlink with a recognised non-message name (`media.db`) | yes | **yes** in a proven domain (unproven store); no elsewhere | `unknown_database` |
+| unproven basename the generic ledger recognises elsewhere (`sns.db`, `chatbot.db`, `media.db`, `message_fts.db`, `session.db`) inside a proven domain | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
+| non-`.db` regular file or proven-store sidecar (`favorite.db.bak`, `favorite.db-wal`, `favorite.db-journal`) inside a proven domain | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
 | unreadable directory | yes | **yes** (unchanged) | `directory_unexamined` |
 
 Symlinks are never followed and never receive a store exemption - a store
@@ -1703,6 +1705,13 @@ and the bridge are untouched. The single predicate is unchanged:
 increments `blocking_unknown_count`, while an exempt proven store increments only
 the plain `unknown_count`.
 
+Section 19.7 corrects two ways that predicate still failed to reach, both found by
+independent adversarial review of this committed state rather than by a test:
+`_container_role` gained a `directory_identity` argument so classification applies
+the proven-domain rule itself, and `_account_directory` now accounts a
+non-hidden regular file that is not a `.db` candidate inside a proven domain.
+`classify_database_name` itself is still untouched and still location-free.
+
 ### 19.5 RED-first evidence
 
 - **RED-L** (earlier section 19 narrowing, now historical) - 33 failed / 414 passed
@@ -1711,10 +1720,14 @@ the plain `unknown_count`.
   exemption still keyed on domain membership, 9 failed / 310 passed: the
   per-domain narrowing sweep across all seven proven domains, the aggregate
   blocking-split expectation, and the refused non-regular entry inside a proven
-  domain. The Decision C tests - every proven store non-blocking, an unproven
-  store blocking in each proven domain, look-alikes blocking, and a proven store
-  unable to supply required truth - were authored against the committed blanket
-  predicate, so they genuinely failed first.
+  domain. **Correction to the earlier wording of this bullet:** these were not a
+  clean RED against unmodified `HEAD`. The first attempt failed at *collection*,
+  because `PROVEN_STORE_NAMES` did not exist in the committed module at all; the
+  9-failure run happened after the predicate was added but while the old blanket
+  blocking condition was still in place, and some of those failures were stale
+  tests written for the blanket model. It is corrective RED evidence that the old
+  blocking condition contradicted the new tests, not a historical proof that
+  every one of them failed first against shipped code.
 - Tests that encoded the broad exemption were rewritten, not worked around: the
   accounts-and-keeps-roles test, the proven-domain acceptance parametrizations,
   the aggregate blocking-count expectations, and the refused symlink case - the
@@ -1727,6 +1740,71 @@ A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. E-030...E-036 real evide
 is not rescored. A fresh real structural rerun under this policy, with separate
 explicit authorization, is still the only way to learn how it behaves on a real
 container.
+
+### 19.7 Second-pass correction: two escapes the store predicate could not reach
+
+The `(domain, basename)` predicate in 19.4 is exact, but it was only ever asked
+about rows that were already `ROLE_UNKNOWN` and already selected as candidates.
+Two classes of unproven file inside a proven domain therefore escaped it:
+
+1. **A basename the generic ledger recognises for another reason.**
+   `favorite/sns.db` was classified `ROLE_AUXILIARY` (the location-free
+   `classify_database_name` recognises `sns.db`, `chatbot.db`, `media.db`,
+   `message_fts.db`), so it was visible, correctly non-blocking in the sense that
+   no requirement was unmet, and silently outside the exemption decision - even
+   though `sns.db` is not a proven `favorite` store. The predicate returned the
+   right answer and was never consulted.
+2. **A file that is not a candidate at all.** `_is_candidate()` accepts only
+   names ending in `.db`, so `favorite/favorite.db.bak` and a `-wal`/`-journal`
+   companion of a proven store were dropped before classification. Inside a
+   domain whose exemption rests on accounting for everything it holds, a
+   silently dropped regular file is a hole in the claim, not sidecar noise.
+
+The correction is two rules in this module, not a new exemption:
+
+- `_container_role` classifies inside a proven physical-only domain *before*
+  consulting the generic ledger. A message-shaped name still becomes an
+  unsupported candidate and blocks. Any other name that is not that domain's own
+  proven store becomes `ROLE_UNKNOWN`, so it is visible and blocking. Outside a
+  proven domain nothing changes: `sns.db` in `some_domain/` is still auxiliary
+  and still non-blocking, exactly as before.
+- `_account_directory` accounts a non-hidden regular file that is not a `.db`
+  candidate when its parent is a proven physical-only domain, as
+  `ROLE_UNKNOWN`. Hidden files stay ignorable everywhere, and directories,
+  symlinks and unreadable entries keep their existing refusal paths unchanged.
+
+Truthful roles inside a *proven* store are preserved: `favorite/favorite.db` is
+still classified by the generic ledger as auxiliary and still exempt, because it
+is that domain's own proven store. No proven store is relabelled to unknown; the
+correction only denies an unproven store a role borrowed from elsewhere.
+
+The identity-anchor semantics of 17.2 are untouched: the anchor exemption still
+applies to its own directory class and only to a regular-file unknown.
+
+### 19.8 RED-first evidence for the second-pass correction
+
+- **RED-N** (section 19.7) - 15 failed / 2 passed, against the *already-committed*
+  19.4 predicate, before any production edit for this pass. The failures were
+  exactly the two escapes: six unproven-but-generically-recognised basenames in
+  `favorite/` (`sns.db`, `chatbot.db`, `media.db`, `message_fts.db`, `session.db`
+  and the remainder of the parameterisation), three non-`.db` look-alikes
+  (`favorite.db.bak`, `favorite.db-wal`, `favorite.db-journal`), and one proven
+  store's `-wal` sidecar in each of the seven proven domains.
+- The two passing cases in that run were the pre-existing hidden-sidecar tests,
+  which the correction deliberately does not change.
+- One pre-existing test encoded the escape rather than the invariant:
+  `test_a_recognised_non_message_symlink_name_adds_no_blocker_in_a_physical_only_domain`
+  asserted that a refused `media.db` symlink inside a proven domain adds no
+  blocker. That is exactly the laundering 19.7 removes, so it now asserts
+  blocking, and a sibling test was added pinning the unchanged outside-a-proven-
+  domain behaviour.
+
+Final synthetic counts for this second pass: `acquisition/tests/test_container_accounting.py`
+336 passed, `test_database_inventory.py` 34 passed, `acquisition` 520 passed,
+`wechatdb` 514 passed, `bridge` 272 passed. `git diff --check` and the populated
+staged check passed. Counts recorded in earlier sections are historical and are
+left as they stood. No real source, credential, Keychain, decryption, process,
+WeChat or Database Mode action was taken.
 
 ---
 

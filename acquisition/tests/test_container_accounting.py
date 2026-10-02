@@ -1701,10 +1701,25 @@ def test_a_symlink_to_a_directory_blocks_even_in_a_physical_only_domain(tmp_path
 @pytest.mark.parametrize("domain", NARROWING_DOMAINS)
 def test_a_recognised_non_message_symlink_name_adds_no_blocker_in_a_physical_only_domain(
         tmp_path, domain):
-    # Only unknown/candidate risk blocks from a refusal: a refused media-shaped
-    # name carries no message claim, exactly as elsewhere.
+    # Corrected by Decision C: a refused name blocks in a proven physical-only
+    # domain only when it is that domain's own proven store, and media.db is not
+    # one. The generic media classification cannot launder an unproven store
+    # here, so the refusal stays a blocking unknown (see the sibling test for
+    # the same symlink outside a proven domain, which still adds no blocker).
     root = _domain_root(tmp_path, domain)
     (root / domain / "media.db").symlink_to(root / "message" / "message_0.db")
+
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(account_container(root))
+
+
+@pytest.mark.parametrize("directory", ["session", "extra_domain"])
+def test_a_recognised_non_message_symlink_name_adds_no_blocker_outside_a_proven_domain(
+        tmp_path, directory):
+    # Outside a proven domain nothing changed: a refused media-shaped name
+    # carries no message claim and blocks nothing.
+    root = _root(tmp_path, directories=(directory,) if directory == "extra_domain" else ())
+    (root / directory / "a.db").unlink(missing_ok=True)
+    (root / directory / "media.db").symlink_to(root / "message" / "message_0.db")
 
     assert unmet_requirements(account_container(root)) == ()
 
@@ -1764,3 +1779,61 @@ def test_a_physical_only_domain_never_changes_a_row_role_or_satisfies_a_required
     assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
     assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
     assert not accounting.meets_requirements()
+
+
+# -- the two ways an unproven store used to escape a proven domain -------------
+#
+# The generic role ledger is location-free, so a basename proven *somewhere*
+# (sns.db, chatbot.db, media.db) kept a non-unknown role inside a physical-only
+# domain, and a look-alike that merely ends in ".db" was never selected as a
+# candidate at all. Either way the file was accounted yet never blocked. Both
+# are the same defect: inside a proven domain only its own PROVEN_STORE_NAMES
+# stores are exempt, and everything else stays ROLE_UNKNOWN and blocking.
+
+@pytest.mark.parametrize("name", [
+    "sns.db", "chatbot.db", "media.db", "message_fts.db", "session.db",
+])
+def test_a_locally_proven_basename_in_an_unproven_store_blocks_in_a_proven_domain(
+        tmp_path, name):
+    # favorite/sns.db is not a proven favorite store. A basename the generic
+    # ledger happens to recognise must not launder an unproven store here.
+    root = _domain_root(tmp_path, "favorite")
+    (root / "favorite" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("name", [
+    "favorite.db.bak", "favorite.db-journal", "favorite.db.wal",
+])
+def test_a_non_db_look_alike_inside_a_proven_domain_is_accounted_and_blocks(
+        tmp_path, name):
+    # "*.db" is the candidate filter, so a backup of a proven store used to be
+    # silently dropped: visible nowhere, blocking nowhere. Inside a proven
+    # physical-only domain an unaccounted regular file is still a hole.
+    root = _domain_root(tmp_path, "favorite")
+    (root / "favorite" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert [row.name for row in accounting.databases
+            if row.directory_identity == "favorite"] == [name]
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_a_proven_store_sidecar_stays_a_blocking_unknown(tmp_path, domain):
+    # A -wal/-shm/-journal companion belongs to a database rather than standing
+    # for one, so outside a proven domain it is ignorable sidecar noise. Inside
+    # one it is unproven file content the reader never accounts for.
+    root = _domain_root(tmp_path, domain)
+    (root / domain / sorted(PROVEN_STORE_NAMES[domain])[0].replace(
+        ".db", "-wal")).write_bytes(b"synthetic")
+
+    assert GAP_UNKNOWN_DATABASE in unmet_requirements(account_container(root))

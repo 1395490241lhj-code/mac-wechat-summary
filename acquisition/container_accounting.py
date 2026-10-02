@@ -218,9 +218,22 @@ def domain_boundary_class(directory_name: str, location: str) -> str:
     """
     if location not in _LOCATION_DOMAIN_CLASS:
         raise ValueError("container directory invalid")
-    if location == LOCATION_OTHER_DIRECTORY and directory_name in _PHYSICAL_ONLY_DOMAIN_NAMES:
+    if _is_proven_physical_only_domain(directory_name, location):
         return DOMAIN_KNOWN_PHYSICAL_ONLY
     return _LOCATION_DOMAIN_CLASS[location]
+
+
+def _is_proven_physical_only_domain(directory_identity: str, location: str) -> bool:
+    """Whether this exact directory is a proven physical-only domain.
+
+    Split out of ``domain_boundary_class`` because classification needs the
+    same fact without depending on the location-class table: inside such a
+    domain an unproven store must not inherit a role or a shape from anywhere
+    else, and an unaccounted file must not be dropped.
+    """
+    return (location == LOCATION_OTHER_DIRECTORY
+            and isinstance(directory_identity, str)
+            and directory_identity in _PHYSICAL_ONLY_DOMAIN_NAMES)
 
 
 def is_proven_physical_store(directory_identity: str, location: str, name: str) -> bool:
@@ -301,7 +314,7 @@ _REQUIREMENT_ROLE_GAPS = {
 }
 
 
-def _container_role(location: str, name: str) -> str:
+def _container_role(location: str, name: str, directory_identity: str = "") -> str:
     """Match production routing without changing message-directory inventory.
 
     An ordinary-shaped database outside message/ is not consumed by bootstrap
@@ -319,6 +332,19 @@ def _container_role(location: str, name: str) -> str:
     role = classify_database_name(name)
     if role == ROLE_ORDINARY_MESSAGE and location != LOCATION_MESSAGE_DIRECTORY:
         return ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
+    if role == ROLE_UNSUPPORTED_MESSAGE_CANDIDATE:
+        # Message-shaped risk is message-shaped wherever it was found, so it
+        # keeps that role and blocks in every domain.
+        return role
+    if (_is_proven_physical_only_domain(directory_identity, location)
+            and not is_proven_physical_store(directory_identity, location, name)):
+        # A store exemption is the store, so an unproven name inside a proven
+        # domain is unknown there -- even when the generic, location-free ledger
+        # recognises the basename for some other reason (`sns.db` in
+        # `favorite/`, `chatbot.db` in `bizchat/`). Otherwise a basename proven
+        # elsewhere would launder a store this domain never proved, and the row
+        # would be visible but never blocking.
+        return ROLE_UNKNOWN
     return role
 
 
@@ -457,7 +483,7 @@ class ContainerAccounting:
         for row in self.rejections:
             if row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY):
                 continue
-            role = _container_role(row.location, row.name)
+            role = _container_role(row.location, row.name, row.directory_identity)
             if role == ROLE_ORDINARY_MESSAGE:
                 # A refused shard-shaped name is a candidate, never a shard: this
                 # reader did not and may not open it.
@@ -598,6 +624,17 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
     rows = []
     for child in children:
         if not _is_candidate(child):
+            # Outside a proven domain a regular file with no ".db" suffix is
+            # sidecar noise belonging to some database. Inside one, dropping it
+            # silently would leave unaccounted bytes in a domain whose whole
+            # exemption rests on accounting for everything it holds, so name it
+            # and let it block as unknown. Hidden files stay ignorable and a
+            # directory or symlink keeps its existing refusal below.
+            if (not child.name.startswith(".") and _is_regular_file(child)
+                    and _is_proven_physical_only_domain(directory.name, location)):
+                rows.append(ContainerDatabase(
+                    location, child.name, ROLE_UNKNOWN, directory.name))
+                continue
             # A subdirectory is not a database, but if it holds one then part of
             # the boundary was not walked. Failing closed is the only honest
             # reading of "every database accounted exactly once".
@@ -616,7 +653,7 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
                 location, child.name, REJECTED_NOT_REGULAR_FILE, directory.name,
                 is_directory=_is_directory(child)))
             continue
-        role = _container_role(location, child.name)
+        role = _container_role(location, child.name, directory.name)
         rows.append(ContainerDatabase(location, child.name, role, directory.name))
     return rows
 
@@ -752,7 +789,7 @@ def _blocking_observations(accounting):
             # cannot prove the contents of a subtree this pass never entered.
             yield boundary, "nested"
             continue
-        role = _container_role(row.location, row.name)
+        role = _container_role(row.location, row.name, row.directory_identity)
         if role == ROLE_ORDINARY_MESSAGE:
             # A refused shard-shaped name is a candidate, never a shard: this
             # reader did not and may not open it.
