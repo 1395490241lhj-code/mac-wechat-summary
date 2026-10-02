@@ -8,7 +8,9 @@
 > Five distinct evidence phases: §§1–10 first real run (instrument defect,
 > UNMET); §11 synthetic instrument correction (PASS); §12 pre-reconciliation
 > fresh real run (UNMET); §13 synthetic boundary/gap reconciliation (PASS);
-> §14 fresh real run under the reconciled single predicate (current UNMET).
+> §14 fresh real run under the reconciled single predicate (current UNMET);
+> §15 provenance-based container-domain reconciliation (PASS — policy sealed,
+> A10 still UNMET pending a fresh real rerun).
 
 ### Historical first real-run overview
 
@@ -702,3 +704,216 @@ parent-run evidence; the reviewer did not repeat those suites.
 Next step only: **a provenance-based synthetic reconciliation of the remaining
 sanitized blocker categories, without re-accessing the real source**. Not started
 here. The production acquisition blocker remains unchanged and orthogonal.
+
+## 15. Provenance-based container-domain reconciliation (2026-10-02)
+
+**Verdict: PASS — the domain policy is sealed. A10 itself remains UNMET pending
+a fresh real rerun. P4-A remains 9/10; P4-B remains MET 4/4.** This is a
+strictly synthetic / provenance-only phase. **Real source access: NO** — the
+previous operator-designated root was not read, listed, resolved or statted.
+D-040 is unchanged. §§1–14 and Vault E-030/F-045 … E-033/F-048 retain their
+original scope and results; no old real observation is retroactively rescored.
+
+### 15.1 The question this phase answers
+
+The contract established by §13 correctly refused to equate *physical
+`db_storage`* with *required Reader boundary*. It also established **no**
+independently proven physical-only domain, so every unnamed parent domain stayed
+ambiguous and blocking. This phase asks whether independent provenance — not a
+fresh look at the real container — can establish any domain as required,
+optional/excluded, known physical-container-only, or ambiguous.
+
+The purpose was never to explain the count 13. The 13 unknown, 1 candidate and
+2 nested figures stay aggregated historical facts; this phase does not recover,
+inspect or guess any identity behind them.
+
+### 15.2 Provenance hierarchy
+
+Evidence priority, strongest first:
+
+| Tier | Source | What it can establish | What it cannot |
+|---|---|---|---|
+| 1 | current production architecture (bootstrap, SourceSet, source refresher, provider, identity catalog, Reader operations) | a path/domain the current v2 Reader consumes is inside the Reader boundary | — |
+| 2 | existing project code/history (committed v1 `core/` reader, sealed design/gate documents, committed compatibility research) | a domain exists in WeChat layout, and its broad feature class | that the domain is *required* by the current Reader |
+| 3 | already-approved public-source behavioural evidence (GreenBubbles audit, wx-cli audit, their pinned upstream revisions) | behavioural and layout facts, at the recorded revision | source code, SQL, query shapes, fixtures, private identifier schemes |
+
+No new upstream repository was consulted. Tier 3 was audited only as already
+recorded; no revision was re-fetched. **No real-derived whitelist exists**: not
+one entry below came from a screenshot, a previous real run, or a desire to make
+A10 pass.
+
+### 15.3 Provenance ledger
+
+| Domain / shape | Boundary class | Provenance | Evidence strength | Reader claim | Allowed effect |
+|---|---|---|---|---|---|
+| `message/` | `required_message` | Tier 1: bootstrap/source-refresh/provider routing | production architecture | ordinary message truth | unknown/candidate block; shard satisfies the ordinary role |
+| `session/` | `required_identity` | Tier 1: `session.db` opened as the identity anchor | production architecture | session identity truth | anchor satisfies the role; identity cannot move |
+| `contact/` | `required_identity` | Tier 1: `contact.db` opened as the identity anchor | production architecture | contact identity truth | anchor satisfies the role; identity cannot move |
+| `emoticon/` | `known_physical_only` | Tier 2: committed `core/wechat_db.py` reads `os.path.join("emoticon", "emoticon.db")` from a directory its own docstring documents as the WeChat `db_storage` root, for an md5 → CDN sticker mapping | project-owned historical reader | none in v2 | existence accounted; contents add no coverage and support no role |
+| `hardlink_*.db`, `chatbot.db`, `sns.db` | **no domain entry** | Tier 3 recognises these as database *basenames*; no accepted evidence establishes a parent directory | insufficient for layout | none | stay database-role knowledge; never a directory-domain entry |
+| every other domain, and the container root | `ambiguous` | none | insufficient | unknown | visible and fail-closed |
+
+`emoticon` is the **only** domain with defensible root-layout provenance, and it
+is the only member of the `known_physical_only` class. `db_dir` is documented as
+the WeChat `db_storage` root, so `emoticon/emoticon.db` is a first path component
+relative to the container root — a *root-domain* fact, not a basename fact. Its
+purpose (a sticker md5 → CDN lookup table) is not message or identity truth, and
+no v2 production path references it. Both required conditions of §8 are
+therefore met, and only for this one domain.
+
+### 15.4 Role axis and domain axis are independent
+
+A *domain* is a root-relative directory; a *role* is what a database basename is
+understood to be. Neither collapses into the other:
+
+- A recognized auxiliary **basename** (`sns.db`) proves nothing about its parent
+  directory. It stays `role = auxiliary` inside an `ambiguous` domain.
+- A **physical-only parent** does not relabel its children. An unknown database
+  inside `emoticon/` stays `role = unknown`; a message-shaped one stays
+  `role = unsupported_message_candidate`. Neither becomes auxiliary, and neither
+  becomes support.
+- `ROLE_UNKNOWN` is never hidden or converted into a fake auxiliary role to get
+  green. `accounting.gaps` still reports it; only *acceptance* is boundary-aware.
+
+The honest representation of a proven physical-only unknown is
+`role = unknown` + `domain_class = known_physical_only`, and that is what the
+code produces.
+
+### 15.5 Acceptance semantics
+
+One pass over every row that could block, so acceptance is still decided in
+exactly one place:
+
+| Domain class | Role / shape | Visible? | Blocking? | Can satisfy required truth? |
+|---|---|---|---|---|
+| required_message | unknown database | yes, `unknown_database` | yes | no |
+| required_message | unsupported message candidate | yes, fixed candidate gap | yes | no |
+| required_message | ordinary shard | yes, role count | no | yes |
+| required_identity | own anchor (`session.db` / `contact.db`) | yes, role count | no | yes, its own role only |
+| required_identity | misplaced ordinary shard | yes, candidate gap | yes | no |
+| known_physical_only | unknown database | yes, role count + gap | no, for Reader completeness only | no |
+| known_physical_only | message-shaped candidate | yes, role count + gap | no, for Reader completeness only | no — stays unsupported |
+| known_physical_only | nested directory | yes, rejection | no — no recursion is implied | no |
+| known_physical_only | **unreadable** directory | yes, rejection | **yes** | no |
+| known_physical_only | identity role row | impossible — constructor rejects it | — | no |
+| ambiguous | unknown database | yes | yes | no |
+| ambiguous | message-shaped candidate | yes | yes | no |
+| ambiguous | nested directory | yes, `directory_unexamined` | yes | no |
+| any | business message | yes, `business_message_unread` | no by itself (D-040) | no |
+| any | FTS / media / auxiliary | yes, role counts | no by themselves | no |
+| any | refused `.db` name | yes, rejection + role-derived gap | yes when unknown/candidate | no |
+
+Two refusals keep blocking unchanged: an unreadable directory fails closed
+**everywhere**, because a directory that could not be listed is not the same
+claim as one that was listed and held nothing needed; and a refused `.db`-shaped
+entry keeps its role-derived blocker when its parent domain is required or
+ambiguous.
+
+`NESTED_DIRECTORY` was **not** removed globally. Its blocking effect is refined
+by parent boundary class only. No recursion is implied anywhere: traversal is
+still one root listing plus one listing of each visible non-symlink direct
+directory.
+
+### 15.6 No spoofing, no substring inference, no widening
+
+`domain_boundary_class()` is exact-set membership over a closed policy. There is
+deliberately no inference helper — no prefix, substring, case-folding or fuzzy
+match — because a look-alike name is not the proven domain. `emoticon2`,
+`emoticon_`, `emoticons`, `Emoticon`, `xemoticon` and `emot` all stay ambiguous and
+blocking. Unknown inputs default to ambiguous; an invalid location token raises.
+
+### 15.7 One acceptance truth
+
+`ContainerAccounting.meets_requirements()` remains `unmet_requirements(self) == ()`,
+and `evidence()["unmet_requirements"]` renders that same function. There is no
+second predicate, no wrapper override, and no combining `.gaps` with unmet
+conditions to invent a verdict. The boundary-class exemption lives inside that
+one predicate, so it cannot be bypassed by calling the wrong function.
+
+One further containment: `_REQUIREMENT_ROLE_GAPS` is `_ROLE_GAPS` intersected
+with `CONTAINER_REQUIREMENTS`, so a classified refusal can only ever add a
+condition from the closed requirement vocabulary. Independent review found that
+without it the rejection branch could emit `business_message_unread` — visible in
+`.gaps`, correctly excluded from required truth, but wrongly placed in
+`unmet_requirements` and therefore able to fail a container that D-040 says it
+does not block. Corrective RED-first, then fixed; see §15.9.
+
+### 15.8 Aggregate evidence shape for the next real gate
+
+`evidence()["domain_summary"]` reports counts **by boundary class only** — no
+name, no path, no directory identity, no filename:
+
+```
+boundary class        database_count  unknown_count  candidate_count
+                      nested_unexamined_count  unreadable_count  role_counts
+required_message
+required_identity
+known_physical_only
+ambiguous
+```
+
+This is what lets the next real rerun answer *how many remaining blockers are
+actually inside Reader-relevant domains?* without publishing a single private
+layout name. `unreadable_count` is kept separate from
+`nested_unexamined_count` because an unlisted directory and an unentered one are
+different claims, and only the first still blocks inside a physical-only domain.
+The optional/excluded axis stays on `role_counts`, so business/FTS/media remain
+visible where they already were.
+
+### 15.9 Synthetic verification
+
+RED before the first production edit: **20 failed / 75 passed** — missing domain
+policy symbols; required/ambiguous/physical-only behaviour; physical-only nested
+semantics; no-basename-inference; no-domain-spoofing; aggregate evidence shape.
+
+A second RED appeared during implementation, from the §14 review: the exported
+`ContainerDatabase` constructor allowed a caller to build an identity row
+outside its anchored domain. **6 failed.** The constructor now rejects a
+misplaced identity role as well as a misplaced ordinary role, so no construction
+path can satisfy a required identity from the ambiguous root or from a proven
+physical-only domain.
+
+The independent read-only review after GREEN found two further defects, both
+fixed RED-first:
+
+1. **Important — closed-vocabulary escape.** A refused business-shaped name
+   (a symlink is never opened) flowed through the new rejection branch and could
+   appear in `unmet_requirements()`, even though `business_message_unread` is
+   deliberately *not* in `CONTAINER_REQUIREMENTS` and D-040 keeps business
+   message non-blocking. Corrective RED: **1 failed / 102 passed**
+   (`test_a_refused_name_can_never_add_a_condition_outside_the_closed_vocabulary`).
+   Fixed by intersecting with the closed requirement vocabulary.
+2. **Minor — merged evidence counters.** The new aggregate counted an unreadable
+   directory as `nested_unexamined_count`, which would have reported an
+   always-blocking condition inside a non-blocking physical-only bucket. Split
+   into `unreadable_count`, asserted by
+   `test_an_unreadable_physical_only_directory_still_fails_closed`.
+
+Final synthetic validation: focused container accounting **103 passed**, full
+acquisition **276 passed**, wechatdb **514 passed**, bridge **270 passed**. All
+tests synthetic. Bridge used its disposable synthetic `HOME` fixture; acquisition
+Keychain checks use injected FakeSecurity. No real-data test ran. Memory/shadow
+have no caller of this primitive and were not run. `database_inventory.py`,
+parser, provider query semantics, crypto, credential path, bootstrap acquisition,
+source discovery, UI, MCP, Agents and Memory are unchanged. `git diff --check`
+and the populated staged `git diff --cached --check` passed.
+
+The review also confirmed, against the diff: no domain entry derived from
+real-source knowledge; `emoticon` provenance valid; basename evidence never
+promoted into layout evidence; no physical-only row can satisfy a required
+role; no message-bearing candidate escapes from a required or ambiguous domain;
+unknown roles stay visible; nested logic relaxed only for the one proven domain;
+traversal width unchanged; no fuzzy/prefix matching; physical-only rows cannot
+strengthen coverage; still exactly one acceptance predicate; D-040, P4-B and
+business-message semantics unchanged.
+
+### 15.10 What this phase did not do
+
+No real source access, no fresh A10 rerun, no recursion, no new traversal, no
+Database Mode, no P5, no product wiring, no decision change. The 13 / 1 / 2
+aggregate figures remain unreconciled until an authorized fresh real rerun reads
+the sealed policy against the real container.
+
+Next step only: **one fresh A10 structural rerun using the sealed
+provenance-backed domain policy, reporting aggregate counts by boundary class**.
+Not executed here.

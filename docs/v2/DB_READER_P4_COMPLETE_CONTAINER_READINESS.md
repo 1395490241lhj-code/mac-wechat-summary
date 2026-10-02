@@ -637,6 +637,18 @@ honestly rather than folded into the verdict:
   **documentation-only under D-040**: a required-role declaration plus the
   existing fixed-token refusal is the whole contract. No subsystem is created
   for symmetry, and A4 is scored on that declaration, not on new code.
+- **The container-domain boundary policy is now sealed** (A10 gate document
+  §15, synthetic/provenance-only). `required_message` for `message/`,
+  `required_identity` for `session/` and `contact/`, `known_physical_only` for
+  the one domain with independent root-layout provenance in this repository's
+  own committed historical reader, and `ambiguous` — fail-closed — for
+  everything else. Acceptance stays one predicate: `unmet_requirements()` now
+  decides on role **and** domain boundary class, `evidence()` renders sanitized
+  `domain_summary` aggregates by boundary class, and traversal width is
+  unchanged. **This is policy, not real evidence: A10 stays `UNMET` and P4-A
+  stays 9/10.** It removes no checklist item and requires no score change; a
+  separately authorized fresh real rerun is what tests the sealed policy
+  against the real container.
 
 ### P4-B — future-generation fail-closed safety
 
@@ -703,5 +715,7 @@ that implementation unchanged. A10
 now remains UNMET after the fresh real rerun under this predicate; P4-A stays
 9/10 and P4-B stays MET 4/4. See the A10 gate document §14 for current real
 evidence, §§1–13 for prior phases, and §13 for the boundary/gap semantics. Next
-only: separately authorized provenance-based synthetic reconciliation of the
-remaining sanitized blocker categories, without source re-access.
+§15 sealed the container-domain boundary policy from independent provenance
+only — no source re-access, and no real rerun. Next only: one separately
+authorized fresh A10 structural rerun using that sealed policy, reporting
+aggregate counts by boundary class.

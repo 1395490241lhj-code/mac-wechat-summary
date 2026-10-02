@@ -23,6 +23,7 @@ import pytest
 import acquisition.container_accounting as container
 
 from acquisition.container_accounting import (
+    CONTAINER_REQUIREMENTS,
     CONTAINER_LOCATIONS,
     CONTAINER_REJECTION_REASONS,
     CONTAINER_ROLES,
@@ -45,6 +46,7 @@ from acquisition.container_accounting import (
     ROLE_SESSION_IDENTITY,
     ROLE_UNKNOWN,
     ROLE_UNSUPPORTED_MESSAGE_CANDIDATE,
+    REJECTED_NOT_REGULAR_FILE,
     UNREADABLE_DIRECTORY,
     account_container,
     unmet_requirements,
@@ -402,7 +404,8 @@ def test_directory_identity_stays_internal_and_diagnostics_are_sanitized(tmp_pat
     evidence = accounting.evidence()
     assert set(evidence) == {
         "classification", "database_count", "role_counts", "examined_directory_count",
-        "location_counts", "rejections", "gaps", "unmet_requirements"}
+        "location_counts", "rejections", "gaps", "domain_summary",
+        "unmet_requirements"}
     rendered = repr(accounting) + repr(evidence) + repr(accounting.examined_directories)
     for private in (str(root), "extra_a", "extra_b", "extra_c"):
         assert private not in rendered
@@ -605,3 +608,318 @@ def test_exported_database_api_cannot_relabel_misplaced_shard_as_required(tmp_pa
     with pytest.raises(ValueError, match='^container database invalid$'):
         container.ContainerDatabase(row.location, row.name, ROLE_ORDINARY_MESSAGE,
                                     row.directory_identity)
+
+
+# -- provenance-based container-domain reconciliation -------------------------
+#
+# One domain has independent provenance in this repository's own committed
+# historical reader: core/wechat_db.py reads os.path.join("emoticon",
+# "emoticon.db") from a directory it documents as the WeChat db_storage root,
+# for a sticker md5 -> CDN lookup table. No v2 production path references it.
+# That is a root-directory fact, not a basename fact, so it is the only shape
+# that may become a domain boundary entry. Everything else stays ambiguous.
+
+BOUNDARY_REQUIRED_MESSAGE = "required_message"
+BOUNDARY_REQUIRED_IDENTITY = "required_identity"
+BOUNDARY_KNOWN_PHYSICAL_ONLY = "known_physical_only"
+BOUNDARY_AMBIGUOUS = "ambiguous"
+
+
+def test_domain_boundary_vocabulary_is_closed_and_default_is_ambiguous():
+    assert container.CONTAINER_DOMAIN_CLASSES == frozenset({
+        BOUNDARY_REQUIRED_MESSAGE,
+        BOUNDARY_REQUIRED_IDENTITY,
+        BOUNDARY_KNOWN_PHYSICAL_ONLY,
+        BOUNDARY_AMBIGUOUS,
+    })
+    # No inference helper exists: only the closed mapping decides.
+    assert not hasattr(container, "looks_like_domain")
+
+
+@pytest.mark.parametrize("directory,expected", [
+    ("message", BOUNDARY_REQUIRED_MESSAGE),
+    ("session", BOUNDARY_REQUIRED_IDENTITY),
+    ("contact", BOUNDARY_REQUIRED_IDENTITY),
+    ("emoticon", BOUNDARY_KNOWN_PHYSICAL_ONLY),
+    ("anything_else", BOUNDARY_AMBIGUOUS),
+    ("extra_domain", BOUNDARY_AMBIGUOUS),
+    ("", BOUNDARY_AMBIGUOUS),
+])
+def test_directory_boundary_class_comes_only_from_the_closed_policy(directory, expected):
+    classification = container._NAMED_DIRECTORIES.get(directory, LOCATION_OTHER_DIRECTORY)
+    assert container.domain_boundary_class(directory, classification) == expected
+
+
+# required domains: visible and blocking
+
+@pytest.mark.parametrize("name,role,gap", [
+    ("neutral_store.db", ROLE_UNKNOWN, GAP_UNKNOWN_DATABASE),
+    ("message_future.db", ROLE_UNSUPPORTED_MESSAGE_CANDIDATE, GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_required_message_domain_unknown_and_candidate_stay_visible_and_blocking(tmp_path, name, role, gap):
+    accounting = account_container(_root(tmp_path, message=("message_0.db", name)))
+
+    assert accounting.role_counts[role] == 1
+    assert gap in accounting.gaps
+    assert unmet_requirements(accounting) == (gap,)
+    assert not accounting.meets_requirements()
+
+
+def test_required_message_domain_ordinary_shard_satisfies_the_ordinary_role(tmp_path):
+    accounting = account_container(_root(tmp_path))
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 2
+    assert accounting.meets_requirements()
+
+
+def test_identity_anchors_satisfy_only_their_own_required_identities(tmp_path):
+    accounting = account_container(_root(tmp_path))
+
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 1
+    assert ROLE_SESSION_IDENTITY not in {
+        row.role for row in accounting.databases
+        if row.location != LOCATION_SESSION_DIRECTORY}
+    assert ROLE_CONTACT_IDENTITY not in {
+        row.role for row in accounting.databases
+        if row.location != LOCATION_CONTACT_DIRECTORY}
+
+
+def test_a_misplaced_ordinary_shard_cannot_satisfy_the_ordinary_role(tmp_path):
+    root = _root(tmp_path, message=())
+    (root / "session" / "message_8.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert GAP_UNSUPPORTED_MESSAGE_CANDIDATE in accounting.gaps
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+
+
+# proven physical-only domain: accounted and visible, never blocking
+
+@pytest.mark.parametrize("name,role", [
+    ("whatever_this_is.db", ROLE_UNKNOWN),
+    ("message_future.db", ROLE_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_proven_physical_only_domain_accounts_and_keeps_roles_visible(tmp_path, name, role):
+    root = _root(tmp_path, directories=("emoticon",))
+    placeholder = root / "emoticon" / "a.db"
+    placeholder.unlink()
+    placeholder.with_name(name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    # Visible, and still exactly the honest role. Not relabelled, not supported.
+    assert accounting.role_counts[role] == 1
+    # Accounted exactly once.
+    assert accounting.accounts_for([(row.directory_identity, row.name)
+                                    for row in accounting.databases])
+    # Non-blocking for Reader completeness only.
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+    # But the role-level observation is still reported, so nothing is hidden.
+    assert accounting.gaps
+
+
+def test_proven_physical_only_domain_cannot_supply_any_required_truth(tmp_path):
+    root = _root(tmp_path, message=(), directories=("emoticon",))
+    (root / "emoticon" / "message_0.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("directory,location,role", [
+    ("emoticon", LOCATION_OTHER_DIRECTORY, ROLE_SESSION_IDENTITY),
+    ("emoticon", LOCATION_OTHER_DIRECTORY, ROLE_CONTACT_IDENTITY),
+    ("", LOCATION_ROOT, ROLE_SESSION_IDENTITY),
+    ("", LOCATION_ROOT, ROLE_CONTACT_IDENTITY),
+    ("some_domain", LOCATION_OTHER_DIRECTORY, ROLE_SESSION_IDENTITY),
+    ("message", LOCATION_MESSAGE_DIRECTORY, ROLE_SESSION_IDENTITY),
+])
+def test_exported_database_api_cannot_inject_a_required_identity_outside_its_domain(
+        directory, location, role):
+    # Enumeration routes anchors correctly, but the exported dataclass is also a
+    # construction path. Without a location guard a caller -- or a future
+    # miscounting caller inside this module -- could satisfy a required identity
+    # from a proven physical-only domain or from the ambiguous root.
+    with pytest.raises(ValueError, match='^container database invalid$'):
+        container.ContainerDatabase(location, "anchor.db", role, directory)
+
+
+def test_proven_physical_only_nested_directory_is_visible_without_blocking(tmp_path):
+    root = _root(tmp_path, directories=("emoticon",))
+    nested = root / "emoticon" / "shards"
+    nested.mkdir(parents=True)
+    (nested / "whatever.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert container.ContainerRejection(LOCATION_OTHER_DIRECTORY, "shards",
+                                       container.NESTED_DIRECTORY, "emoticon") in accounting.rejections
+    # Visible as physical structure, and no recursion was implied.
+    assert accounting.evidence()["rejections"].count(container.NESTED_DIRECTORY) == 1
+    assert DIRECTORY_UNEXAMINED not in unmet_requirements(accounting)
+    assert accounting.meets_requirements()
+
+
+def test_an_unreadable_physical_only_directory_still_fails_closed(tmp_path):
+    root = _root(tmp_path, directories=("emoticon",))
+    (root / "emoticon").chmod(0o000)
+    try:
+        accounting = account_container(root)
+    finally:
+        (root / "emoticon").chmod(0o700)
+
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    summary = accounting.evidence()["domain_summary"]
+    # Reported as its own thing: an unlisted directory is not the same claim as a
+    # listed one holding a structure that was not entered.
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["unreadable_count"] == 1
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["nested_unexamined_count"] == 0
+
+
+# ambiguous default: fail-closed everywhere
+
+@pytest.mark.parametrize("name,gap", [
+    ("neutral_store.db", GAP_UNKNOWN_DATABASE),
+    ("message_future.db", GAP_UNSUPPORTED_MESSAGE_CANDIDATE),
+])
+def test_ambiguous_domain_unknown_and_candidate_are_blockers(tmp_path, name, gap):
+    root = _root(tmp_path)
+    (root / "some_domain").mkdir()
+    (root / "some_domain" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert gap in accounting.gaps
+    assert unmet_requirements(accounting) == (gap,)
+    assert not accounting.meets_requirements()
+
+
+def test_ambiguous_domain_nested_directory_is_a_blocker(tmp_path):
+    root = _root(tmp_path)
+    (root / "some_domain" / "deeper").mkdir(parents=True)
+
+    accounting = account_container(root)
+
+    assert DIRECTORY_UNEXAMINED in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+# the two axes cannot be collapsed into each other
+
+def test_a_recognised_auxiliary_basename_does_not_promote_an_ambiguous_parent(tmp_path):
+    # sns.db is a proven auxiliary *basename* with no proven parent domain.
+    root = _root(tmp_path)
+    (root / "some_domain").mkdir()
+    (root / "some_domain" / "sns.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_AUXILIARY] == 1
+    assert container.domain_boundary_class(
+        "some_domain", LOCATION_OTHER_DIRECTORY) == BOUNDARY_AMBIGUOUS
+    assert accounting.meets_requirements()
+
+
+def test_a_recognised_auxiliary_basename_does_not_excuse_an_unknown_beside_it(tmp_path):
+    root = _root(tmp_path)
+    (root / "some_domain").mkdir()
+    (root / "some_domain" / "sns.db").write_bytes(b"synthetic")
+    (root / "some_domain" / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+
+
+@pytest.mark.parametrize("spoofed", [
+    "emoticon2", "emoticon_", "emoticons", "Emoticon", "xemoticon", "emot",
+])
+def test_a_similar_looking_directory_name_stays_ambiguous(tmp_path, spoofed):
+    root = _root(tmp_path)
+    (root / spoofed).mkdir()
+    (root / spoofed / "neutral_store.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert container.domain_boundary_class(
+        spoofed, LOCATION_OTHER_DIRECTORY) == BOUNDARY_AMBIGUOUS
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+def test_the_policy_mapping_is_exact_matching_only():
+    assert container.KNOWN_PHYSICAL_ONLY_DIRECTORIES == frozenset({"emoticon"})
+    assert container.KNOWN_PHYSICAL_ONLY_DIRECTORIES == frozenset(
+        container._PHYSICAL_ONLY_DOMAIN_NAMES)
+
+
+# evidence rendering: aggregate by boundary class, never a name
+
+def test_evidence_aggregates_by_boundary_class_without_leaking_names(tmp_path):
+    root = _root(tmp_path, message=("message_0.db", "biz_message_0.db"),
+                 directories=("emoticon",), root_files=("stray.db",))
+    (root / "some_domain").mkdir()
+    (root / "some_domain" / "message_future.db").write_bytes(b"synthetic")
+    (root / "emoticon" / "deeper").mkdir()
+
+    evidence = account_container(root).evidence()
+
+    summary = evidence["domain_summary"]
+    assert set(summary) == {
+        BOUNDARY_REQUIRED_MESSAGE, BOUNDARY_REQUIRED_IDENTITY,
+        BOUNDARY_KNOWN_PHYSICAL_ONLY, BOUNDARY_AMBIGUOUS}
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["database_count"] == 1
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["unknown_count"] == 1
+    assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["nested_unexamined_count"] == 1
+    assert summary[BOUNDARY_AMBIGUOUS]["database_count"] == 2
+    assert summary[BOUNDARY_AMBIGUOUS]["candidate_count"] == 1
+    assert summary[BOUNDARY_REQUIRED_MESSAGE]["database_count"] == 2
+    assert summary[BOUNDARY_REQUIRED_IDENTITY]["database_count"] == 2
+    # Optional/excluded capability stays visible on the role axis.
+    assert summary[BOUNDARY_REQUIRED_MESSAGE]["role_counts"].get(ROLE_BUSINESS_MESSAGE)
+    rendered = repr(evidence)
+    for leak in ("emoticon", "some_domain", "deeper", "stray", "message_future", "/"):
+        assert leak not in rendered
+
+
+# a refusal is classified, not just dropped: it must not smuggle in a condition
+# that is outside the closed requirement vocabulary
+
+def test_a_refused_name_can_never_add_a_condition_outside_the_closed_vocabulary(tmp_path):
+    # D-040 excludes business message from required truth. A business-shaped name
+    # that was refused (a symlink is never opened) is still business-shaped and
+    # still excluded -- so it may appear in gaps but never in unmet requirements.
+    root = _root(tmp_path)
+    (root / "message" / "biz_message_0.db").symlink_to(root / "message" / "message_0.db")
+
+    accounting = account_container(root)
+
+    assert (container.ContainerRejection(
+        LOCATION_MESSAGE_DIRECTORY, "biz_message_0.db", REJECTED_NOT_REGULAR_FILE,
+        "message") in accounting.rejections)
+    assert GAP_BUSINESS_MESSAGE_UNREAD in accounting.gaps
+    assert GAP_BUSINESS_MESSAGE_UNREAD not in CONTAINER_REQUIREMENTS
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+def test_a_refused_message_shape_outside_a_physical_only_domain_is_accounted_only(tmp_path):
+    # An auxiliary-shaped refusal is the cheapest possible path to a false pass if
+    # the boundary exemption is applied without the role check. Nothing inside a
+    # proven physical-only domain may become required truth, and nothing inside it
+    # may quietly turn into a blocker it never was.
+    root = _root(tmp_path, directories=("emoticon",))
+    (root / "emoticon" / "sns.db").symlink_to(root / "emoticon")
+
+    accounting = account_container(root)
+
+    assert accounting.rejections
+    assert accounting.meets_requirements()

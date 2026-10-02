@@ -95,6 +95,93 @@ _NAMED_DIRECTORIES = {
     CONTACT_DIRECTORY_NAME: LOCATION_CONTACT_DIRECTORY,
 }
 
+# -- container-domain boundary policy ---------------------------------------
+#
+# A *domain* is a root-relative directory; a *role* is what a database basename
+# is understood to be. They are independent axes and must not collapse into each
+# other: a recognised auxiliary basename says nothing about its parent directory,
+# and a physical-only parent says nothing about the database inside it.
+#
+# The class answers one question only -- does this domain lie inside the Reader
+# completeness scope -- so physical presence in the container never decides it.
+
+#: The Reader requires ordinary message truth here.
+DOMAIN_REQUIRED_MESSAGE = "required_message"
+
+#: The Reader requires identity truth here (session and contact anchors).
+DOMAIN_REQUIRED_IDENTITY = "required_identity"
+
+#: Independently proven to be a genuine WeChat store domain that the current v2
+#: Reader does not claim as required message/identity truth. Existence is
+#: accounted; its contents add no coverage and support no role.
+DOMAIN_KNOWN_PHYSICAL_ONLY = "known_physical_only"
+
+#: No independent provenance. The default, and always fail-closed.
+DOMAIN_AMBIGUOUS = "ambiguous"
+
+CONTAINER_DOMAIN_CLASSES: frozenset[str] = frozenset({
+    DOMAIN_REQUIRED_MESSAGE,
+    DOMAIN_REQUIRED_IDENTITY,
+    DOMAIN_KNOWN_PHYSICAL_ONLY,
+    DOMAIN_AMBIGUOUS,
+})
+
+#: Root domains proven physical-container-only, by exact name. Provenance, one
+#: row per entry, in ``docs/v2/DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md``
+#: §15 ledger:
+#:
+#:   ``emoticon`` -- Tier 2, this repository's own committed historical reader.
+#:   ``core/wechat_db.py`` reads ``os.path.join("emoticon", "emoticon.db")`` from
+#:   a directory its own docstring documents as the WeChat ``db_storage`` root,
+#:   and queries ``kNonStoreEmoticonTable`` for an md5 -> CDN sticker mapping.
+#:   That is a *root-domain* fact: a first path component relative to the
+#:   container root, and an explicit feature purpose that is not message or
+#:   identity truth. No v2 production path reads it.
+#:
+#: Nothing else is added here. GreenBubbles/wx-cli material recognises
+#: ``hardlink_*.db``/``chatbot.db``/``sns.db`` as database *basenames*; no
+#: accepted evidence establishes the parent directory of any of them, so they
+#: stay database-role knowledge and never become a directory-domain entry.
+#: There is deliberately no inference helper: no prefix, substring, case-folding
+#: or fuzzy matching, because a look-alike name is not the proven domain.
+_PHYSICAL_ONLY_DOMAIN_NAMES = frozenset({"emoticon"})
+
+KNOWN_PHYSICAL_ONLY_DIRECTORIES: frozenset[str] = _PHYSICAL_ONLY_DOMAIN_NAMES
+
+#: Which boundary class each reportable location class always sits in. A location
+#: class is a fixed token; only the physical-only row needs the domain name, so
+#: that is the only place a name is consulted.
+_LOCATION_DOMAIN_CLASS = {
+    LOCATION_MESSAGE_DIRECTORY: DOMAIN_REQUIRED_MESSAGE,
+    LOCATION_SESSION_DIRECTORY: DOMAIN_REQUIRED_IDENTITY,
+    LOCATION_CONTACT_DIRECTORY: DOMAIN_REQUIRED_IDENTITY,
+    LOCATION_ROOT: DOMAIN_AMBIGUOUS,
+    LOCATION_OTHER_DIRECTORY: DOMAIN_AMBIGUOUS,
+}
+
+
+def domain_boundary_class(directory_name: str, location: str) -> str:
+    """The boundary class of one domain, from the closed policy only.
+
+    ``directory_name`` is the root-relative basename; the root itself is the
+    empty string. Matching is exact-set membership, so a similar-looking name is
+    not the proven domain. Any unknown input is ambiguous by default.
+    """
+    if location not in _LOCATION_DOMAIN_CLASS:
+        raise ValueError("container directory invalid")
+    if location == LOCATION_OTHER_DIRECTORY and directory_name in _PHYSICAL_ONLY_DOMAIN_NAMES:
+        return DOMAIN_KNOWN_PHYSICAL_ONLY
+    return _LOCATION_DOMAIN_CLASS[location]
+
+
+def _is_outside_reader_boundary(directory_identity: str, location: str) -> bool:
+    """Whether this row's parent domain is proven outside Reader completeness.
+
+    Only a domain with independent provenance qualifies. An ambiguous parent is
+    inside scope by default, so nothing here can be reached by guessing.
+    """
+    return domain_boundary_class(directory_identity, location) == DOMAIN_KNOWN_PHYSICAL_ONLY
+
 #: Which required role each named directory exists to hold, and the name that
 #: carries it. A location that exists but does not hold the role has not lost the
 #: role -- it has misplaced it, which is a different fixed condition.
@@ -102,6 +189,11 @@ _LOCATION_ROLE = {
     LOCATION_SESSION_DIRECTORY: ROLE_SESSION_IDENTITY,
     LOCATION_CONTACT_DIRECTORY: ROLE_CONTACT_IDENTITY,
 }
+
+#: The same routing read backwards. Identity is not transferable between
+#: domains, and the exported constructor enforces that below.
+_LOCATION_ROLE_BY_ROLE = {role: location
+                          for location, role in _LOCATION_ROLE.items()}
 
 _LOCATION_ANCHOR = {
     LOCATION_SESSION_DIRECTORY: SESSION_DIRECTORY_NAME + ".db",
@@ -144,6 +236,13 @@ _ROLE_GAPS = {
     ROLE_BUSINESS_MESSAGE: GAP_BUSINESS_MESSAGE_UNREAD,
     ROLE_UNKNOWN: GAP_UNKNOWN_DATABASE,
     ROLE_UNSUPPORTED_MESSAGE_CANDIDATE: GAP_UNSUPPORTED_MESSAGE_CANDIDATE,
+}
+
+#: The same routing, narrowed to the conditions acceptance may actually raise.
+#: Kept beside ``_ROLE_GAPS`` on purpose: one table says which role maps to which
+#: visible gap, the other says which of those gaps can block a Reader claim.
+_REQUIREMENT_ROLE_GAPS = {
+    role: gap for role, gap in _ROLE_GAPS.items() if gap in CONTAINER_REQUIREMENTS
 }
 
 
@@ -189,7 +288,14 @@ class ContainerDatabase:
             raise ValueError("container database invalid")
         if (self.role not in CONTAINER_ROLES
                 or (self.role == ROLE_ORDINARY_MESSAGE
-                    and self.location != LOCATION_MESSAGE_DIRECTORY)):
+                    and self.location != LOCATION_MESSAGE_DIRECTORY)
+                # Identity is not transferable between domains: enumeration only
+                # ever puts these roles in their own anchored directory, and the
+                # exported constructor must not be a way around that. Without it
+                # a required identity could be satisfied out of the ambiguous
+                # root or a proven physical-only domain.
+                or self.role in _LOCATION_ROLE_BY_ROLE
+                    and self.location != _LOCATION_ROLE_BY_ROLE[self.role]):
             raise ValueError("container database invalid")
         if (self.location not in CONTAINER_LOCATIONS
                 or not _valid_directory_identity(self.directory_identity, self.location)):
@@ -298,6 +404,45 @@ class ContainerAccounting:
             present.add(role)
         return tuple(gap for role, gap in _ROLE_GAPS.items() if role in present)
 
+    @property
+    def domain_summary(self) -> dict[str, dict[str, object]]:
+        """Aggregate counts by boundary class. No name, no path, no identity.
+
+        The reporting axis for the next real gate: how many databases, unknowns,
+        message-shaped candidates and unexamined structures sit in each boundary
+        class. It answers "are the remaining blockers inside Reader-relevant
+        domains?" without ever naming a directory or a file.
+        """
+        summary = {boundary: {
+            "database_count": 0,
+            "unknown_count": 0,
+            "candidate_count": 0,
+            "nested_unexamined_count": 0,
+            "unreadable_count": 0,
+            "role_counts": {},
+        } for boundary in sorted(CONTAINER_DOMAIN_CLASSES)}
+        for row in self.databases:
+            boundary = domain_boundary_class(row.directory_identity, row.location)
+            entry = summary[boundary]
+            entry["database_count"] += 1
+            if row.role == ROLE_UNKNOWN:
+                entry["unknown_count"] += 1
+            elif row.role == ROLE_UNSUPPORTED_MESSAGE_CANDIDATE:
+                entry["candidate_count"] += 1
+            counts = entry["role_counts"]
+            counts[row.role] = counts.get(row.role, 0) + 1
+        for row in self.rejections:
+            boundary = domain_boundary_class(row.directory_identity, row.location)
+            entry = summary[boundary]
+            if row.reason == UNREADABLE_DIRECTORY:
+                # A directory that could not be listed is unexamined everywhere,
+                # including inside a proven physical-only domain. Do not merge it
+                # into the nested count: the two say different things.
+                entry["unreadable_count"] += 1
+            elif row.reason == NESTED_DIRECTORY or row.is_directory:
+                entry["nested_unexamined_count"] += 1
+        return summary
+
     def accounts_for(self, keys) -> bool:
         """True only when these (directory identity, name) keys occur once.
 
@@ -340,6 +485,7 @@ class ContainerAccounting:
             },
             "rejections": tuple(row.reason for row in self.rejections),
             "gaps": self.gaps,
+            "domain_summary": self.domain_summary,
             "unmet_requirements": unmet_requirements(self),
         }
 
@@ -467,17 +613,52 @@ def unmet_requirements(accounting) -> tuple[str, ...]:
             # hold it. That is a different failure from the role never existing,
             # and it is what tells a future capsule where to look.
             unmet.add(REQUIRED_ROLE_UNCLASSIFIED)
-    if any(row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY) or row.is_directory
-           for row in accounting.rejections):
-        unmet.add(DIRECTORY_UNEXAMINED)
-    # Visible gaps and acceptance blockers are different: business is excluded
-    # by D-040, while unknown/candidate risk has no proven location exemption.
-    unmet.update(gap for gap in accounting.gaps if gap in {
-        GAP_UNKNOWN_DATABASE, GAP_UNSUPPORTED_MESSAGE_CANDIDATE})
+    # Boundary-class aware. One pass over every row that could be a blocker, so
+    # there is still exactly one place where acceptance is decided.
+    #
+    # An unexamined structure inside a domain independently proven outside the
+    # Reader boundary is visible physical structure, not a gap in Reader
+    # completeness: nothing inside it was looked at, nothing inside it counts as
+    # truth, and no recursion is implied either way. An unreadable directory
+    # stays blocking everywhere, because a directory that could not be listed is
+    # not the same claim as one that was listed and held nothing needed.
+    #
+    # Visible gaps and acceptance blockers are still different: business is
+    # excluded by D-040, and unknown/candidate risk blocks only where its parent
+    # domain is required or ambiguous. The role is never relabelled -- it stays
+    # visible and unsupported either way.
+    for row in accounting.databases:
+        if row.role not in (ROLE_UNKNOWN, ROLE_UNSUPPORTED_MESSAGE_CANDIDATE):
+            continue
+        if _is_outside_reader_boundary(row.directory_identity, row.location):
+            continue
+        unmet.add(_ROLE_GAPS[row.role])
+    for row in accounting.rejections:
+        outside = _is_outside_reader_boundary(row.directory_identity, row.location)
+        if row.reason == UNREADABLE_DIRECTORY:
+            unmet.add(DIRECTORY_UNEXAMINED)
+            continue
+        if row.reason == NESTED_DIRECTORY or row.is_directory:
+            if not outside:
+                unmet.add(DIRECTORY_UNEXAMINED)
+            continue
+        role = _container_role(row.location, row.name)
+        if role == ROLE_ORDINARY_MESSAGE:
+            # A refused shard-shaped name is a candidate, never a shard: this
+            # reader did not and may not open it.
+            role = ROLE_UNSUPPORTED_MESSAGE_CANDIDATE
+        # Only the two conditions in CONTAINER_REQUIREMENTS may come from here.
+        # A refused business-shaped name is classified and reported as a gap, but
+        # D-040 keeps business message excluded from required truth, so it can
+        # never become an acceptance blocker. Intersecting with the closed
+        # vocabulary also keeps this predicate from inventing a condition.
+        if role in _REQUIREMENT_ROLE_GAPS and not outside:
+            unmet.add(_REQUIREMENT_ROLE_GAPS[role])
     return tuple(sorted(unmet))
 
 
 __all__ = [
+    "CONTAINER_DOMAIN_CLASSES",
     "CONTAINER_LOCATIONS",
     "CONTAINER_REJECTION_REASONS",
     "CONTAINER_REQUIREMENTS",
@@ -497,6 +678,11 @@ __all__ = [
     "REQUIRED_ROLE_MISSING",
     "REQUIRED_ROLE_UNCLASSIFIED",
     "DIRECTORY_UNEXAMINED",
+    "DOMAIN_AMBIGUOUS",
+    "DOMAIN_KNOWN_PHYSICAL_ONLY",
+    "DOMAIN_REQUIRED_IDENTITY",
+    "DOMAIN_REQUIRED_MESSAGE",
+    "KNOWN_PHYSICAL_ONLY_DIRECTORIES",
     "NESTED_DIRECTORY",
     "SESSION_DIRECTORY_NAME",
     "UNREADABLE_DIRECTORY",
@@ -505,5 +691,6 @@ __all__ = [
     "ContainerRejection",
     "ExaminedDirectory",
     "account_container",
+    "domain_boundary_class",
     "unmet_requirements",
 ]
