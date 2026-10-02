@@ -278,12 +278,13 @@ collection, which is pre-existing and unrelated to this capsule.
 
 ## This does not complete P4
 
-**This does not complete P4 unless all remaining P4 requirements are
-independently met.**
+**This does not complete P4-A unless all remaining P4-A requirements are
+independently met** (D-040; checklist in
+`docs/v2/DB_READER_P4_COMPLETE_CONTAINER_READINESS.md` §13).
 
 Remaining P4 surface, in rough dependency order:
 
-1. complete-container compatibility (the assembled container, not one shard)
+1. P4-A current-reader container compatibility (the assembled container, not one shard)
 2. a decoded-search fallback for the search capability
 3. lazy media compatibility
 

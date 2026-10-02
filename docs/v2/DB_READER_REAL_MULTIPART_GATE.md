@@ -200,7 +200,8 @@ Under D-032, the scoped promotion evidence state is now:
 | P1 — explicit product promotion decision | **UNMET** |
 | P2 — standing acquisition decision | **UNMET** |
 | P3 — real multi-part verification | **MET under D-032** |
-| P4 — complete-container / future-version compatibility | **UNMET** |
+| P4-A — current-reader container compatibility | **UNMET** — reconciled by D-040; one real evidence item (A10) outstanding |
+| P4-B — future-generation fail-closed safety | **MET** — synthetic safety contracts |
 | P5 — visual remains production/default and DB remains opt-in/unwired | **UNMET** |
 
 P3 being met does not imply any other gate, does not authorize wiring, and does

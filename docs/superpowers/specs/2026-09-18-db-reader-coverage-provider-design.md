@@ -1362,10 +1362,37 @@ grant of it.
   multi-part verification was therefore **not satisfiable**. D-032 records the
   post-G1 structural evidence that superseded that operational state; P3 remains
   unmet until the corrected provider passes a later real-evidence gate.
-- **P4 — Complete-container coverage and future-WeChat-version compatibility
-  remain unproven.** E-022's evidence is scoped to one operator's current
-  `message_0` and must not be generalised. No claim to the contrary may be made
-  on the strength of this document.
+- **P4 — Container coverage and future-WeChat-version compatibility remain
+  unproven.** *(Superseded wording, reconciled by D-040 in the project vault
+  `Decisions.md`, 2026-10-02. The
+  original sentence read "Complete-container coverage and
+  future-WeChat-version compatibility remain unproven." It bundled a checkable
+  claim with one that no test can establish, so it could only ever be
+  reconciled, never passed or failed. D-040 splits it into P4-A and P4-B
+  below. This paragraph is retained for provenance and is **not** an acceptance
+  criterion; the two clauses below are.)* E-022's evidence is scoped to one
+  operator's current `message_0` and must not be generalised. No claim to the
+  contrary may be made on the strength of this document.
+
+  - **P4-A — current-reader container compatibility.** Given an
+    already-prepared source of a *tested* generation, every role inside the
+    defined Reader boundary is accounted exactly once; required roles are
+    distinguished from optional or excluded capability roles; every required
+    role is supported; required-role incompatibility fails closed; a
+    message-bearing unsupported or unknown structure stays an explicit gap; and
+    the WAL, identity, coverage and bounded-query invariants stay sealed. This
+    is a per-generation claim about a source that exists. It does not require
+    production credential acquisition, a product Database Mode, every WeChat
+    feature or database, optional FTS or media implementation, or any
+    future-version claim.
+  - **P4-B — future-generation fail-closed safety.** For an unverified future
+    generation, a recognised role with a changed schema is never assumed
+    compatible; a malformed or unsupported required role prevents a false
+    complete claim; unknown and message-like structures remain explicit gaps;
+    and no product path silently reinterprets an unknown generation. **P4-B
+    proves safety, not compatibility.** Compatibility with a specific future
+    version can only be established once that version exists, through its own
+    real gate.
 - **P5 — Visual capture stays the default.** Promotion does not change
   `selected_source_name()`'s `visual` default. A database source stays explicitly
   selected, off by default, and fail-closed when unselected.

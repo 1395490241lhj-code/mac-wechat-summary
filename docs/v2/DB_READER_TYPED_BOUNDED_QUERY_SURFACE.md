@@ -264,11 +264,12 @@ difference is exactly the new contract suite.
 
 ## This does not complete P4
 
-> Typed bounded query surface sub-gate PASS; P4 remains incomplete.
+> Typed bounded query surface sub-gate PASS; P4-A remains incomplete (see D-040
+> and `docs/v2/DB_READER_P4_COMPLETE_CONTAINER_READINESS.md` §13).
 
 Remaining P4 surface, in rough dependency order:
 
-1. complete-container compatibility (the assembled container, not one shard)
+1. P4-A current-reader container compatibility (the assembled container, not one shard)
 2. a decoded-search fallback for the search capability
 3. lazy media compatibility
 

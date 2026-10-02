@@ -141,11 +141,12 @@ unwired.
 
 **ACQUISITION FAST LANE REAL END-TO-END GATE = MET.**
 
-P1/P2/P3 remain MET. P4 and P5 remain UNMET.
+P1/P2/P3 remain MET. P4-A and P5 remain UNMET. P4-B, future-generation
+fail-closed safety, is MET per D-040.
 
 The next accelerated work is:
 
-1. define and seal the P4 compatibility envelope for the currently proven
+1. define and seal the P4-A compatibility envelope for the currently proven
    format, with unknown/changed formats failing closed as `version_unverified`;
 2. implement P5 opt-in runtime wiring: Database Mode uses the DB Reader when
    acquisition is READY and falls back to the existing visual Reader otherwise;

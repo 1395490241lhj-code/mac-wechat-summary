@@ -12,8 +12,14 @@
 >   multi-part verification was not satisfiable. That historical state is
 >   superseded by D-032's post-G1 structural evidence, but P3 remains unmet
 >   until the corrected provider passes a later real-evidence gate.
-> - **P4 — Complete-container coverage and future-WeChat-version
->   compatibility remain unproven.**
+> - **P4 — superseded as written and reconciled by D-040 (2026-10-02).** The
+>   original line read "Complete-container coverage and future-WeChat-version
+>   compatibility remain unproven", which bundled a checkable claim with one
+>   no test can establish. The operative definition is now **P4-A**
+>   (current-reader container compatibility, for a tested generation) and
+>   **P4-B** (future-generation fail-closed safety), in the approved design
+>   spec §15. The acceptance checklist is
+>   `docs/v2/DB_READER_P4_COMPLETE_CONTAINER_READINESS.md` §13.
 > - **P5 — Visual capture stays the default.** It is the production path.
 >
 > D-030 is lapsed. Visual capture remains the production/default path. G1

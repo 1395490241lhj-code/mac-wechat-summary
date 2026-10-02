@@ -155,5 +155,6 @@ will be designed after the normal stored-key path is proven end to end.
 
 ## Gate state
 
-P1/P2/P3 remain MET. P4/P5 remain UNMET. The database provider remains unwired
+P1/P2/P3 remain MET. P4-A and P5 remain UNMET (P4-B, fail-closed safety, is MET
+per D-040). The database provider remains unwired
 and the runtime default remains visual until a later explicit integration gate.

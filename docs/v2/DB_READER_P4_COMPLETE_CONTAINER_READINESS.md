@@ -1,5 +1,18 @@
 # DB Reader P4 — complete-container readiness (evidence gate)
 
+> **SUPERSEDED IN PART — reconciliation enacted.** This document's
+> `P4 definition requires reconciliation` verdict and its §8 "proposal only"
+> were resolved by **D-040**, recorded in the vault `Decisions.md` on
+> 2026-10-02. The authoritative current P4 definition now lives in the original
+> design spec
+> `docs/superpowers/specs/2026-09-18-db-reader-coverage-provider-design.md`
+> §15 P4-A/P4-B, and the machine-checkable acceptance checklist is §13 of this
+> document. Everything below is retained as the read-only assessment that
+> produced the decision: **its evidence and gap analysis are current**, but its
+> §8 is no longer a proposal, its §12 result is historical, and its §6 matrix is read
+> against D-040's role table. Where this document and D-040 could be read as
+> disagreeing, D-040 and the spec §15 text win.
+
 ## Scope
 
 This is the P4 evidence/design gate. It adds no Reader capability. It answers
@@ -36,7 +49,9 @@ reconciliation; it does not enact it.
 
 ## 1. The authoritative P4 definition
 
-P4 appears exactly once as a definition, in the approved design:
+P4 appeared exactly once as a definition, in the approved design. **This is the
+superseded wording, quoted for provenance; it is no longer an acceptance
+criterion** (D-040):
 
 > **P4 — Complete-container coverage and future-WeChat-version compatibility
 > remain unproven.** E-022's evidence is scoped to one operator's current
@@ -57,12 +72,13 @@ That document also disclaims any promotion on its own strength: *"There is no
 implicit promotion"* (`…design.md:1355`). Everything after it is a deferral,
 not a specification.
 
-P4 is tracked as **UNMET** in `docs/v2/DB_READER_STANDING_ACQUISITION_DESIGN.md:415`
+P4 is tracked as **UNMET** in `docs/v2/DB_READER_STANDING_ACQUISITION_DESIGN.md:417`
 and `docs/v2/DB_READER_REAL_MULTIPART_GATE.md:203`, as *P4 remains unmet* in
 `docs/v2/DB_READER_PRODUCT_PROMOTION_DECISION.md:34`, and in the vault as the
-largest untouched named P4 item (`Next Actions.md:24`) — a line that also calls
-its evidence gap *the standing blocker* `database-production-path-no-retained-access-material`.
-§9 shows that coupling is a vault conflation, not a property of P4.
+largest untouched named P4 item — in a section that also called its evidence gap
+*the standing blocker* `database-production-path-no-retained-access-material`.
+§9 shows that coupling is a vault conflation, not a property of P4, and the
+vault sections that carried it are now marked historical.
 
 ### Why the definition is unusable as an acceptance criterion
 
@@ -188,7 +204,12 @@ role/gap vocabulary, so it cannot be accounted, counted or reported the way a
 changed message part is. That is a genuine Reader-correctness gap, and a
 narrower one than "no envelope" would be.
 
-### C. Business messages — UNRESOLVED, deliberately
+### C. Business messages — DECIDED under D-040 (this subsection is the pre-decision assessment)
+
+> **Decided 2026-10-02.** D-040 kept the committed read contract: `business_message` is
+> **not required**, is message-bearing, explicitly unsupported, and retains the standing
+> `business_message_unread` gap. The reasoning below is the pre-decision analysis that
+> D-040 resolved; read the decision, not this opening question.
 
 `biz_message_<n>.db` is a recognised `business_message` role that is never
 admitted as a message source and raises the standing gap
@@ -293,15 +314,15 @@ written without being reinterpreted as the safety property.
 |---|---|---|---|---|---|
 | ordinary messages | yes | yes | yes | strong for the 7 probed 4.1.15 parts; the directory's other children were never inventoried | none beyond the §10 real observation |
 | multi-shard | yes | yes | yes | proven: 7 parts, 3 overlapping conversations, cross-part paging | none |
-| session identity | yes — P4's position, not a committed fact (`REQUIRED_MESSAGE_ROLES` covers message parts only) | refusal proven | yes | fail-closed on real and synthetic; absent only from the role/gap accounting vocabulary | accounting/reporting parity (Category 2) |
-| contact identity | yes — P4's position, not a committed fact (as above) | refusal proven | yes | fail-closed on real and synthetic; absent only from the role/gap accounting vocabulary | accounting/reporting parity (Category 2) |
+| session identity | yes — **decided required by D-040**; still absent from the committed `REQUIRED_MESSAGE_ROLES`, which covers message parts only | refusal proven | yes | fail-closed on real and synthetic; absent only from the role/gap accounting vocabulary | documentation-only under D-040 (declaration + existing refusal); no subsystem |
+| contact identity | yes — **decided required by D-040**; still absent from the committed `REQUIRED_MESSAGE_ROLES`, as above | refusal proven | yes | fail-closed on real and synthetic; absent only from the role/gap accounting vocabulary | documentation-only under D-040; no subsystem |
 | WAL coherence | yes | yes | yes | proven for this build: main-only misses 2 rows, lags 62 s | none |
-| business message | **UNRESOLVED** | yes (gap raised) | none — never observed in a real container | honest refusal; scope undecided | decision required (§8.3) |
+| business message | **no — decided (D-040)** | yes (gap raised) | none — never observed in a real container | explicit and unsupported; message-bearing but outside required P4-A | none — D-040 seals it; standing `business_message_unread` gap |
 | native FTS | no — optional | yes | not applicable | not a P4 blocker | none |
 | media | no — optional | yes (no gap) | not applicable | not a P4 blocker | none |
 | unknown / auxiliary | accounted, not supported | yes | n/a | total **inside `message/` only**, not container-wide | container-wide accounting (Category 2) + one real observation (Category 3) |
 | schema drift | yes | yes | **none** | synthetic contract only; no real schema ever classified `compatible` | none possible without real evidence |
-| future-generation fail closed | yes, as safety | yes | n/a | synthetic safety proven; never compatibility | wording fix (§8.2) |
+| future-generation fail closed | yes, as safety | yes | n/a | synthetic safety proven; never compatibility | none — P4-B sealed by D-040 |
 | typed bounded surface | yes | yes | n/a | synthetic contract proven, nothing product-wired | none |
 
 ## 7. Evidence classification
@@ -373,11 +394,20 @@ None of these need real data, new architecture, or a new dependency.
 - Any claim about a future WeChat version — see §5.
 - Any new large subsystem.
 
-## 8. Reconciliation proposal (proposal only — not enacted)
+## 8. Reconciliation proposal (SUPERSEDED — enacted as D-040)
 
-No `Decisions.md` entry accompanies this document, because no decision has been
-approved. If this reconciliation is accepted, seal it as a decision first,
-implement second.
+**This section is historical.** The reconciliation proposed here was **approved
+and sealed** as **D-040** in the project vault `Decisions.md` on 2026-10-02, in
+the same terms: the
+P4-A/P4-B split, dropping future-version *compatibility* while keeping
+fail-closed *safety*, deciding business messages explicitly, extending
+accounting beyond one directory in a later focused code capsule, and keeping
+native FTS and media outside required P4. Note the labels below are **P4a/P4b**
+(accounting / parity) and are **not** the operative D-040 labels, which are
+**P4-A** (current-reader container compatibility) and **P4-B**
+(future-generation fail-closed safety). The operative definition is in the
+approved design spec §15; the operative checklist is §13 below. Read §13, not
+this section.
 
 1. **Split P4.**
    - **P4a — container-complete accounting.** Every database in an assembled
@@ -426,20 +456,23 @@ Every repo document that names
   sub-gate's own acknowledgement, not as independent corroboration.
 
 P4 itself is tracked as UNMET in
-`docs/v2/DB_READER_STANDING_ACQUISITION_DESIGN.md:415` and
+`docs/v2/DB_READER_STANDING_ACQUISITION_DESIGN.md:417` and
 `docs/v2/DB_READER_REAL_MULTIPART_GATE.md:203`, and as "remains unmet" in
 `docs/v2/DB_READER_PRODUCT_PROMOTION_DECISION.md:34` — **without** naming the
 access-material blocker as its cause.
 
-The vault is where the two get conflated, and it does so in two places.
-`Next Actions.md:24` calls the remaining P4 evidence gap "not a design question
-but the standing blocker below", while the same note and every
-acquisition-related vault record keep P0 as Safe Share and Database as later
-under D-036. `Next Actions.md:42` closes the loop from the other direction: it
-concludes that deciding how real-schema evidence will ever arrive "is the same
-blocker (`database-production-path-no-retained-access-material`) that already
-gates the production path". Those two lines are the only place in canonical
-memory that couples P4 / real-schema evidence to the access-material blocker.
+The vault is where the two got conflated. Across `Next Actions.md` and this
+note's own earlier bullet there were **four** such statements: two calls of the
+P4 evidence gap "not a design question but the standing blocker below" (the
+readiness-assessment section, and the typed-query-surface section), and two
+conclusions that deciding how real-schema evidence will ever arrive "is the
+same blocker (`database-production-path-no-retained-access-material`) that
+already gates the production path" (the readiness-assessment section, and the
+schema-drift section). Each is now inside a section carrying an explicit
+correction. Note that one of the four sat under a heading literally labelled
+"Current direction", which is why a correction applied where an earlier review
+pointed would not have found it — this count comes from grepping the token, not
+from re-reading only the places a previous review named.
 
 The question P4 actually asks is: *given a safely prepared source, does the
 Reader work correctly and report honestly?* That question is answerable without
@@ -449,10 +482,11 @@ production without retaining access material: a P5 / product acquisition problem
 under D-002 and D-036.
 
 So: **the standing blocker does not block P4.** It blocks production
-reacquisition. The two vault lines that couple them — `Next Actions.md:24` and
-`:42` — should be re-read, or P4 stays permanently unfinishable for a reason
-that has nothing to do with the reader. Note this does not weaken P4: P4 still
-has real open items (§4.B, §4.C, §4.F), it is simply not blocked by *this*.
+reacquisition. The vault lines that coupled them are corrected above and now
+sit in marked-historical sections, so P4 is no longer unfinishable for a reason
+that has nothing to do with the reader. Note this does not weaken P4: P4-A
+still has real open items (§4.B, §4.C, §4.F, and A10), it is simply not
+blocked by *this*.
 
 ## 10. Proposed next bounded real gate — design only, NOT executed
 
@@ -505,7 +539,7 @@ evidence that does not exist.
 | 3 | §2 reported "focused bridge inventory/version checks `2 passed`", mislabelling a `-k generation` subset of a 29-test file as the whole file | Important | corrected — both numbers are now given, with the deselection count |
 | 4 | §3 cited five real-evidence rows at the wrong lines in `DB_READER_REAL_MULTIPART_GATE.md` | Minor | corrected — 79, 93-95, 114, 129, 154-155, each re-read from the file |
 | 5 | §8.3 framed business-message scope as a free choice between required and optional, ignoring that the committed read contract already made it optional | Important | corrected — §8.3 now states the contract first, and names the two honest options: inherit the accepted gap, or explicitly override it |
-| 6 | §9 said *every* repo/vault document scopes the blocker away from P4, but `Next Actions.md:42` couples real-schema evidence to it as well as `:24` | Important | corrected — §9 now names both vault lines and scopes its claim to repo documents |
+| 6 | §9 said *every* repo/vault document scopes the blocker away from P4, but the vault coupled real-schema evidence to the blocker in more than one place | Important | corrected — §9 names the vault coupling sites and scopes its claim to repo documents. Later review passes found two more sites (three, then four); §9 was widened each time, and the final count comes from grepping the token rather than from re-reading only the places a review had pointed. |
 | 7 | §1 called P4 the "largest untouched" item without noting that the same vault sentence also calls it the standing blocker | Minor | corrected — §1 states the coupling and points to §9 |
 | 8 | §9's lead sentence claimed *every* document scopes the blocker away from reader correctness, but `DB_READER_P4_INVENTORY_COMPATIBILITY.md:146` is itself a P4 sub-gate, which makes it circular as proof | Important | corrected — §9 now scopes the claim to the four named repo citations and states plainly that the vault, not the repo, is where the two get conflated |
 | 9 | §4.A, §6 and §7 described the real message evidence as covering the 4.1.15 `message/` *layout*, which no gate observed | Minor | corrected — the scope is now "the seven parts probed", and the absence of any real inventory of the directory's other children is stated |
@@ -538,7 +572,12 @@ claim.
 
 ## 12. Result
 
-**P4 definition requires reconciliation.**
+**SUPERSEDED — see §13.** This was the pre-decision result. D-040 reconciled the
+definition and scored it: **P4-B is MET; P4-A is 9 MET / 1 UNMET** (A10). The
+result below is retained as the assessment that produced that decision and is
+not the current verdict.
+
+**P4 definition requires reconciliation.** (historical verdict)
 
 - Not `P4 MET`: the definition has no acceptance criteria, business-message
   scope is undecided, container-wide accounting does not exist yet, and
@@ -552,3 +591,91 @@ claim.
 One bounded real gate remains necessary (Category 3). Its design is in §10. It
 was not executed and must not be executed without its own explicit
 authorization and its own gate document.
+
+## 13. Approved acceptance checklist (D-040, 2026-10-02)
+
+This is the **one authoritative machine-checkable acceptance contract** for P4.
+It resolves §8; the proposal text in §8 is historical and is not a competing
+definition. Every item is scored `MET` or `UNMET` against committed evidence.
+No real data was re-run to produce it.
+
+### P4-A — current-reader container compatibility (per tested generation)
+
+| # | Acceptance item | Status | Evidence |
+|---|---|---|---|
+| A1 | Required-role inventory and accounting is defined | **MET** | `REQUIRED_MESSAGE_ROLES = {ordinary_message}` (`wechatdb/provider/compatibility.py:79`), mirrored as `SUPPORTED_MESSAGE_ROLE` (`acquisition/database_inventory.py:58`); closed 7-role vocabulary `acquisition/database_inventory.py:38-54`; D-040 role table |
+| A2 | Ordinary-message synthetic support | **MET** | `wechatdb/tests/provider/test_schema_compatibility.py` (`test_a_supported_schema_is_compatible`, `test_a_whole_set_of_compatible_shards_is_complete`); inventory `a5bbd0d` |
+| A3 | Real multi-part message gate for the tested generation | **MET (scoped)** | 4.1.15 real gate: 7 readable parts + 3 valid empty, 532,860 rows, 86 conversations, 3 multi-part, 1,015/1,015 paged across a part boundary — `docs/v2/DB_READER_REAL_MULTIPART_GATE.md`, D-032. **Scope is the seven probed parts, not the `message/` directory's contents.** |
+| A4 | Session/contact required-role contract | **MET (documentation-level declaration)** | Declared required by D-040. Existing behaviour: `_require_columns` raises the fixed token `identity catalog schema unsupported` (`wechatdb/provider/identity_catalog.py:35-47,98`), in `_SURFACE_REFUSALS` (`bridge/database_bootstrap.py:139-143`) → `BOOTSTRAP_UNSUPPORTED_GENERATION`; synthetic-proven by `wechatdb/tests/provider/test_identity_catalog.py` (line-referenced assertions at `:244,261`). **Accounting/reporting parity is not part of A4** — see A10 and the residual note below. |
+| A5 | WAL coherence | **MET (scoped)** | Real 4.1.15: main-file-only read misses 2 rows and lags 62 s; WAL-inclusive read is coherent — `docs/v2/DB_READER_REAL_MULTIPART_GATE.md`; identity-catalog gate. Synthetic WAL fixtures also green. |
+| A6 | Schema-drift fail-closed | **MET** | `ad1f2ab`; `unsupported` and `malformed` are both `INCOMPATIBLE_OUTCOMES`, both fold into `inventory_gap`, neither overridable by coverage. Evidence: `test_a_required_ordinary_shard_that_is_incompatible_is_never_complete` (`:428`, the `unsupported`/dropped-column case), `test_a_refused_generation_is_refused_and_not_parsed_on_best_effort` (`:444`), `test_a_compatibility_gap_never_overwrites_a_stronger_reason` (`:508`); the `malformed` case is the parametrized case at `:175` driving `test_a_parser_mandatory_column_missing_is_malformed_and_also_refused` (`:548-553`), and `gaps_for()` treats both outcomes identically (`wechatdb/provider/compatibility.py:279-282`). **Synthetic contract only — no real schema has ever been classified `compatible`.** |
+| A7 | Unsupported/unknown message-bearing structures remain explicit gaps | **MET** | `business_message_unread`, `unknown_database`, `unsupported_message_candidate` (`acquisition/database_inventory.py:62-70`); `test_a_business_message_shard_is_never_absorbed_by_the_ordinary_reader`, `test_a_new_message_bearing_relation_keeps_the_shard_from_claiming_complete`; `test_unknown_and_candidate_roles_keep_their_existing_gap` |
+| A8 | Typed bounded query contract | **MET** | `71b83ac`; `docs/v2/DB_READER_TYPED_BOUNDED_QUERY_SURFACE.md`; 58 test functions in `wechatdb/tests/provider/test_typed_query_surface.py`, incl. the post-review `math.isfinite` refusal fix (`wechatdb/provider/query.py:358`) and four AST guards (`test_typed_query_surface.py:626,806,926,969`). Nothing product-wired. |
+| A9 | Optional FTS/media incompatibility does not weaken ordinary coverage | **MET** | `test_an_optional_role_is_accounted_and_never_probed`, `test_optional_role_states_can_never_strengthen_a_message_claim`, `test_optional_drift_does_not_move_the_message_coverage_verdict`; FTS spike `12a195a` — `native_search` is refused by design. |
+| A10 | Bounded real container-wide classification confirms no unaccounted required/message-bearing role | **UNMET** | **The single remaining P4-A gap.** Requires the §10 bounded real structural classification gate. Not run, not authorized. |
+
+**P4-A is not yet `MET`.** It is `9 MET / 1 UNMET`, and the one `UNMET` item
+is a real-evidence item, not a design question. Two consequences are recorded
+honestly rather than folded into the verdict:
+
+- **Accounting is total inside one *selected* `message/` directory, not
+  container-wide.** `session.db`/`contact.db` are opened by name
+  (`bridge/database_bootstrap.py:248-249`) and never inventoried; every other
+  database is never examined. Extending accounting beyond one directory is a
+  small **production-code** capsule and is *not* required before A10 runs —
+  A10 is precisely the observation that tells the code capsule what to cover.
+- **Session/contact accounting parity** (the §6 matrix "remaining action") is
+  **documentation-only under D-040**: a required-role declaration plus the
+  existing fixed-token refusal is the whole contract. No subsystem is created
+  for symmetry, and A4 is scored on that declaration, not on new code.
+
+### P4-B — future-generation fail-closed safety
+
+| # | Acceptance item | Status | Evidence |
+|---|---|---|---|
+| B1 | Changed required schema fails closed | **MET** | `ad1f2ab`; `test_a_changed_generation_is_named_by_its_own_verdict`, `test_the_same_name_with_a_changed_schema_changes_the_outcome` |
+| B2 | Malformed required schema fails closed | **MET** | `test_bytes_that_are_not_a_database_stay_unassessed_without_driver_text`, `test_a_refused_generation_is_refused_and_not_parsed_on_best_effort`; session/contact refusal at A4 |
+| B3 | Unknown message-like role remains an explicit gap | **MET** | `test_unknown_and_candidate_roles_keep_their_existing_gap`; `test_a_new_message_bearing_relation_keeps_the_shard_from_claiming_complete` |
+| B4 | No filename/role recognition implies compatibility | **MET** | `test_a_recognised_role_is_not_yet_a_compatible_schema` — recognition and compatibility are two separate claims |
+| B5 | No future-generation compatibility claim without a new real gate | **RULE (GR-1) — not scored** | D-040 makes compatibility a per-build real gate, never a sealed predicate; spec §15 P4-B states it. Being unfalsifiable by a test, it is recorded as a governing rule below rather than counted as evidence. |
+
+**P4-B is `MET`** — 4 of 4 scored items, with B5 recorded as governing rule
+GR-1 below rather than counted as evidence. It is a safety claim, and safety is
+provable without meeting the future version. The 4.1.15 WAL main-file-only
+defect is the standing proof that some properties are discoverable *only* by
+meeting a real build — which is why compatibility stays a per-build gate and is
+never asserted here.
+
+### Governing rules (outside the scored checklist)
+
+These are **rules D-040 sets**, not checklist items. They are not scored `MET`
+precisely because they cannot be falsified by a test: they constrain what any
+future capsule or report is allowed to claim. Keeping them out of the scored
+list avoids counting a definition as if it were an observation.
+
+- **GR-1.** Compatibility with a specific WeChat build is a **per-build real
+  gate**, never a sealed predicate and never a standing claim. Only the tested
+  generation (4.1.15) carries the A3/A5 scoped results.
+- **GR-2.** No future-version claim is made here or anywhere in this document,
+  and no suite may be cited as evidence for one.
+
+### Known reconciliation gap in committed code
+
+D-040 makes session identity and contact identity **required** roles. The
+committed classifier does not agree, and this capsule deliberately does **not**
+change code to match:
+
+- `classify_database_name()` maps `session.db` and `contact.db` to
+  `ROLE_AUXILIARY` (`_AUXILIARY` regex at `acquisition/database_inventory.py:105`,
+  matched at `:126-127`), which raises no gap
+  (`_ROLE_GAPS`, `acquisition/database_inventory.py:135-139`).
+- `REQUIRED_MESSAGE_ROLES` is `{ordinary_message}` only
+  (`wechatdb/provider/compatibility.py:79`), so neither role is machine-required.
+
+This is a **known, bounded, recorded divergence** between a documentation-level
+decision and the current classifier — not a hidden contradiction. A4 is scored
+on the declaration plus the existing fixed-token refusal, which is what D-040
+requires. **A10's future accounting capsule must reconcile this**: it is the
+first point at which the required-role set and the classifier meet, and it must
+either promote both identity roles or record why they stay auxiliary. Neither
+this document nor D-040 resolves it by editing code.

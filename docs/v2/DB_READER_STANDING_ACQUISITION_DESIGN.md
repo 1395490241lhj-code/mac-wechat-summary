@@ -14,7 +14,8 @@ The standing capability exists only while the user has explicitly enabled
 Database Mode. When that mode is off, no database snapshot, decrypt, key refresh
 or background database read may run.
 
-P4 and P5 remain unmet.
+P4-A remains unmet (one bounded real evidence item outstanding) and P5 remains
+unmet. P4-B, future-generation fail-closed safety, is MET. See D-040.
 
 ---
 
@@ -342,7 +343,8 @@ use.
 
 No filename, build number or key success alone proves compatibility.
 
-P4 remains a separate gate.
+P4 remains a separate gate, split by D-040 into P4-A (compatibility for a
+tested generation) and P4-B (fail-closed safety, MET).
 
 ---
 
@@ -398,9 +400,9 @@ before any extraction mechanism is distributed or invoked.
 Compose A-E into explicit prepared handles for IdentityCatalog and
 ShardedMessageProvider. Still no product source-selection wiring.
 
-### G — P4 compatibility, then P5 wiring
+### G — P4-A compatibility, then P5 wiring
 
-Only after P4 passes may product integration decide the final enabled/default /
+Only after P4-A passes may product integration decide the final enabled/default /
 fallback behavior under P5.
 
 ---
@@ -412,7 +414,8 @@ fallback behavior under P5.
 | P1 — explicit product role | **MET** |
 | P2 — standing acquisition decision | **MET** |
 | P3 — real multi-part verification | **MET under D-032** |
-| P4 — complete-container / future-version compatibility | **UNMET** |
+| P4-A — current-reader container compatibility | **UNMET** — reconciled by D-040 into a machine-checkable checklist; one real evidence item (A10) outstanding |
+| P4-B — future-generation fail-closed safety | **MET** — synthetic contracts; safety, never future-version compatibility |
 | P5 — runtime/default integration | **UNMET** |
 
 **No runtime source selection changes under P2.**

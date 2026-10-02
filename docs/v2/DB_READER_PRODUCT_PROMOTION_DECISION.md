@@ -31,8 +31,12 @@ This records the product role. It does not itself implement that role.
 P1 is deliberately narrower than product integration.
 
 - **P2 remains unmet:** no standing acquisition capability is approved.
-- **P4 remains unmet:** complete-container and future-WeChat-version
-  compatibility are not yet established.
+- **P4 remains unmet:** reconciled by D-040 into P4-A (current-reader
+  container compatibility, **UNMET** — one bounded real evidence item
+  outstanding) and P4-B (future-generation fail-closed safety, **MET**).
+  Future-WeChat-version *compatibility* was never a checkable predicate and is
+  no longer asserted; compatibility with any specific future version is
+  established per build, by its own real gate.
 - **P5 remains unmet as an implementation gate:** no runtime/default selection
   behavior has changed. Visual remains the current product/default source and
   database mode remains off unless a later product integration explicitly
