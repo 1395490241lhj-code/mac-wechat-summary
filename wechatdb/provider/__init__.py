@@ -75,6 +75,18 @@ from .identity import (
     ResolvedIdentities,
 )
 from .identity_catalog import IdentityCatalog
+from .native_search import (
+    CAPABILITY_ABSENT,
+    CAPABILITY_AVAILABLE,
+    CAPABILITY_MALFORMED,
+    CAPABILITY_STATES,
+    CAPABILITY_UNSUPPORTED,
+    MAX_RESULT_LIMIT,
+    MAX_TERM_LENGTH,
+    NativeSearchDiagnostics,
+    NativeSearchIndex,
+    NativeSearchResult,
+)
 from .provider import ShardedMessageProvider
 from .result import Contribution, ProviderDiagnostics, ProviderResult
 
@@ -85,6 +97,16 @@ __all__ = [
     "Contribution",
     "ProviderDiagnostics",
     "ProviderResult",
+    "CAPABILITY_ABSENT",
+    "CAPABILITY_AVAILABLE",
+    "CAPABILITY_MALFORMED",
+    "CAPABILITY_STATES",
+    "CAPABILITY_UNSUPPORTED",
+    "MAX_RESULT_LIMIT",
+    "MAX_TERM_LENGTH",
+    "NativeSearchDiagnostics",
+    "NativeSearchIndex",
+    "NativeSearchResult",
     "ShardedMessageProvider",
     "NAME_CONTACT_NICKNAME",
     "NAME_CONTACT_REMARK",
