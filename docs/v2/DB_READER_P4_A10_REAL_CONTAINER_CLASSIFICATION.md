@@ -371,10 +371,10 @@ No database-content hashing or file opening.
 
 Returned accounting keys are unique: **PASS**. The sealed primitive completed
 its bounded root/direct-directory walk and returned all 15 examined-directory
-identities without the former class/identity collision. Totality is the existing
-primitive contract reviewed in §11; this rerun adds no second filename-level
-comparison or persisted real-name list. The two nested rejections remain
-unexamined, so completed direct accounting does not imply recursive or
+identities without the former class/identity collision. The wrapper mechanically
+compared operation-local accounting keys with the pre-run bounded entry set;
+it added no second classifier and persisted no real-name list. The two nested
+rejections remain unexamined, so completed direct accounting does not imply recursive or
 complete-container coverage.
 
 ### Predicate outcome — unchanged
@@ -412,7 +412,14 @@ labelled current, and its residual paragraph confused the narrower
 message-directory auxiliary classifier with the now-required container identity
 roles. The opening scope note and §13 residual explanation now distinguish
 those contracts and point to this fresh event. This was reporting-only; no real
-rerun or production fix.
+rerun or production fix. A subsequent re-review caught a reporting-only denial
+of the wrapper's entry-key comparison; that sentence was corrected to state the
+actual mechanical audit and its lack of a second classifier or persisted names.
+No execution defect or new real invocation resulted from either correction.
+Final independent re-review: **APPROVED**; both reporting findings closed,
+no remaining actionable reporting issue or execution defect identified. Tests
+remain parent-run evidence. The staged reporting correction passed
+`git diff --cached --check` before its normal follow-up commit.
 
 | Synthetic test / check | Result |
 |---|---|
