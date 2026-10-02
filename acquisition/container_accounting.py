@@ -23,7 +23,7 @@ D-040 and ``classify_database_name`` is recorded, not edited away.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import stat
 
@@ -142,6 +142,14 @@ _ROLE_GAPS = {
 }
 
 
+def _valid_directory_identity(identity: str, location: str) -> bool:
+    if location == LOCATION_ROOT:
+        return identity == ""
+    return (isinstance(identity, str) and bool(identity)
+            and identity not in (".", "..") and "/" not in identity
+            and "\x00" not in identity)
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerDatabase:
     """One database inside the boundary, and the one role it was given.
@@ -152,51 +160,89 @@ class ContainerDatabase:
     """
 
     location: str
-    name: str
+    name: str = field(repr=False)
     role: str
+    directory_identity: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("container database invalid")
         if self.role not in CONTAINER_ROLES:
             raise ValueError("container database invalid")
-        if self.location not in CONTAINER_LOCATIONS:
+        if (self.location not in CONTAINER_LOCATIONS
+                or not _valid_directory_identity(self.directory_identity, self.location)):
             raise ValueError("container database invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ExaminedDirectory:
+    """Internal direct-entry identity, separate from its reportable class.
+
+    Identity is the root-relative basename, unique within this operation only.
+    It is not a source/product identity and must not be persisted or reported.
+    """
+
+    identity: str = field(repr=False)
+    classification: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.identity, str) or not self.identity
+                or self.identity in (".", "..") or "/" in self.identity
+                or "\x00" in self.identity
+                or not isinstance(self.classification, str)
+                or self.classification not in CONTAINER_LOCATIONS - {LOCATION_ROOT}):
+            raise ValueError("container directory invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerRejection:
+    """One refused entry, keyed by its concrete directory rather than class."""
+
+    location: str
+    name: str = field(repr=False)
+    reason: str
+    directory_identity: str = field(default="", repr=False)
+    is_directory: bool = field(default=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.name, str) or not self.name
+                or self.location not in CONTAINER_LOCATIONS
+                or self.reason not in CONTAINER_REJECTION_REASONS
+                or not _valid_directory_identity(self.directory_identity, self.location)
+                or type(self.is_directory) is not bool):
+            raise ValueError("container rejection invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class ContainerAccounting:
     """Every database inside one selected boundary, accounted for exactly once.
 
-    Ordering is by location then name and neither key repeats, so the result
-    depends only on which children exist, never on listing order. Duplicate
-    accounting is a construction error, not a runtime outcome.
+    Ordering is by class, directory identity then name, independent of listing
+    order. Database and rejection keys use concrete directory identity plus
+    basename, and no key repeats across either set. Directory identities are
+    distinct from classes and ordered by root-relative basename.
     """
 
     databases: tuple[ContainerDatabase, ...] = ()
-    examined_directories: tuple[str, ...] = ()
-    rejections: tuple[tuple[str, str, str], ...] = ()
+    examined_directories: tuple[ExaminedDirectory, ...] = field(default=(), repr=False)
+    rejections: tuple[ContainerRejection, ...] = ()
 
     def __post_init__(self) -> None:
         databases = tuple(self.databases)
         examined = tuple(self.examined_directories)
         rejections = tuple(self.rejections)
-        rows = [(row.location, row.name) for row in databases]
         if (any(not isinstance(row, ContainerDatabase) for row in databases)
-                or any(not isinstance(row, tuple) or len(row) != 3
-                       for row in rejections)
-                or any(reason not in CONTAINER_REJECTION_REASONS
-                       for _, _, reason in rejections)
-                or any(location not in CONTAINER_LOCATIONS
-                       for location, _, _ in rejections)
-                or len(set(rows)) != len(rows)
-                or len(set(examined)) != len(examined)
-                or set(examined) - CONTAINER_LOCATIONS
-                or databases != tuple(sorted(
-                    databases, key=lambda row: (row.location, row.name)))
-                or rejections != tuple(sorted(
-                    rejections, key=lambda row: (row[0], row[1], row[2])))
-                ):
+                or any(not isinstance(row, ContainerRejection) for row in rejections)
+                or any(not isinstance(row, ExaminedDirectory) for row in examined)):
+            raise ValueError("container accounting invalid")
+        keys = [(row.directory_identity, row.name) for row in databases + rejections]
+        if (len(set(keys)) != len(keys)
+                or len({row.identity for row in examined}) != len(examined)
+                or examined != tuple(sorted(examined, key=lambda row: row.identity))
+                or databases != tuple(sorted(databases, key=lambda row: (
+                    row.location, row.directory_identity, row.name)))
+                or rejections != tuple(sorted(rejections, key=lambda row: (
+                    row.location, row.directory_identity, row.name, row.reason)))):
             raise ValueError("container accounting invalid")
         object.__setattr__(self, "databases", databases)
         object.__setattr__(self, "examined_directories", examined)
@@ -219,10 +265,10 @@ class ContainerAccounting:
         at either level, and one vocabulary cannot drift apart.
         """
         present = {row.role for row in self.databases}
-        for _, name, reason in self.rejections:
-            if reason == UNREADABLE_DIRECTORY or reason == NESTED_DIRECTORY:
+        for row in self.rejections:
+            if row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY):
                 continue
-            role = classify_database_name(name)
+            role = classify_database_name(row.name)
             if role == ROLE_ORDINARY_MESSAGE:
                 # A refused shard-shaped name is a candidate, never a shard: this
                 # reader did not and may not open it.
@@ -231,11 +277,14 @@ class ContainerAccounting:
         return tuple(gap for role, gap in _ROLE_GAPS.items() if role in present)
 
     def accounts_for(self, keys) -> bool:
-        """True only when these (location, name) keys are each accounted once."""
+        """True only when these (directory identity, name) keys occur once.
+
+        The root identity is the empty string; other identities are internal
+        direct-entry basenames. Neither key is a reportable location class.
+        """
         expected = set(keys)
-        accounted = [(row.location, row.name) for row in self.databases]
-        accounted += [(location, name)
-                      for location, name, _ in self.rejections]
+        accounted = [(row.directory_identity, row.name)
+                     for row in self.databases + self.rejections]
         return (expected == set(accounted)
                 and len(set(accounted)) == len(accounted))
 
@@ -267,7 +316,7 @@ class ContainerAccounting:
                 for location in sorted(CONTAINER_LOCATIONS)
                 if any(row.location == location for row in self.databases)
             },
-            "rejections": tuple(reason for _, _, reason in self.rejections),
+            "rejections": tuple(row.reason for row in self.rejections),
             "gaps": self.gaps,
             "unmet_requirements": unmet_requirements(self),
         }
@@ -304,7 +353,8 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
     try:
         children = sorted(directory.iterdir(), key=lambda path: path.name)
     except OSError:
-        rejections.append((location, directory.name, UNREADABLE_DIRECTORY))
+        rejections.append(ContainerRejection(
+            location, directory.name, UNREADABLE_DIRECTORY, directory.name))
         return []
     role_for = _LOCATION_ROLE.get(location)
     anchor = _LOCATION_ANCHOR.get(location)
@@ -315,14 +365,17 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
             # the boundary was not walked. Failing closed is the only honest
             # reading of "every database accounted exactly once".
             if not child.name.startswith(".") and _is_directory(child):
-                rejections.append((location, child.name, NESTED_DIRECTORY))
+                rejections.append(ContainerRejection(
+                    location, child.name, NESTED_DIRECTORY, directory.name))
             continue
         if not _is_regular_file(child):
-            rejections.append((location, child.name, REJECTED_NOT_REGULAR_FILE))
+            rejections.append(ContainerRejection(
+                location, child.name, REJECTED_NOT_REGULAR_FILE, directory.name,
+                is_directory=_is_directory(child)))
             continue
         role = (role_for if role_for and child.name == anchor
                 else classify_database_name(child.name))
-        rows.append(ContainerDatabase(location, child.name, role))
+        rows.append(ContainerDatabase(location, child.name, role, directory.name))
     return rows
 
 
@@ -336,17 +389,21 @@ def account_container(source_root) -> ContainerAccounting:
     """
     root = Path(source_root)
     databases: list[ContainerDatabase] = []
-    examined: list[str] = []
-    rejections: list[tuple[str, str, str]] = []
+    examined: list[ExaminedDirectory] = []
+    rejections: list[ContainerRejection] = []
     if not root.is_dir():
         return ContainerAccounting()
 
-    for child in sorted(root.iterdir(), key=lambda path: path.name):
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        raise ValueError("container accounting invalid") from None
+    for child in children:
         if child.name.startswith("."):
             continue
         if _is_directory(child):
             location = _NAMED_DIRECTORIES.get(child.name, LOCATION_OTHER_DIRECTORY)
-            examined.append(location)
+            examined.append(ExaminedDirectory(child.name, location))
             databases += _account_directory(child, location, rejections)
         elif _is_candidate(child):
             # A database can sit directly in the root, so the root is listed for
@@ -356,12 +413,14 @@ def account_container(source_root) -> ContainerAccounting:
                 databases.append(ContainerDatabase(
                     LOCATION_ROOT, child.name, classify_database_name(child.name)))
             else:
-                rejections.append((LOCATION_ROOT, child.name,
-                                   REJECTED_NOT_REGULAR_FILE))
+                rejections.append(ContainerRejection(
+                    LOCATION_ROOT, child.name, REJECTED_NOT_REGULAR_FILE))
     return ContainerAccounting(
-        tuple(sorted(databases, key=lambda row: (row.location, row.name))),
-        tuple(sorted(examined)),
-        tuple(sorted(rejections)),
+        tuple(sorted(databases, key=lambda row: (
+            row.location, row.directory_identity, row.name))),
+        tuple(sorted(examined, key=lambda row: row.identity)),
+        tuple(sorted(rejections, key=lambda row: (
+            row.location, row.directory_identity, row.name, row.reason))),
     )
 
 
@@ -383,13 +442,14 @@ def unmet_requirements(accounting) -> tuple[str, ...]:
         unmet.add(REQUIRED_ROLE_MISSING)
         location = next((where for where, carried in _LOCATION_ROLE.items()
                          if carried == role), None)
-        if location is not None and location in accounting.examined_directories:
+        if location is not None and any(
+                row.classification == location for row in accounting.examined_directories):
             # The directory that exists to hold this role was listed and did not
             # hold it. That is a different failure from the role never existing,
             # and it is what tells a future capsule where to look.
             unmet.add(REQUIRED_ROLE_UNCLASSIFIED)
-    if any(reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY)
-           for _, _, reason in accounting.rejections):
+    if any(row.reason in (UNREADABLE_DIRECTORY, NESTED_DIRECTORY) or row.is_directory
+           for row in accounting.rejections):
         unmet.add(DIRECTORY_UNEXAMINED)
     return tuple(token for token in CONTAINER_REQUIREMENTS
                  if token in unmet)
@@ -420,6 +480,8 @@ __all__ = [
     "UNREADABLE_DIRECTORY",
     "ContainerAccounting",
     "ContainerDatabase",
+    "ContainerRejection",
+    "ExaminedDirectory",
     "account_container",
     "unmet_requirements",
 ]

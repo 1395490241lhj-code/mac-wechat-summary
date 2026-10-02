@@ -217,7 +217,7 @@ WeChat databases, business-message support, media, native FTS, or Database Mode
 readiness. D-040 is unchanged: the run exposed a defect in an implementation of
 D-040, not an error in D-040's definition.
 
-## 10. Next step (not taken here)
+## 10. Next step at the original real run (historical; not taken in that run)
 
 The gate stops. A **separate synthetic corrective capsule** is required to fix
 the accounting identity defect and cover a root with multiple directories mapping
@@ -226,3 +226,78 @@ exposed. Only after that fix is sealed on synthetic fixtures should container
 accounting be re-attempted, under a fresh designation and a fresh real gate.
 P5 / Database-route product-integration planning remains a separate decision
 and was not started.
+
+
+## 11. Synthetic instrument corrective capsule (2026-10-02)
+
+**Instrument defect corrected synthetically; the previous real run remains
+A10 UNMET and is not retroactively reinterpreted. P4-A remains 9/10; P4-B
+remains MET 4/4.** Baseline: `d78e19d41d2c36da36703cf2b836ef2ecf0f59c4`.
+E-030/F-045 remain historical evidence, not fixtures. D-040 is unchanged.
+
+`examined_directories` now holds separate `ExaminedDirectory` records:
+operation-local root-relative direct-entry identity and fixed classification.
+Uniqueness and ordering apply to identity; multiple identities may share
+`other_directory`. Identity is omitted from repr and `evidence()`; the latter's
+aggregate-only keys are unchanged. Required-role checks read classification.
+No source/product identity, content hash, database read or wider traversal is
+introduced. Concrete directory identity also keys databases and rejection rows,
+so the same basename in two same-class directories is two entries, while a
+repeated concrete entry (including a database/rejection overlap) is invalid.
+`accounts_for()` uses these internal `(directory_identity, basename)` keys;
+the root identity is the empty string. Role and location tokens remain classes.
+The database inventory role rules and the sealed A10 acceptance predicate are
+unchanged.
+
+Focused RED, before production edits: **9 failed, 23 passed**. The three-entry
+same-class fixture reproduced `ValueError: container accounting invalid`;
+separate contract tests failed on missing identity/class fields and acceptance
+of a bare class token. Fixtures use neutral synthetic names only. Regression
+checks cover zero/one/three same-class directories, named plus other entries,
+required roles, root-level databases, duplicate identities (including a changed
+class), repeated enumeration, reversed enumeration, nested-directory refusal,
+exactly-once database checks, and sanitized repr/evidence/errors.
+
+The new independent read-only review identified five Important surviving
+instrument defects: database identity still collapsed by class/basename;
+rejection-key collisions/overlap; `.db`-shaped nested directories failing to
+record `directory_unexamined`; names exposed by rejection/database repr; and
+root-listing errors exposing an absolute path. Corrective RED before these
+production edits: **7 failed, 32 passed**. The correction propagates the same
+operation-local directory identity into all accounting keys, hides names from
+repr, and converts root-listing errors to a fixed exception with suppressed
+context. For a `.db`-shaped nested directory, the existing
+`not_a_regular_file` reason and name-classification gap are preserved; an
+internal structural flag records the existing unexamined-directory condition.
+No nested directory is entered and no role, rejection or gap token is added.
+
+Independent re-review: **APPROVED**. All five Important findings were
+independently verified closed with in-memory synthetic inputs; no new actionable
+regressions. The reviewer confirmed identity/class separation, duplicate and
+overlap protection, stable enumeration, unchanged hidden-entry/symlink/depth
+bounds, required roles and gaps, sanitized repr/traceback, and unchanged evidence
+keys. Suite totals below were run by the parent, not independently re-run by the
+reviewer. Both `git diff --check` and `git diff --cached --check` passed.
+
+Final synthetic validation after the corrective pass:
+
+| Suite / check | Result |
+|---|---|
+| `acquisition/tests/test_container_accounting.py` | 39 passed |
+| `acquisition/tests` | 212 passed |
+| `wechatdb/tests` | 514 passed |
+| `bridge/tests` (synthetic-home isolation) | 270 passed |
+| Fixed role/location/gap/rejection constants vs baseline | unchanged |
+| `acquisition/database_inventory.py` vs baseline | unchanged |
+
+No real source was accessed, including the previous operator-designated root.
+No real A10 rerun, credentials, Keychain, production bootstrap, process attach,
+LLDB, Frida, re-signing or production WeChat interaction occurred. Bridge tests
+run with `Path.home()` redirected to a disposable synthetic home, including the
+two pre-existing path-existence assertions; no real-data tests ran. Memory and
+shadow do not consume this primitive, so their suites are not needed here.
+
+A **fresh A10 real structural classification using the already
+operator-designated root, under a new explicit authorization**, is still
+required. This synthetic correction grants no real-source access and does not
+turn any unknown, unsupported-message or nested/unexamined gap into success.
