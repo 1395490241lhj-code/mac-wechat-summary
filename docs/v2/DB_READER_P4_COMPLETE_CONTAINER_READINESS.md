@@ -7,11 +7,14 @@
 > design spec
 > `docs/superpowers/specs/2026-09-18-db-reader-coverage-provider-design.md`
 > §15 P4-A/P4-B, and the machine-checkable acceptance checklist is §13 of this
-> document. Everything below is retained as the read-only assessment that
-> produced the decision: **its evidence and gap analysis are current**, but its
-> §8 is no longer a proposal, its §12 result is historical, and its §6 matrix is read
-> against D-040's role table. Where this document and D-040 could be read as
-> disagreeing, D-040 and the spec §15 text win.
+> document. §§1–12 retain the historical read-only assessment at the baseline
+> below; their statements that container accounting is absent or the real gate
+> is unexecuted are superseded by the later accounting/correction and fresh
+> rerun. Current scored evidence is in §13 and
+> `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §12. §8 is no longer a
+> proposal, §12's original result is historical, and §6's matrix is read against
+> D-040's role table. Where this document and D-040 could be read as disagreeing,
+> D-040 and the spec §15 text win.
 
 ## Scope
 
@@ -597,7 +600,9 @@ authorization and its own gate document.
 This is the **one authoritative machine-checkable acceptance contract** for P4.
 It resolves §8; the proposal text in §8 is historical and is not a competing
 definition. Every item is scored `MET` or `UNMET` against committed evidence.
-No real data was re-run to produce it.
+At the D-040 reconciliation, no real data was re-run to produce the checklist.
+A10's current evidence is updated separately below; its acceptance definition
+and UNMET score are unchanged.
 
 ### P4-A — current-reader container compatibility (per tested generation)
 
@@ -612,18 +617,20 @@ No real data was re-run to produce it.
 | A7 | Unsupported/unknown message-bearing structures remain explicit gaps | **MET** | `business_message_unread`, `unknown_database`, `unsupported_message_candidate` (`acquisition/database_inventory.py:62-70`); `test_a_business_message_shard_is_never_absorbed_by_the_ordinary_reader`, `test_a_new_message_bearing_relation_keeps_the_shard_from_claiming_complete`; `test_unknown_and_candidate_roles_keep_their_existing_gap` |
 | A8 | Typed bounded query contract | **MET** | `71b83ac`; `docs/v2/DB_READER_TYPED_BOUNDED_QUERY_SURFACE.md`; 58 test functions in `wechatdb/tests/provider/test_typed_query_surface.py`, incl. the post-review `math.isfinite` refusal fix (`wechatdb/provider/query.py:358`) and four AST guards (`test_typed_query_surface.py:626,806,926,969`). Nothing product-wired. |
 | A9 | Optional FTS/media incompatibility does not weaken ordinary coverage | **MET** | `test_an_optional_role_is_accounted_and_never_probed`, `test_optional_role_states_can_never_strengthen_a_message_claim`, `test_optional_drift_does_not_move_the_message_coverage_verdict`; FTS spike `12a195a` — `native_search` is refused by design. |
-| A10 | Bounded real container-wide classification confirms no unaccounted required/message-bearing role | **UNMET** | **The single remaining P4-A gap.** Requires the §10 bounded real structural classification gate. Not run, not authorized. |
+| A10 | Bounded real container-wide classification confirms no unaccounted required/message-bearing role | **UNMET** | **The single remaining P4-A gap.** Fresh real rerun after `906a4d8` completed accounting: 27 DB rows, 0 duplicate keys, 15 direct directories; 13 `unknown_database`, 1 `unsupported_message_candidate`, 2 `nested_directory` → `directory_unexamined`. Source pre/post unchanged. See `DB_READER_P4_A10_REAL_CONTAINER_CLASSIFICATION.md` §12. Prior instrument-defect run and synthetic correction remain separate historical phases. |
 
 **P4-A is not yet `MET`.** It is `9 MET / 1 UNMET`, and the one `UNMET` item
 is a real-evidence item, not a design question. Two consequences are recorded
 honestly rather than folded into the verdict:
 
-- **Accounting is total inside one *selected* `message/` directory, not
-  container-wide.** `session.db`/`contact.db` are opened by name
-  (`bridge/database_bootstrap.py:248-249`) and never inventoried; every other
-  database is never examined. Extending accounting beyond one directory is a
-  small **production-code** capsule and is *not* required before A10 runs —
-  A10 is precisely the observation that tells the code capsule what to cover.
+- **Container structural accounting now exists; complete-container acceptance
+  remains UNMET.** The bounded primitive was introduced at `853d481` and its
+  per-directory identity correction sealed at `906a4d8`. The fresh A10 rerun
+  accounts the root and every direct-directory identity exactly once, including
+  required identity roles, but retains unknown/candidate gaps and explicit
+  unexamined nested entries. This is structural accounting, not new parsing,
+  recursive coverage, schema compatibility or a P4-A pass. See the A10 gate
+  document §12; no further production work is authorized by that evidence.
 - **Session/contact accounting parity** (the §6 matrix "remaining action") is
   **documentation-only under D-040**: a required-role declaration plus the
   existing fixed-token refusal is the whole contract. No subsystem is created
@@ -659,23 +666,26 @@ list avoids counting a definition as if it were an observation.
 - **GR-2.** No future-version claim is made here or anywhere in this document,
   and no suite may be cited as evidence for one.
 
-### Known reconciliation gap in committed code
+### Classifier scopes after container-level accounting reconciliation
 
-D-040 makes session identity and contact identity **required** roles. The
-committed classifier does not agree, and this capsule deliberately does **not**
-change code to match:
+D-040 makes session identity and contact identity **required** roles. This is
+now reflected in `REQUIRED_CONTAINER_ROLES` and the named-anchor rules in
+`acquisition/container_accounting.py`, introduced at `853d481` and corrected at
+`906a4d8`. The fresh real rerun observes and structurally accounts both roles.
 
-- `classify_database_name()` maps `session.db` and `contact.db` to
-  `ROLE_AUXILIARY` (`_AUXILIARY` regex at `acquisition/database_inventory.py:105`,
-  matched at `:126-127`), which raises no gap
-  (`_ROLE_GAPS`, `acquisition/database_inventory.py:135-139`).
-- `REQUIRED_MESSAGE_ROLES` is `{ordinary_message}` only
-  (`wechatdb/provider/compatibility.py:79`), so neither role is machine-required.
+The message-directory contracts deliberately retain their narrower scope:
 
-This is a **known, bounded, recorded divergence** between a documentation-level
-decision and the current classifier — not a hidden contradiction. A4 is scored
-on the declaration plus the existing fixed-token refusal, which is what D-040
-requires. **A10's future accounting capsule must reconcile this**: it is the
-first point at which the required-role set and the classifier meet, and it must
-either promote both identity roles or record why they stay auxiliary. Neither
-this document nor D-040 resolves it by editing code.
+- `classify_database_name()` still maps the generic session/contact anchor
+  basenames to `ROLE_AUXILIARY` in `acquisition/database_inventory.py`.
+- `REQUIRED_MESSAGE_ROLES` remains `{ordinary_message}` in
+  `wechatdb/provider/compatibility.py`; it governs message parts, not the
+  container-level identity-role requirement.
+
+These unchanged message-directory rules do not mean identity roles are absent
+from the machine-required container contract. A4 still rests on D-040's required
+role declaration plus the existing fixed-token refusal; container structural
+accounting is now supplied by A10's primitive. A10 remains UNMET because the
+fresh returned unknown/candidate/unexamined gaps fail its acceptance predicate,
+not because a future accounting capsule must still reconcile identity roles.
+No role rule, required-role definition or production code changes in this
+reporting capsule. See the A10 gate document §12 for fresh evidence and limits.

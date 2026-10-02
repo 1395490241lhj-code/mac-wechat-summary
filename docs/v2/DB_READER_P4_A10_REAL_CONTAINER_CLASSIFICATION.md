@@ -1,5 +1,15 @@
 # DB Reader P4-A A10 — bounded real container-wide structural classification gate
 
+> **Current verdict: A10 UNMET — P4-A remains 9/10.** The fresh real rerun
+> after instrument correction completed accounting, with unchanged pre/post
+> source metadata, but the sealed predicate still fails on explicit gaps.
+>
+> Three separate evidence phases: **§§1–10 first real run (historical UNMET on
+> instrument defect); §11 synthetic correction (PASS, no real source); §12 fresh
+> real rerun (current UNMET on returned gaps).** P4-B remains MET 4/4.
+
+### Historical first real-run overview
+
 > **A10 UNMET.**
 >
 > The gate **was executed against the operator-designated real container**, and
@@ -301,3 +311,138 @@ A **fresh A10 real structural classification using the already
 operator-designated root, under a new explicit authorization**, is still
 required. This synthetic correction grants no real-source access and does not
 turn any unknown, unsupported-message or nested/unexamined gap into success.
+
+
+## 12. Fresh real structural classification rerun (2026-10-02)
+
+**Verdict: `A10 UNMET — P4-A remains 9/10`.** This is a new evidence event after the synthetic
+instrument correction, not a reinterpretation or replay of the first real run.
+
+### Authorization, execution and integrity
+
+The **exact root was explicitly designated by the operator** for this one
+read-only A10 execution: operator-designated current WeChat `db_storage` root.
+The actual path and account identifier were held only in command-local memory,
+never persisted in evidence. Root validation used `lstat`: present, directory,
+not a symlink. No source discovery, sibling-account listing, upward walk,
+mtime-based account selection or alternate root.
+
+The unchanged committed `acquisition/container_accounting.py` and
+`acquisition/database_inventory.py` at
+`906a4d8e21e2764a13dd532cee0e77cab5d06677` were verified against Git before
+inspection. **Fresh real gate executed: YES; real `account_container()`
+invocations: 1; accounting completed: YES; execution defect observed: NO.**
+Every role/classification value below comes from that returned sealed primitive.
+The wrapper only validates the designation, fingerprints bounded metadata,
+checks returned aggregate accounting uniqueness and emits sanitized evidence;
+it supplies no second classifier, role override or corrective retry.
+
+A pre/post guard compared existence, type, size, inode and `mtime_ns` for the
+root, its direct entries and the children of visible non-symlink direct
+directories. Both passes used the same bounded rules; nested directories were
+statted but never entered. The comparison retained entry identities only in
+command-local memory, detecting both metadata and bounded-entry-set changes.
+No database-content hashing or file opening.
+
+**source pre/post unchanged: YES**
+
+### Fresh aggregate role accounting
+
+| Role | Count | Class | Status |
+|---|---:|---|---|
+| `ordinary_message` | 7 | required | structurally accounted; prior compatibility evidence reused |
+| `session_identity` | 1 | required | structurally accounted; prior compatibility evidence reused |
+| `contact_identity` | 1 | required | structurally accounted; prior compatibility evidence reused |
+| `business_message` | 1 | excluded/non-required | explicit unsupported `business_message_unread`; not ordinary coverage |
+| `search_index` | 1 | optional | structurally accounted; not queried |
+| `media` | 1 | optional | structurally accounted; no contents inspected |
+| `auxiliary` | 1 | accounting-only | counted; no capability promoted |
+| `unknown` | 13 | gap | explicit `unknown_database` |
+| `unsupported_message_candidate` | 1 | gap | explicit `unsupported_message_candidate` |
+
+| Total accounting | Fresh result |
+|---|---:|
+| Database rows / unique database keys | 27 / 27 |
+| All emitted entries (database + rejection) / unique accounting keys | 29 / 29 |
+| Duplicate accounting entries | 0 |
+| Direct directories / examined identities | 15 / 15 |
+| Unexamined directory entries | 2 |
+| `nested_directory` rejections | 2 |
+
+Returned accounting keys are unique: **PASS**. The sealed primitive completed
+its bounded root/direct-directory walk and returned all 15 examined-directory
+identities without the former class/identity collision. Totality is the existing
+primitive contract reviewed in §11; this rerun adds no second filename-level
+comparison or persisted real-name list. The two nested rejections remain
+unexamined, so completed direct accounting does not imply recursive or
+complete-container coverage.
+
+### Predicate outcome — unchanged
+
+All three required roles were observed and structurally accounted. No
+`required_role_missing` or `required_role_unclassified` token was returned.
+Required-role compatibility, message parsing, WAL coherence and identity
+semantics rely on the previously sealed evidence in §7 and were not re-proved.
+
+The fresh returned gaps are **13 `unknown_database`
+database rows**, **1
+`unsupported_message_candidate` database row**, and **2
+`nested_directory` rejection entries → `directory_unexamined`**. The primitive's
+`unmet_requirements()` returns `directory_unexamined`; unknown/candidate gaps
+are additionally blockers under §5 conditions 7 and 12 / authoritative §13 A10.
+Thus accounting now completes, but the A10 acceptance predicate does not pass.
+No gap was suppressed and no directory was manually called harmless.
+
+The **1** business-message row also retains
+`business_message_unread`. It stays excluded/non-required under D-040 and is not
+the cause of this UNMET verdict. FTS/media remain optional and were not opened.
+No required-role schema incompatibility was tested or newly claimed.
+
+These counts were freshly measured. They happen to match the historical
+aggregate role/gap counts; that coincidence is not reuse of the old harness,
+and the first real run remains UNMET on its own instrument-defect evidence.
+
+### Independent review and tests
+
+A new independent read-only review checked the execution wrapper, aggregate
+receipt, sealed source and documentation diff without accessing the source or
+re-running the gate. It found no execution defect. One Important documentation
+finding was corrected: the readiness document's historical analysis was still
+labelled current, and its residual paragraph confused the narrower
+message-directory auxiliary classifier with the now-required container identity
+roles. The opening scope note and §13 residual explanation now distinguish
+those contracts and point to this fresh event. This was reporting-only; no real
+rerun or production fix.
+
+| Synthetic test / check | Result |
+|---|---|
+| `acquisition/tests/test_container_accounting.py` | 39 passed |
+| Full `acquisition/tests` | 212 passed |
+| Production source/test diff | none |
+| `git diff --check` | PASS |
+
+The focused module is the A10 container-accounting contract suite. No unrelated
+real-data gate was re-run. `git diff --cached --check` is run after staging and
+before the evidence commit.
+
+### Boundaries and next step
+
+**Persistent enrollment: NO.** No `database_source.json`, SourceLocator, app
+configuration, product preference, Keychain or Database Mode state was written.
+No new credential, passphrase, derivation, bootstrap, decryption, key recovery,
+snapshot or plaintext copy. No database, schema, row, FTS or media content was
+opened/read. No LLDB, Frida, process attach/memory, injection, hook, re-sign,
+clone launch, WeChat launch/quit/activation/navigation/export/share/account
+switch or application-state change. No source write, creation, deletion,
+rename, permission change, sidecar, checkpoint or migration. No raw source path,
+account identifier, filename, directory name, contact/chat identity, content,
+digest, key, salt, passphrase or raw exception entered durable evidence.
+
+No production code or tests changed. No post-fix real retry and no investigation
+of the unknown filenames or nested contents occurred. **A10 stays UNMET; P4-A
+stays 9/10; P4-B stays MET 4/4.** D-040 and the production blocker
+`database-production-path-no-retained-access-material` are unchanged.
+
+Next step only: **a separate synthetic corrective/reconciliation capsule using
+sanitized aggregate gap categories**. It is not started here; this rerun grants
+no standing source access, classifier changes, Reader feature work or P5.
