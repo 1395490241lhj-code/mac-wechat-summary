@@ -917,3 +917,215 @@ the sealed policy against the real container.
 Next step only: **one fresh A10 structural rerun using the sealed
 provenance-backed domain policy, reporting aggregate counts by boundary class**.
 Not executed here.
+## 16. Fresh real structural rerun under the sealed provenance-backed domain policy (2026-10-02)
+
+**Verdict: UNMET — P4-A remains 9/10; P4-B remains MET 4/4.** This is the
+seventh evidence phase and the first real structural rerun executed against the
+provenance-backed domain policy sealed in §15. The structural result comes
+exclusively from `accounting.meets_requirements()`: **FALSE / FAIL**. No
+production code, classifier, policy or test changed in this capsule, and no
+retry followed the failed predicate. D-040 is unchanged. §§1–15 retain their
+original scope and results; nothing earlier is retroactively rescored.
+
+### 16.1 Designation, sealed implementation and one execution
+
+**Exact root explicitly designated by operator.** The one-run, exact-root-only,
+read-only authorization was used for the operator-designated current WeChat
+`db_storage` root. Root validation used `lstat` and required a present,
+non-symlink directory. The source path and account identifier existed only in
+command-local execution memory: no discovery, sibling-account listing, upward
+walk, mtime-based account selection, process-open-file inspection, alternate
+root or substitution. **Persistent enrollment: NO** — no SourceLocator record,
+no application configuration, no Keychain item, no bootstrap, no Database Mode,
+no standing source access, no P5.
+
+Before any source inspection, local HEAD, `origin/v2/rewrite` and live
+`refs/heads/v2/rewrite` all matched
+`265ed38426b734c9e7317dcbdaee7cc845f8eeef`, ahead/behind `0/0`, clean tree, and
+the pre-existing `stash@{0}` was present. The loaded
+`acquisition/container_accounting.py` and `acquisition/database_inventory.py`
+source bytes were the committed files at that revision; nothing was patched in
+memory. **Fresh real gate executed: YES; `account_container()` invocations:
+exactly 1; accounting completed: YES; execution defect observed: NO.** An
+exclusive start marker refuses a second invocation of the real root in the same
+execution environment.
+
+The harness validated the designation, fingerprinted bounded metadata, called
+the sealed primitive once, compared the same bounded set afterwards, and
+verified that `evidence()["unmet_requirements"]` renders exactly what
+`unmet_requirements(accounting)` returns. It supplies no second classifier, no
+role override, no boundary-class rule of its own, no corrective retry, and no
+prose verdict. It emitted fixed tokens, closed-vocabulary role names and
+integer counts only.
+
+### 16.2 Authoritative acceptance result
+
+One predicate, one truth:
+
+```
+directory_unexamined
+unknown_database
+unsupported_message_candidate
+```
+
+`meets_requirements()` returned `FALSE`; `unmet_requirements(accounting)` and
+`evidence()["unmet_requirements"]` returned the same three tokens, and the
+harness would have aborted with *acceptance truth divergent* had they disagreed.
+No `required_role_missing` or `required_role_unclassified` condition was
+returned: all three required roles are present and correctly anchored. Required
+schema, WAL, parsing and identity compatibility remain scoped to the existing
+sealed evidence in §7; this structural run opened no database and re-proved none
+of them.
+
+### 16.3 Fresh aggregate role accounting
+
+| Role | Count | Class | Status |
+|---|---:|---|---|
+| `ordinary_message` | 7 | required | structurally accounted in the defined message domain |
+| `session_identity` | 1 | required | sealed location/anchor semantics; structurally accounted |
+| `contact_identity` | 1 | required | sealed location/anchor semantics; structurally accounted |
+| `business_message` | 1 | excluded/non-required | explicit unsupported `business_message_unread`; non-blocking by itself (D-040) |
+| `search_index` | 1 | optional | accounted; no search or content access |
+| `media` | 1 | optional | accounted; no content access |
+| `auxiliary` | 1 | accounting-only | nonrequired; adds no message truth |
+| `unknown` | 13 | visible gap; blocking only in required/ambiguous domains | `unknown_database` reported; role never hidden or relabelled |
+| `unsupported_message_candidate` | 1 | message-bearing risk/blocking | fixed candidate gap; no promotion or whitelist |
+
+| Total accounting | Fresh result |
+|---|---:|
+| DB rows / unique DB keys | 27 / 27 |
+| DB + rejection entries / unique accounting keys | 29 / 29 |
+| Duplicate accounting keys | 0 |
+| Direct directories / examined directories | 15 / 15 |
+| Rejections | 2 |
+| Nested/unexamined entries | 2 |
+| Visible gaps | `business_message_unread`, `unknown_database`, `unsupported_message_candidate` |
+
+Accounting keys and directory identities were compared mechanically against the
+pre-run bounded entry set and matched; they remain operation-local and are not
+persisted. This audit adds no classifier and no gap rule.
+
+### 16.4 Aggregate boundary-class summary
+
+This is the reporting axis §15.8 specified, rendered from
+`evidence()["domain_summary"]`. No directory, file, identity or path appears.
+
+| Boundary class | DB count | Unknown count | Candidate count | Nested/unexamined count | Unreadable count |
+|---|---:|---:|---:|---:|---:|
+| `required_message` | 12 | 1 | 1 | 0 | 0 |
+| `required_identity` | 3 | 1 | 0 | 1 | 0 |
+| `known_physical_only` | 1 | 1 | 0 | 0 | 0 |
+| `ambiguous` | 11 | 10 | 0 | 1 | 0 |
+
+The columns reconcile exactly against §16.3: 27 databases, 13 unknown,
+1 candidate, 2 nested/unexamined, 0 unreadable.
+
+**Effect of the sealed physical-only class, in aggregate only.** Exactly **one**
+unknown database observation fell inside `known_physical_only`, and it is
+non-blocking for Reader completeness while remaining fully visible as
+`unknown_database` with `role = unknown`. **Twelve** unknown observations
+remained in `required_message`, `required_identity` and `ambiguous` domains and
+therefore remained blocking. Both nested/unexamined entries fell outside
+`known_physical_only` — one under a required-identity domain, one under an
+ambiguous domain — so both remained blocking; no unreadable directory was
+observed. Which physical directory contributed which count is deliberately not
+recoverable from this report, and no domain membership was added to make the
+verdict greener.
+
+The role axis was not collapsed into the domain axis: the physical-only unknown
+is reported as `role = unknown` + `domain_class = known_physical_only`, and
+`accounting.gaps` still contains `unknown_database` for it. Only *acceptance*
+is boundary-aware, exactly as §15.4 sealed.
+
+### 16.5 Independent agreement with history, and privacy
+
+The aggregate totals — 27 DB rows, 13 unknown, 1 candidate, 2 nested/unexamined,
+15/15 direct directories — **independently match** the earlier §14 and §12
+real-rerun aggregates. They were derived from this run's own execution, not
+copied from a historical receipt; no previous result, harness output or table
+was reused as input. What is new in this phase is the **split by boundary
+class**, which did not exist before the provenance reconciliation.
+
+No residual blocker was investigated. No unknown filename, directory name,
+message/contact identity, username/wxid, chat title, conversation id, table
+name or digest, content, key, salt or passphrase was printed, inspected,
+persisted or searched for, and no nested directory was entered. No public or
+upstream repository was searched using private names. The blockers are recorded
+as aggregate boundary-class counts and fixed tokens only.
+
+### 16.6 Integrity, boundaries and stop
+
+**Source pre/post unchanged: YES.** The guard compared existence, entry set,
+entry type, size, inode and `mtime_ns` for the root, its direct entries and the
+children of visible non-symlink direct directories, using the same bounded
+traversal on both passes; nested directory entries were statted, never entered.
+No full-container hashing, no database opening, no SQL, schema or row access.
+This claim is explicitly limited to that bounded metadata guard.
+
+Strictly read-only throughout: no write, create, delete, rename, chmod/chown,
+SQLite write, checkpoint, VACUUM, schema change, sidecar, temp file inside the
+source or plaintext copy. No credential request, Keychain, bootstrap, key
+derivation, old-key recovery, decryption, plaintext copy or snapshot. No LLDB,
+Frida, attach, process memory, injection, hooks, re-signing or clone launch. No
+WeChat launch, quit, activation, navigation, account switch, export or share.
+The only v2 permission model implied by this phase is Screen Recording; none
+was exercised.
+
+The phase stopped after the failed predicate and the post-execution integrity
+guard. No production fix, policy change, domain addition, whitelist, deeper
+traversal, second invocation, P5 or Database Mode work followed. **A10 remains
+UNMET and P4-A remains 9/10.**
+
+### 16.7 Independent review and tests
+
+Independent read-only review, performed by a separate reviewer with no access to
+the real source, of the harness, the sealed implementation and this record:
+**APPROVED — no Critical and no Important execution defect.** The reviewer
+confirmed, from committed code, that `meets_requirements()` is a one-line
+delegation to `unmet_requirements(self) == ()` and that no second or wrapper
+verdict exists anywhere in the repository; that the exported constructor rejects
+a misplaced ordinary *or* identity role, so required truth is unreachable from
+the ambiguous root or a physical-only domain by any construction path; that the
+physical-only set is exact-set membership with no `re`, `fnmatch`,
+case-folding or distance primitive anywhere in either module; that unreadable
+directories are tested *before* the physical-only exemption and therefore block
+everywhere; that business/FTS/media raise no requirement condition while staying
+visible; that the harness assigns the machine verdict once with no override and
+prints only fixed tokens and counts; that traversal is exactly one root listing
+plus one listing per direct directory with no `glob`/`walk`/`resolve`/open/
+sqlite primitive; and that `domain_summary` is keyed only by the four fixed
+boundary tokens. The reviewer also independently re-derived every claimed count
+from the sealed code's own routing constraints and reproduced all of them,
+including the single most informative confirmation: the exempted row is one
+whose role stayed `unknown`, which is precisely the honest representation §15.4
+requires. No real source was re-accessed during the review.
+
+Two minor, reporting-only observations were recorded and do not affect the
+verdict: the harness returns a zero exit status even when the predicate is false
+(the verdict is carried in the printed JSON and was read from there), and it
+binds the two modules by working-tree path rather than re-verifying their bytes
+against the sealed commit in-process — byte-identity with `265ed384` was
+confirmed separately, by the reviewer and before execution. Neither creates a
+verdict path, and the single-invocation marker remains consumed, so no second
+real access is possible without deliberately deleting it.
+
+Synthetic tests, with no production code change: focused container-accounting
+and domain-policy suite **103 passed**; full acquisition suite **276 passed**;
+`git diff --check` and the populated staged `git diff --cached --check` passed.
+All tests synthetic; the Keychain adapter checks use injected FakeSecurity. No
+unrelated real-data gate ran.
+
+### 16.8 What this phase did not do
+
+No production-code change, no classifier or policy change, no whitelist, no
+domain addition, no recursion, no traversal widening, no Database Mode, no P5,
+no credential/decryption work, no product wiring, no decision change. The
+13 / 1 / 2 aggregate figures are now split by boundary class, and the residual
+blockers are located **in aggregate**: the required-message and required-identity
+domains are not themselves the problem — the ambiguous class and the two
+unentered nested structures are.
+
+Next step only: **provenance-only / synthetic reconciliation of the remaining
+ambiguous blocker classes**, with no additional real-source access until a new
+independent domain policy is sealed. Not started here, and not automatically
+authorized.
