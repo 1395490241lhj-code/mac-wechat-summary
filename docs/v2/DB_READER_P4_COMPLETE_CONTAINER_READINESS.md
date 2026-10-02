@@ -786,8 +786,8 @@ root-relative paths; `favorite/` is not single-source). `chatbot/` stays
 it documents message-event records (admitted by a first draft, withdrawn after
 independent review), and `solitaire/` because only one source characterises it.
 The container root is unchanged and still ambiguous. `favorite/` rests on a
-reading of the semantics, the exemption is per directory while the evidence is per
-file, and a change to the live `message_resource.db` completeness claim needs
+reading of the semantics, the exemption was first per directory while the evidence is per
+file *(narrowed in §15: only a direct regular-file unknown is exempt)*, and a change to the live `message_resource.db` completeness claim needs
 explicit operator sign-off (A10 §18.9).
 
 **One new message shape.** `message/message_resource.db` is classified `media` —
@@ -818,3 +818,27 @@ rounds found eight over-broad exemptions, all corrected RED-first; each exemptio
 **9/10**, and P4-B remains **MET 4/4**. A fresh real structural rerun under this
 sealed policy is required before any of it is claimed to hold against a real
 container, and that rerun needs separate explicit operator authorization.
+
+## 15. Physical-only exemption narrowed by controller review (2026-10-02)
+
+Synthetic and public-policy only; **no real source access**; A10 not run.
+
+The controller kept the exact `message/message_resource.db` live-completeness
+change and the `favorite` / `bizchat` admissions, and **rejected as too broad** the
+directory-wide physical-only exemption of §14, under which a message-shaped
+candidate, a nested directory or a refused entry became non-blocking just because
+its parent is a proven feature domain.
+
+A `known_physical_only` parent now claims only that the domain is proven outside
+required message/identity truth, so **a direct regular-file unknown database in it
+does not by itself imply missing Reader truth**. Candidates, unentered nested
+directories, refused/non-regular entries (symlinks are never followed) whose
+condition is unknown or candidate risk, and unreadable directories block in every
+domain. Domain class and row role stay separate axes. The change is one edit
+inside `_blocking_observations`, so the single predicate and the `blocking_*`
+aggregates still come from the same pass. Full table, RED-L (33 failed / 414
+passed) and verification in A10 gate document §19. `acquisition/tests` 447,
+`wechatdb` 514, `bridge` 272 passed.
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**; no historical E-030…E-036
+evidence was rescored.

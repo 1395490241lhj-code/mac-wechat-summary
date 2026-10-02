@@ -497,7 +497,9 @@ unnamed directory as physical-only. Consequently no directory-level exemption
 is added: root/other-domain unknowns remain **ambiguous**, not proven
 message-bearing and not proven irrelevant. A genuinely proven physical-only
 unknown or nested domain could be visible/nonblocking under D-040, but that
-category has **no established member in this capsule**. We do not manufacture a
+category has **no established member in this capsule**. *(Superseded by §19: a
+proven domain exempts only a direct regular-file unknown, never nested
+structure.)* We do not manufacture a
 passing fixture for an unproven exclusion.
 
 An ordinary shard shape outside `message/` is location-incompatible with current
@@ -522,7 +524,7 @@ bypass this location invariant.
 | Required role absent/misplaced | yes, required-role tokens | yes | current access path has no required input |
 | In-boundary unexamined directory | yes, rejection + `directory_unexamined` | yes | required/message truth could be hidden |
 | Other-domain nested directory | yes, rejection + `directory_unexamined` | yes | parent exclusion is unestablished |
-| Independently proven physical-only nested domain | would remain visible | would not by presence alone | no such parent-domain exemption currently exists |
+| Independently proven physical-only nested domain | would remain visible | would not by presence alone *(hypothetical here; §19: nested blocks in every domain)* | no such parent-domain exemption currently exists |
 
 Rejected unknown/candidate DB-shaped entries retain the same risk blockers.
 A `.db`-shaped directory additionally retains `directory_unexamined`. Recognized
@@ -792,8 +794,8 @@ exactly one place:
 | required_identity | own anchor (`session.db` / `contact.db`) | yes, role count | no | yes, its own role only |
 | required_identity | misplaced ordinary shard | yes, candidate gap | yes | no |
 | known_physical_only | unknown database | yes, role count + gap | no, for Reader completeness only | no |
-| known_physical_only | message-shaped candidate | yes, role count + gap | no, for Reader completeness only | no — stays unsupported |
-| known_physical_only | nested directory | yes, rejection | no — no recursion is implied | no |
+| known_physical_only | message-shaped candidate | yes, role count + gap | ~~no~~ **yes (§19)** | no — stays unsupported |
+| known_physical_only | nested directory | yes, rejection | ~~no~~ **yes (§19)** | no |
 | known_physical_only | **unreadable** directory | yes, rejection | **yes** | no |
 | known_physical_only | identity role row | impossible — constructor rejects it | — | no |
 | ambiguous | unknown database | yes | yes | no |
@@ -807,10 +809,11 @@ Two refusals keep blocking unchanged: an unreadable directory fails closed
 **everywhere**, because a directory that could not be listed is not the same
 claim as one that was listed and held nothing needed; and a refused `.db`-shaped
 entry keeps its role-derived blocker when its parent domain is required or
-ambiguous.
+ambiguous *(superseded by §19: also inside a proven physical-only domain)*.
 
-`NESTED_DIRECTORY` was **not** removed globally. Its blocking effect is refined
-by parent boundary class only. No recursion is implied anywhere: traversal is
+`NESTED_DIRECTORY` was **not** removed globally. Its blocking effect was first
+refined by parent boundary class *(superseded by §19: it now blocks in every
+domain, including a proven physical-only one)*. No recursion is implied anywhere: traversal is
 still one root listing plus one listing of each visible non-symlink direct
 directory.
 
@@ -856,7 +859,8 @@ This is what lets the next real rerun answer *how many remaining blockers are
 actually inside Reader-relevant domains?* without publishing a single private
 layout name. `unreadable_count` is kept separate from
 `nested_unexamined_count` because an unlisted directory and an unentered one are
-different claims, and only the first still blocks inside a physical-only domain.
+different claims, and only the first still blocked inside a physical-only domain
+*(superseded by §19: both now block everywhere)*.
 The optional/excluded axis stays on `role_counts`, so business/FTS/media remain
 visible where they already were.
 
@@ -864,7 +868,7 @@ visible where they already were.
 
 RED before the first production edit: **20 failed / 75 passed** — missing domain
 policy symbols; required/ambiguous/physical-only behaviour; physical-only nested
-semantics; no-basename-inference; no-domain-spoofing; aggregate evidence shape.
+semantics *(historical; §19 reversed the nested exemption)*; no-basename-inference; no-domain-spoofing; aggregate evidence shape.
 
 A second RED appeared during implementation, from the §14 review: the exported
 `ContainerDatabase` constructor allowed a caller to build an identity row
@@ -902,7 +906,7 @@ The review also confirmed, against the diff: no domain entry derived from
 real-source knowledge; `emoticon` provenance valid; basename evidence never
 promoted into layout evidence; no physical-only row can satisfy a required
 role; no message-bearing candidate escapes from a required or ambiguous domain;
-unknown roles stay visible; nested logic relaxed only for the one proven domain;
+unknown roles stay visible; nested logic relaxed only for the one proven domain *(historical; reversed by §19)*;
 traversal width unchanged; no fuzzy/prefix matching; physical-only rows cannot
 strengthen coverage; still exactly one acceptance predicate; D-040, P4-B and
 business-message semantics unchanged.
@@ -1251,10 +1255,10 @@ unproven either way.
 
 `required_message` unknowns and candidates, every ambiguous domain (including
 the container root and every domain §18 leaves out), every message-shaped name
-outside `message/`, and every nested structure outside a proven physical-only
-domain remain blocking. Physical-only domains are exempt from *completeness*
-blocking only; their contents stay visible, keep their honest role, cannot
-satisfy any required role and cannot strengthen coverage. Exact-match only: no
+outside `message/`, and every nested structure remain blocking. **(§19 narrowed
+this:** a physical-only domain exempts only a direct regular-file unknown, not
+candidates or nested structure.) Physical-only domains never relabel; their
+contents stay visible, keep their honest role, cannot satisfy any required role and cannot strengthen coverage. Exact-match only: no
 prefix, suffix, substring, case-folding or fuzzy matching. Each exemption is
 exactly as wide as its evidence: each proven domain by exact directory name (§18.4), the resource
 store by exact `message/` location, and anchor scope by exact parent location.
@@ -1440,11 +1444,11 @@ A domain failing either part stays `ambiguous` and fail-closed.
 | `message/`, `session/`, `contact/` | Tier 1; S1–S6 | required roles | required classes (unchanged) |
 | container root | no | — | `ambiguous` (unchanged) |
 
-Exemption is exactly the existing one: a physical-only domain's unknown or
-candidate databases and unentered nested directories stop being
-Reader-completeness blockers, while they stay visible with their honest role,
-cannot satisfy any required role, cannot strengthen coverage, and an unreadable
-directory still blocks. Exact match only.
+**Superseded by §19.** This paragraph first said a physical-only domain's unknown
+or candidate databases and unentered nested directories stop being
+Reader-completeness blockers. That was too broad: only a direct regular-file
+unknown is exempt; candidates, nested directories and refused/non-regular entries
+still block. Exact match only.
 
 ### 18.5 Message-directory provenance ledger (additions)
 
@@ -1534,13 +1538,14 @@ Mode action was taken.
   `_PHYSICAL_ONLY_DOMAIN_NAMES`.
 - **`bizchat/`** is business-chat group/user metadata; business messages live in
   `biz_message_<n>.db`, handled separately and unchanged.
-- **Evidence is per file, the exemption is per directory.** The sources describe
-  specific databases (`favorite/favorite.db`, ...), but the policy exempts the
-  whole proven directory, including an unrecognised database or nested structure
-  inside it. S1 itself warns WeChat may add a numeric suffix, create a new feature
-  database or move a feature into another store. The same was already true of
-  `emoticon/` before this pass. This is an **accepted risk**, not a proof;
-  restricting the exemption to named basenames would be a separate decision.
+- **Evidence is per file, the exemption was per directory — now narrowed (§19).**
+  The sources describe specific databases (`favorite/favorite.db`, ...). S1 itself
+  warns WeChat may add a numeric suffix, create a new feature database or move a
+  feature into another store. The first version of this pass exempted everything
+  below a proven directory; the controller rejected that as too broad and §19
+  limits the exemption to a direct regular-file unknown. What remains is the
+  smaller accepted risk that an unrecognised, non-message-shaped regular file in
+  such a domain does not block.
 - **Anchor scope relies on a narrow name regex.** An unknown regular-file sibling
   beside a proven anchor is non-blocking, while a name matching the message-like
   pattern (`message*.db`, `biz_message*.db`) still blocks as a candidate. A
@@ -1584,3 +1589,91 @@ A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. This is policy and
 public provenance, not real evidence: a fresh structural rerun under this sealed
 policy, with separate explicit operator authorization, is the only way to learn
 whether it holds against a real container.
+
+---
+
+## 19. Controller review of §18 — physical-only exemption narrowed (2026-10-02)
+
+Still synthetic and public-policy only: **no real source was accessed**, no real
+name or count shaped any rule, and A10 was not run.
+
+### 19.1 Decisions
+
+**Approved (kept):**
+
+- the live-completeness change for exact `message/message_resource.db` (media,
+  `message/` only; the same basename elsewhere and indexed variants stay
+  candidates) — no revert;
+- the admissions `emoticon`, `sns`, `favorite`, `head_image`, `hardlink`,
+  `bizchat`, `third_app_icon` — `favorite` and `bizchat` explicitly retained.
+
+**Rejected as too broad:** the blanket directory-wide exemption. In `9edbbbe`
+membership in a physical-only domain made message-shaped candidates, nested
+directories and some refused/non-regular entries non-blocking.
+
+**Accepted replacement:** only a direct regular-file unknown is exempt inside a
+proven physical-only domain. Candidate, nested, unreadable and refused/non-regular
+unknown-or-candidate risk remain fail-closed.
+
+### 19.2 The invariant
+
+A `known_physical_only` parent claims: *this exact root domain is independently
+proven outside required message/identity truth, so a direct unknown regular
+database in it does not by itself imply missing Reader truth.* It does **not**
+claim that anything physically below it is safe. Domain class and row role stay
+separate axes; the exemption is a verdict decision and never relabels a row.
+
+| Observation inside a proven physical-only domain | Visible | Blocking | Token |
+|---|---|---|---|
+| direct regular-file unknown | yes | **no** | — |
+| direct regular-file message-shaped candidate (`message_future.db`, `message_0.db`, `biz_message_x.db`) | yes | **yes** | `unsupported_message_candidate` |
+| nested directory (including hidden) | yes | **yes** | `directory_unexamined` |
+| symlink, neutral name | yes | **yes** | `unknown_database` |
+| symlink, message-shaped name | yes | **yes** | `unsupported_message_candidate` |
+| symlink to a directory | yes | **yes** | `unknown_database` |
+| symlink with a recognised non-message name (`media.db`) | yes | no — no message claim, as elsewhere | — |
+| unreadable directory | yes | **yes** (unchanged) | `directory_unexamined` |
+
+Symlinks are never followed. Identity-anchor scope (§17.2) is unchanged and
+follows the same shape: only a regular-file unknown beside a proven anchor is
+exempt.
+
+### 19.3 What changed in code
+
+One edit in `acquisition/container_accounting.py`, inside
+`_blocking_observations`: the physical-only check now applies only to
+`ROLE_UNKNOWN` database rows, and the `not outside` guards on nested and refused
+entries were removed. `classify_database_name`, `_MESSAGE_LIKE`, the
+message-resource classification, the domain set, traversal and the bridge are
+untouched. The single predicate is unchanged: `meets_requirements()` ->
+`unmet_requirements()` -> `_blocking_observations` -> `domain_summary`
+`blocking_*` counts, so a physical-only candidate increments
+`blocking_candidate_count`, a physical-only nested directory
+`blocking_nested_count`, a physical-only refused unknown `blocking_unknown_count`,
+and a direct regular-file unknown increments only the plain `unknown_count`.
+
+### 19.4 RED-first evidence
+
+- **RED-L** — 33 failed / 414 passed before the production edit: the updated
+  tests for candidates (3 names x 3 domains), nested and hidden-nested
+  directories, neutral and message-shaped symlinks, symlinks to directories, the
+  per-domain narrowing sweep (all seven domains), and the aggregate expectation.
+  Already green by design: direct unknown stays non-blocking, unreadable still
+  blocks, recognised-name symlinks add nothing.
+- Tests that encoded the broad exemption were rewritten, not worked around: the
+  old accounts-and-keeps-roles test, the nested-without-blocking tests, the
+  proven-domain acceptance parametrization and the blocking-split expectations.
+
+### 19.5 Verification
+
+`acquisition/tests` 447 passed, `wechatdb` 514 passed, `bridge` 272 passed; the
+aggregate-versus-verdict agreement sweep gained six physical-only builds (candidate,
+nested-hidden, symlinks, unknown) and agrees on all. The `message_resource.db`
+inventory and bridge tests are unchanged and green.
+
+### 19.6 Status
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. E-030…E-036 real evidence
+is not rescored. A fresh real structural rerun under this policy, with separate
+explicit authorization, is still the only way to learn how it behaves on a real
+container.

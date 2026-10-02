@@ -114,7 +114,11 @@ DOMAIN_REQUIRED_IDENTITY = "required_identity"
 
 #: Independently proven to be a genuine WeChat store domain that the current v2
 #: Reader does not claim as required message/identity truth. Existence is
-#: accounted; its contents add no coverage and support no role.
+#: accounted; its contents add no coverage and support no role. The proof is about
+#: the domain, not about everything below it: it exempts one observation only, a
+#: direct regular-file unknown database from Reader-completeness blocking.
+#: Candidates, unentered nested directories, refused/non-regular entries and
+#: unreadable directories still block (see ``_blocking_observations``).
 DOMAIN_KNOWN_PHYSICAL_ONLY = "known_physical_only"
 
 #: No independent provenance. The default, and always fail-closed.
@@ -191,10 +195,12 @@ def domain_boundary_class(directory_name: str, location: str) -> str:
 
 
 def _is_outside_reader_boundary(directory_identity: str, location: str) -> bool:
-    """Whether this row's parent domain is proven outside Reader completeness.
+    """Whether this row's parent domain is proven outside required truth.
 
-    Only a domain with independent provenance qualifies. An ambiguous parent is
-    inside scope by default, so nothing here can be reached by guessing.
+    Only a domain with independent provenance qualifies, and qualifying exempts
+    exactly one observation -- a direct regular-file unknown -- from blocking (see
+    ``_blocking_observations``). An ambiguous parent is inside scope by default,
+    so nothing here can be reached by guessing.
     """
     return domain_boundary_class(directory_identity, location) == DOMAIN_KNOWN_PHYSICAL_ONLY
 
@@ -654,16 +660,21 @@ def _blocking_observations(accounting):
     reads it for the verdict and ``domain_summary`` reads it for the aggregate
     report, so there is no second policy engine to drift from.
 
-    Boundary-class aware. An unexamined structure inside a domain independently
-    proven outside the Reader boundary is visible physical structure, not a gap in
-    Reader completeness: nothing inside it was looked at, nothing inside it counts
-    as truth, and no recursion is implied either way. An unreadable directory
-    stays blocking everywhere, because a directory that could not be listed is not
-    the same claim as one that was listed and held nothing needed.
+    A ``known_physical_only`` parent is exactly one thing wide. It says "this root
+    domain is independently proven outside required message/identity truth, so a
+    direct unknown *regular-file* database in it does not by itself imply missing
+    Reader truth". It does not say "anything physically below this directory is
+    safe". So the only observation it exempts is a direct regular-file
+    ``ROLE_UNKNOWN`` row. A message-shaped candidate, an unentered nested
+    directory, a refused or non-regular entry (a symlink can alias data outside the
+    domain) whose classified condition is unknown or candidate risk, and an
+    unreadable directory all block in every domain. Domain class and row role stay
+    separate axes: the exemption is a verdict decision, never a relabelling.
 
     Visible gaps and acceptance blockers are still different: business is excluded
-    by D-040, and unknown/candidate risk blocks only where its parent domain is
-    required or ambiguous. The role is never relabelled -- it stays visible and
+    by D-040. An unknown regular-file database is exempt only inside a proven
+    physical-only domain (or beside a proven identity anchor); candidate risk
+    blocks everywhere. The role is never relabelled -- it stays visible and
     unsupported either way.
 
     Identity truth is the exact anchor, not the parent directory. Production opens
@@ -682,10 +693,13 @@ def _blocking_observations(accounting):
         kind = _ROLE_BLOCKING_KIND.get(row.role)
         if kind is None:
             continue
-        if _is_outside_reader_boundary(row.directory_identity, row.location):
+        # Only a direct regular-file unknown inside a proven physical-only domain
+        # is exempt; a candidate is message-bearing risk wherever it was found.
+        if kind == "unknown" and _is_outside_reader_boundary(
+                row.directory_identity, row.location):
             continue
-        # A candidate is message-bearing risk, not merely an unrecognised name:
-        # it stays a blocker wherever it was found, including beside a valid anchor.
+        # Likewise beside a proven identity anchor: an unrecognised regular file
+        # is outside the exact-anchor claim, while a candidate always blocks.
         if (kind == "unknown"
                 and row.location in _LOCATION_ROLE
                 and row.directory_identity in established_anchors):
@@ -693,16 +707,14 @@ def _blocking_observations(accounting):
         yield domain_boundary_class(row.directory_identity, row.location), kind
     for row in accounting.rejections:
         boundary = domain_boundary_class(row.directory_identity, row.location)
-        outside = boundary == DOMAIN_KNOWN_PHYSICAL_ONLY
         if row.reason == UNREADABLE_DIRECTORY:
             yield boundary, "unreadable"
             continue
         if row.reason == NESTED_DIRECTORY or row.is_directory:
             # Nothing inside an unentered directory was looked at, so it cannot be
-            # shown to hold no message-bearing risk. Anchor scope covers what sits
-            # beside the anchor, not structures this pass never entered.
-            if not outside:
-                yield boundary, "nested"
+            # shown to hold no message-bearing risk, and parent-domain provenance
+            # cannot prove the contents of a subtree this pass never entered.
+            yield boundary, "nested"
             continue
         role = _container_role(row.location, row.name)
         if role == ROLE_ORDINARY_MESSAGE:
@@ -712,8 +724,8 @@ def _blocking_observations(accounting):
         # Only the two conditions in CONTAINER_REQUIREMENTS may come from here.
         # A refused business-shaped name is classified and reported as a gap, but
         # D-040 keeps business message excluded from required truth, so it can
-        # never become an acceptance blocker.
-        if role in _REQUIREMENT_ROLE_GAPS and not outside:
+        # never become an acceptance blocker. Symlinks are never followed.
+        if role in _REQUIREMENT_ROLE_GAPS:
             yield boundary, _ROLE_BLOCKING_KIND[role]
 
 
