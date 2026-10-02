@@ -115,10 +115,11 @@ DOMAIN_REQUIRED_IDENTITY = "required_identity"
 #: Independently proven to be a genuine WeChat store domain that the current v2
 #: Reader does not claim as required message/identity truth. Existence is
 #: accounted; its contents add no coverage and support no role. The proof is about
-#: the domain, not about everything below it: it exempts one observation only, a
-#: direct regular-file unknown database from Reader-completeness blocking.
-#: Candidates, unentered nested directories, refused/non-regular entries and
-#: unreadable directories still block (see ``_blocking_observations``).
+#: the domain, not about everything below it. Being in the class grants no
+#: exemption at all; only an exact store named in ``PROVEN_STORE_NAMES`` below is
+#: exempt from Reader-completeness blocking. Unknown names, candidates, unentered
+#: nested directories, refused/non-regular entries and unreadable directories all
+#: still block (see ``_blocking_observations``).
 DOMAIN_KNOWN_PHYSICAL_ONLY = "known_physical_only"
 
 #: No independent provenance. The default, and always fail-closed.
@@ -168,6 +169,34 @@ _PHYSICAL_ONLY_DOMAIN_NAMES = frozenset({
 
 KNOWN_PHYSICAL_ONLY_DIRECTORIES: frozenset[str] = _PHYSICAL_ONLY_DOMAIN_NAMES
 
+#: The stores each proven physical-only domain is actually known to contain.
+#: Domain knowledge and store knowledge are different facts: knowing that
+#: ``favorite/`` is a saved-items domain says nothing about a file that appears
+#: in it later, so only the exact basenames the same public sources spell out
+#: get an exemption from Reader-completeness blocking. Anything else inside a
+#: proven domain stays ROLE_UNKNOWN, stays visible, and blocks.
+#:
+#: Keyed on (domain, exact basename). Every row below is spelled
+#: root-relative in at least two independent public sources; the two-source
+#: minimum is recorded per store in the A10 classification doc §19.3 ledger. No pattern,
+#: prefix, suffix, substring, case-folding or inferred numeric variant appears
+#: here, because no source proved one: S1 explicitly warns that WeChat may add a
+#: numeric suffix or introduce a new feature database, and an inferred variant
+#: is exactly the guess this table refuses to become.
+#:
+#:   ``favorite/favorite_fts.db`` is included: S1, S5 and S6 all spell it.
+#:   ``hardlink/hardlink.db`` is the only hardlink store named by any source; the
+#:   ``hardlink_<n>.db`` shape is Tier-2-reader auxiliary, never proven layout.
+PROVEN_STORE_NAMES: dict[str, frozenset[str]] = {
+    "emoticon": frozenset({"emoticon.db"}),
+    "sns": frozenset({"sns.db"}),
+    "favorite": frozenset({"favorite.db", "favorite_fts.db"}),
+    "head_image": frozenset({"head_image.db"}),
+    "hardlink": frozenset({"hardlink.db"}),
+    "bizchat": frozenset({"bizchat.db"}),
+    "third_app_icon": frozenset({"third_app_icon.db"}),
+}
+
 #: Which boundary class each reportable location class always sits in. A location
 #: class is a fixed token; only the physical-only row needs the domain name, so
 #: that is the only place a name is consulted.
@@ -194,15 +223,19 @@ def domain_boundary_class(directory_name: str, location: str) -> str:
     return _LOCATION_DOMAIN_CLASS[location]
 
 
-def _is_outside_reader_boundary(directory_identity: str, location: str) -> bool:
-    """Whether this row's parent domain is proven outside required truth.
+def is_proven_physical_store(directory_identity: str, location: str, name: str) -> bool:
+    """Whether this exact store inside a proven domain has its own provenance.
 
-    Only a domain with independent provenance qualifies, and qualifying exempts
-    exactly one observation -- a direct regular-file unknown -- from blocking (see
-    ``_blocking_observations``). An ambiguous parent is inside scope by default,
-    so nothing here can be reached by guessing.
+    A proven domain is not a proven directory: the exemption is the *store*, so
+    an unproven or future name inside a proven domain is still a blocking
+    unknown. Exact (domain, basename) membership only -- no fuzzy matching.
     """
-    return domain_boundary_class(directory_identity, location) == DOMAIN_KNOWN_PHYSICAL_ONLY
+    if not isinstance(name, str):
+        raise ValueError("database name invalid")
+    if location != LOCATION_OTHER_DIRECTORY:
+        return False
+    return name in PROVEN_STORE_NAMES.get(directory_identity, frozenset())
+
 
 #: Which required role each named directory exists to hold, and the name that
 #: carries it. A location that exists but does not hold the role has not lost the
@@ -660,22 +693,24 @@ def _blocking_observations(accounting):
     reads it for the verdict and ``domain_summary`` reads it for the aggregate
     report, so there is no second policy engine to drift from.
 
-    A ``known_physical_only`` parent is exactly one thing wide. It says "this root
-    domain is independently proven outside required message/identity truth, so a
-    direct unknown *regular-file* database in it does not by itself imply missing
-    Reader truth". It does not say "anything physically below this directory is
-    safe". So the only observation it exempts is a direct regular-file
-    ``ROLE_UNKNOWN`` row. A message-shaped candidate, an unentered nested
-    directory, a refused or non-regular entry (a symlink can alias data outside the
-    domain) whose classified condition is unknown or candidate risk, and an
-    unreadable directory all block in every domain. Domain class and row role stay
-    separate axes: the exemption is a verdict decision, never a relabelling.
+    A ``known_physical_only`` parent carries no exemption of its own. Domain
+    knowledge and store knowledge are different facts: proving that ``favorite/``
+    is a saved-items domain says nothing about a file that appears in it later.
+    So the only observation a physical-only domain ever exempts is a direct
+    *regular-file* ``ROLE_UNKNOWN`` row whose exact basename is independently
+    proven in ``PROVEN_STORE_NAMES``. Any other name -- a future store, a
+    look-alike, a number-suffixed variant -- keeps ROLE_UNKNOWN, stays visible and
+    still blocks. A message-shaped candidate, an unentered nested directory, a
+    refused or non-regular entry (a symlink can alias data outside the domain)
+    whose classified condition is unknown or candidate risk, and an unreadable
+    directory all block in every domain. Domain class and row role stay separate
+    axes: the exemption is a verdict decision, never a relabelling.
 
     Visible gaps and acceptance blockers are still different: business is excluded
-    by D-040. An unknown regular-file database is exempt only inside a proven
-    physical-only domain (or beside a proven identity anchor); candidate risk
-    blocks everywhere. The role is never relabelled -- it stays visible and
-    unsupported either way.
+    by D-040. An unknown regular-file database is exempt only when it is a proven
+    store inside a proven physical-only domain, or when it sits beside a proven
+    identity anchor; candidate risk blocks everywhere. The role is never
+    relabelled -- it stays visible and unsupported either way.
 
     Identity truth is the exact anchor, not the parent directory. Production opens
     session/session.db and contact/contact.db by name and never enumerates their
@@ -693,10 +728,11 @@ def _blocking_observations(accounting):
         kind = _ROLE_BLOCKING_KIND.get(row.role)
         if kind is None:
             continue
-        # Only a direct regular-file unknown inside a proven physical-only domain
-        # is exempt; a candidate is message-bearing risk wherever it was found.
-        if kind == "unknown" and _is_outside_reader_boundary(
-                row.directory_identity, row.location):
+        # Only a proven store inside a proven physical-only domain is exempt; a
+        # candidate is message-bearing risk wherever it was found, and an
+        # unproven name inside a proven domain is still a blocking unknown.
+        if kind == "unknown" and is_proven_physical_store(
+                row.directory_identity, row.location, row.name):
             continue
         # Likewise beside a proven identity anchor: an unrecognised regular file
         # is outside the exact-anchor claim, while a candidate always blocks.

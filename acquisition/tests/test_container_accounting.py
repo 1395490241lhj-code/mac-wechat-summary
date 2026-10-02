@@ -48,6 +48,7 @@ from acquisition.container_accounting import (
     ROLE_UNSUPPORTED_MESSAGE_CANDIDATE,
     REJECTED_NOT_REGULAR_FILE,
     UNREADABLE_DIRECTORY,
+    PROVEN_STORE_NAMES,
     account_container,
     unmet_requirements,
 )
@@ -715,9 +716,10 @@ def test_proven_physical_only_domain_accounts_and_keeps_an_unknown_visible(tmp_p
     # Accounted exactly once.
     assert accounting.accounts_for([(row.directory_identity, row.name)
                                     for row in accounting.databases])
-    # A direct regular-file unknown is the ONE thing the domain exempts.
-    assert unmet_requirements(accounting) == ()
-    assert accounting.meets_requirements()
+    # Visible and honestly unknown, but a proven domain is not a proven store: an
+    # unrecognised basename keeps ROLE_UNKNOWN and still blocks.
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
     # But the role-level observation is still reported, so nothing is hidden.
     assert accounting.gaps
 
@@ -911,18 +913,21 @@ def test_a_refused_name_can_never_add_a_condition_outside_the_closed_vocabulary(
     assert accounting.meets_requirements()
 
 
-def test_a_refused_message_shape_outside_a_physical_only_domain_is_accounted_only(tmp_path):
-    # An auxiliary-shaped refusal is the cheapest possible path to a false pass if
-    # the boundary exemption is applied without the role check. Nothing inside a
-    # proven physical-only domain may become required truth, and nothing inside it
-    # may quietly turn into a blocker it never was.
+def test_a_refused_non_regular_entry_inside_a_proven_domain_still_blocks(tmp_path):
+    # A refusal is not a role. `sns.db` is auxiliary as a *name*, but an entry
+    # under an other-directory carries no proven store row, and the exemption is
+    # keyed on a regular file's exact name -- a symlink is never one. So this
+    # stays ROLE_UNKNOWN and blocks: the cheapest false-pass path the store
+    # predicate has to refuse.
     root = _root(tmp_path, directories=("emoticon",))
     (root / "emoticon" / "sns.db").symlink_to(root / "emoticon")
 
     accounting = account_container(root)
 
     assert accounting.rejections
-    assert accounting.meets_requirements()
+    assert GAP_UNKNOWN_DATABASE in accounting.gaps
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
 
 
 # -- Workstream A: identity truth is anchor-scoped, not directory-scoped ------
@@ -1125,7 +1130,7 @@ def test_the_proven_physical_only_set_is_exactly_the_ledger():
 
 
 @pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
-def test_a_proven_domain_direct_regular_unknown_is_visible_and_non_blocking(tmp_path, domain):
+def test_a_proven_domain_direct_regular_unknown_is_visible_and_still_blocks(tmp_path, domain):
     root = _root(tmp_path, directories=(domain,))
     placeholder = root / domain / "a.db"
     placeholder.unlink()
@@ -1143,8 +1148,8 @@ def test_a_proven_domain_direct_regular_unknown_is_visible_and_non_blocking(tmp_
     # It can never become required truth from a physical-only domain.
     assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
     assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 2
-    assert unmet_requirements(accounting) == ()
-    assert accounting.meets_requirements()
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
 
 
 @pytest.mark.parametrize("domain", NEW_PHYSICAL_ONLY)
@@ -1454,10 +1459,11 @@ def test_blocking_counts_split_by_condition_and_boundary_class(tmp_path):
         "blocking_unknown_count": 0, "blocking_candidate_count": 0,
         "blocking_nested_count": 1, "blocking_unreadable_count": 0}
     # a.db (the fixture's own) and neutral_store.db: direct regular-file unknowns,
-    # counted and visible, never blocking. The unentered nested directory is not
-    # exempt: parent provenance cannot prove an unentered subtree.
+    # counted and visible, and -- since neither basename is a proven store -- also
+    # blocking. A proven domain is not a proven directory. The unentered nested
+    # directory blocks too: parent provenance cannot prove an unentered subtree.
     assert _blocking(summary, BOUNDARY_KNOWN_PHYSICAL_ONLY) == {
-        "blocking_unknown_count": 0, "blocking_candidate_count": 0,
+        "blocking_unknown_count": 2, "blocking_candidate_count": 0,
         "blocking_nested_count": 1, "blocking_unreadable_count": 0}
     assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["unknown_count"] == 2
     assert summary[BOUNDARY_KNOWN_PHYSICAL_ONLY]["nested_unexamined_count"] == 1
@@ -1524,16 +1530,16 @@ def test_the_summary_blocking_counts_agree_with_the_single_acceptance_predicate(
     assert accounting.meets_requirements() == (unmet_requirements(accounting) == ())
 
 
-# -- the physical-only exemption is exactly one thing wide --------------------
+# -- the physical-only exemption is one proven store wide ---------------------
 #
-# A known_physical_only parent says "this exact root domain is independently
-# proven outside required message/identity truth, so a direct unknown regular
-# database in it does not by itself imply missing Reader truth". It does NOT say
-# "anything physically below this directory is safe". Only a direct regular-file
-# ROLE_UNKNOWN row is exempt; a message-shaped candidate, an unentered nested
-# directory, a refused/non-regular entry whose condition is unknown or candidate
-# risk, and an unreadable directory all still block. Domain class and row role
-# stay separate axes.
+# Domain knowledge and store knowledge are two different facts. A
+# known_physical_only domain says only that this exact root directory is proven
+# outside required message/identity truth; it does NOT say that any file below it
+# is safe. A store exemption needs its own exact-name proof, so the exemption is
+# keyed on (domain, basename) and a future or unproven name inside a proven
+# domain keeps ROLE_UNKNOWN, stays visible and still blocks. Candidates, unentered
+# nested directories, refused/non-regular entries and unreadable directories block
+# regardless. Domain class and row role stay separate axes: nothing is relabelled.
 
 NARROWING_DOMAINS = ["emoticon", "favorite", "bizchat"]
 
@@ -1544,8 +1550,74 @@ def _domain_root(tmp_path, domain):
     return root
 
 
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_every_proven_store_is_non_blocking_in_its_proven_domain(tmp_path, domain):
+    # The exemption is keyed on the store, not the directory: the exact
+    # basename the provenance actually spells out is the only thing exempt.
+    root = _domain_root(tmp_path, domain)
+    for name in sorted(PROVEN_STORE_NAMES[domain]):
+        (root / domain / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_an_unproven_store_in_a_proven_domain_stays_blocking(tmp_path, domain):
+    # THE key regression: a domain may be proven while the file inside it is not.
+    # An unproven name keeps ROLE_UNKNOWN, stays visible, and still blocks.
+    root = _domain_root(tmp_path, domain)
+    (root / domain / "random_future.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert GAP_UNKNOWN_DATABASE in accounting.gaps
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain,name", [
+    (domain, name)
+    for domain in sorted(PROVEN_STORE_NAMES)
+    for name in ("favorite2.db", "Favorite.db", "favorite_1.db",
+                 "emoticon2.db", "sns_0.db")
+])
+def test_a_look_alike_of_a_proven_store_is_not_exempt(tmp_path, domain, name):
+    # Exact matching only. No prefix, no suffix, no case folding, no inferred
+    # numeric variant -- unless a source spelled that shape itself.
+    root = _domain_root(tmp_path, domain)
+    (root / domain / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_a_proven_store_name_cannot_supply_required_truth(tmp_path, domain):
+    # Store exemption is a coverage decision, never a relabelling: a proven
+    # physical-only store can never satisfy message or identity truth.
+    root = _root(tmp_path, message=(), session=False, contact=False,
+                 directories=(domain,))
+    for name in sorted(PROVEN_STORE_NAMES[domain]):
+        (root / domain / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 0
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 0
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
 @pytest.mark.parametrize("domain", NARROWING_DOMAINS)
-def test_a_direct_regular_file_unknown_stays_non_blocking_in_a_physical_only_domain(
+def test_an_unproven_direct_regular_file_unknown_still_blocks_in_a_proven_domain(
         tmp_path, domain):
     root = _domain_root(tmp_path, domain)
     (root / domain / "neutral_store.db").write_bytes(b"synthetic")
@@ -1553,8 +1625,9 @@ def test_a_direct_regular_file_unknown_stays_non_blocking_in_a_physical_only_dom
     accounting = account_container(root)
 
     assert accounting.role_counts[ROLE_UNKNOWN] == 1
-    assert unmet_requirements(accounting) == ()
-    assert accounting.meets_requirements()
+    assert GAP_UNKNOWN_DATABASE in accounting.gaps
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
 
 
 @pytest.mark.parametrize("domain", NARROWING_DOMAINS)
@@ -1651,13 +1724,18 @@ def test_an_unreadable_physical_only_directory_still_blocks_unchanged(tmp_path, 
 @pytest.mark.parametrize("domain", sorted(PROVEN_PHYSICAL_ONLY))
 def test_every_proven_domain_is_narrowed_the_same_way(tmp_path, domain):
     root = _domain_root(tmp_path, domain)
-    (root / domain / "neutral_store.db").write_bytes(b"synthetic")
+    for name in sorted(container.PROVEN_STORE_NAMES[domain]):
+        (root / domain / name).write_bytes(b"synthetic")
     assert unmet_requirements(account_container(root)) == ()
 
     (root / domain / "message_future.db").write_bytes(b"synthetic")
     assert unmet_requirements(account_container(root)) == (GAP_UNSUPPORTED_MESSAGE_CANDIDATE,)
 
     (root / domain / "message_future.db").unlink()
+    (root / domain / "random_future.db").write_bytes(b"synthetic")
+    assert unmet_requirements(account_container(root)) == (GAP_UNKNOWN_DATABASE,)
+
+    (root / domain / "random_future.db").unlink()
     (root / domain / "deeper").mkdir()
     assert unmet_requirements(account_container(root)) == (DIRECTORY_UNEXAMINED,)
 

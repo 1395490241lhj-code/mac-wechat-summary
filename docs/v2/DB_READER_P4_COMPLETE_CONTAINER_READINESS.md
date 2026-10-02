@@ -787,7 +787,7 @@ it documents message-event records (admitted by a first draft, withdrawn after
 independent review), and `solitaire/` because only one source characterises it.
 The container root is unchanged and still ambiguous. `favorite/` rests on a
 reading of the semantics, the exemption was first per directory while the evidence is per
-file *(narrowed in §15: only a direct regular-file unknown is exempt)*, and a change to the live `message_resource.db` completeness claim needs
+file *(narrowed twice in §15; the evidence is per file, so the exemption is now per exact proven store)*, and a change to the live `message_resource.db` completeness claim needs
 explicit operator sign-off (A10 §18.9).
 
 **One new message shape.** `message/message_resource.db` is classified `media` —
@@ -819,26 +819,44 @@ rounds found eight over-broad exemptions, all corrected RED-first; each exemptio
 sealed policy is required before any of it is claimed to hold against a real
 container, and that rerun needs separate explicit operator authorization.
 
-## 15. Physical-only exemption narrowed by controller review (2026-10-02)
+## 15. Physical-only exemption scoped to proven stores (2026-10-02)
 
 Synthetic and public-policy only; **no real source access**; A10 not run.
 
-The controller kept the exact `message/message_resource.db` live-completeness
-change and the `favorite` / `bizchat` admissions, and **rejected as too broad** the
-directory-wide physical-only exemption of §14, under which a message-shaped
-candidate, a nested directory or a refused entry became non-blocking just because
-its parent is a proven feature domain.
+Operator decisions:
 
-A `known_physical_only` parent now claims only that the domain is proven outside
-required message/identity truth, so **a direct regular-file unknown database in it
-does not by itself imply missing Reader truth**. Candidates, unentered nested
-directories, refused/non-regular entries (symlinks are never followed) whose
-condition is unknown or candidate risk, and unreadable directories block in every
-domain. Domain class and row role stay separate axes. The change is one edit
-inside `_blocking_observations`, so the single predicate and the `blocking_*`
-aggregates still come from the same pass. Full table, RED-L (33 failed / 414
-passed) and verification in A10 gate document §19. `acquisition/tests` 447,
-`wechatdb` 514, `bridge` 272 passed.
+- **A - APPROVED.** Exact `message/message_resource.db` keeps the `media` role,
+  scoped only to the exact `message/` location. This is an intentional live
+  coverage-contract change. `message_resource_<n>.db` and the same basename
+  elsewhere stay unsupported candidates and block.
+- **B - APPROVED.** `favorite/` and `bizchat/` keep their proven domain
+  semantics. Domain admission only; no blanket trust of descendants.
+- **C - REJECTED.** The per-directory blanket exemption is rejected. Both the
+  section 14 directory-wide form and the first section 15 narrowing (any direct
+  regular-file unknown) were broader than the evidence. **Accepted:**
+  provenance-backed store exemption, keyed on the exact `(domain, basename)`
+  pair.
 
-A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**; no historical E-030…E-036
+A `known_physical_only` parent therefore grants **no exemption at all**. Domain
+knowledge and store knowledge are separate facts: knowing `favorite/` is a
+saved-items domain says nothing about a file that appears in it later. Only the
+exact proven stores in the A10 section 19.3 ledger - `emoticon.db`, `sns.db`,
+`favorite.db`, `favorite_fts.db`, `head_image.db`, `hardlink.db`, `bizchat.db`,
+`third_app_icon.db`, each in its own domain - are exempt, and only as direct
+regular files. An unproven or future name such as `random_future.db`, and any
+look-alike (`favorite2.db`, `Favorite.db`, `favorite_1.db`), keeps `ROLE_UNKNOWN`,
+stays visible and blocks. No pattern, prefix, suffix, case-folding or inferred
+numeric variant is admitted. Candidates, unentered nested directories,
+refused/non-regular entries (symlinks are never followed and never receive a
+store exemption) whose condition is unknown or candidate risk, and unreadable
+directories block in every domain. A proven store is non-required and can never
+satisfy `ordinary_message`, `session_identity` or `contact_identity`. Domain
+class and row role stay separate axes.
+
+The change is one exemption predicate inside `_blocking_observations`, so the
+single predicate and the `blocking_*` aggregates still come from the same pass.
+Full table, proven store ledger, RED-M (9 failed / 310 passed) and verification in
+A10 gate document section 19.
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**; no historical E-030...E-036
 evidence was rescored.

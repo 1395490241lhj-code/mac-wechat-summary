@@ -498,8 +498,8 @@ is added: root/other-domain unknowns remain **ambiguous**, not proven
 message-bearing and not proven irrelevant. A genuinely proven physical-only
 unknown or nested domain could be visible/nonblocking under D-040, but that
 category has **no established member in this capsule**. *(Superseded by §19: a
-proven domain exempts only a direct regular-file unknown, never nested
-structure.)* We do not manufacture a
+proven domain exempts nothing by itself; only an independently proven exact store
+is exempt, and never nested structure.)* We do not manufacture a
 passing fixture for an unproven exclusion.
 
 An ordinary shard shape outside `message/` is location-incompatible with current
@@ -1256,8 +1256,8 @@ unproven either way.
 `required_message` unknowns and candidates, every ambiguous domain (including
 the container root and every domain §18 leaves out), every message-shaped name
 outside `message/`, and every nested structure remain blocking. **(§19 narrowed
-this:** a physical-only domain exempts only a direct regular-file unknown, not
-candidates or nested structure.) Physical-only domains never relabel; their
+this:** a physical-only domain exempts only an independently proven exact store
+(§19.3), not an unknown name, a candidate or nested structure.) Physical-only domains never relabel; their
 contents stay visible, keep their honest role, cannot satisfy any required role and cannot strengthen coverage. Exact-match only: no
 prefix, suffix, substring, case-folding or fuzzy matching. Each exemption is
 exactly as wide as its evidence: each proven domain by exact directory name (§18.4), the resource
@@ -1538,14 +1538,16 @@ Mode action was taken.
   `_PHYSICAL_ONLY_DOMAIN_NAMES`.
 - **`bizchat/`** is business-chat group/user metadata; business messages live in
   `biz_message_<n>.db`, handled separately and unchanged.
-- **Evidence is per file, the exemption was per directory — now narrowed (§19).**
+- **Evidence is per file, so the exemption is per store (§19).**
   The sources describe specific databases (`favorite/favorite.db`, ...). S1 itself
   warns WeChat may add a numeric suffix, create a new feature database or move a
   feature into another store. The first version of this pass exempted everything
   below a proven directory; the controller rejected that as too broad and §19
-  limits the exemption to a direct regular-file unknown. What remains is the
-  smaller accepted risk that an unrecognised, non-message-shaped regular file in
-  such a domain does not block.
+  first narrowed it to a direct regular-file unknown, which was still too broad.
+  §19.1 Decision C now limits the exemption to the exact proven stores in the
+  §19.3 ledger. An unrecognised, non-message-shaped regular file in a proven
+  domain blocks again. The residual accepted risk is a proven store that WeChat
+  later changes the meaning of, which only a fresh real rerun can detect.
 - **Anchor scope relies on a narrow name regex.** An unknown regular-file sibling
   beside a proven anchor is non-blocking, while a name matching the message-like
   pattern (`message*.db`, `biz_message*.db`) still blocks as a candidate. A
@@ -1592,88 +1594,155 @@ whether it holds against a real container.
 
 ---
 
-## 19. Controller review of §18 — physical-only exemption narrowed (2026-10-02)
+## 19. Physical-only exemption scoped to proven stores (2026-10-02)
 
 Still synthetic and public-policy only: **no real source was accessed**, no real
-name or count shaped any rule, and A10 was not run.
+name or count shaped any rule, and A10 was not run. Sections 19.1-19.6 below
+supersede the earlier controller-review draft of this section, which had accepted
+a blanket per-directory exemption; that draft's wording is retained verbatim at
+the end as historical record.
 
-### 19.1 Decisions
+### 19.1 Operator decisions
 
-**Approved (kept):**
+**Decision A - APPROVED.** Exact `message/message_resource.db` keeps the `media`
+role, scoped only to the exact `message/` location. Multiple independent public
+sources document the exact path, and its semantics are attachment/resource
+metadata rather than ordinary chat history. This is an **intentional live
+coverage-contract change**. `message_resource_<n>.db` stays an unsupported
+candidate and blocks; the same basename anywhere other than `message/` stays an
+unsupported candidate.
 
-- the live-completeness change for exact `message/message_resource.db` (media,
-  `message/` only; the same basename elsewhere and indexed variants stay
-  candidates) — no revert;
-- the admissions `emoticon`, `sns`, `favorite`, `head_image`, `hardlink`,
-  `bizchat`, `third_app_icon` — `favorite` and `bizchat` explicitly retained.
+**Decision B - APPROVED.** `favorite/` (saved/favourite feature domain) and
+`bizchat/` (business-chat group/user metadata domain) keep their independently
+proven domain semantics - neither is ordinary chat-history truth. This approves
+the *domain* admission only; it authorises no blanket trust of every descendant.
 
-**Rejected as too broad:** the blanket directory-wide exemption. In `9edbbbe`
-membership in a physical-only domain made message-shaped candidates, nested
-directories and some refused/non-regular entries non-blocking.
+**Decision C - REJECTED as too broad.** The per-directory blanket exemption
+("once a root directory is `known_physical_only`, every direct regular-file
+unknown inside it is automatically non-blocking") is rejected. Public evidence is
+primarily about *specific stores and file shapes*, not about every file a domain
+may ever contain. **Accepted replacement:** provenance-backed store exemption - a
+store is exempt only when its exact `(domain, basename)` pair is independently
+proven. Unknown future/unproven names remain visible and fail-closed.
 
-**Accepted replacement:** only a direct regular-file unknown is exempt inside a
-proven physical-only domain. Candidate, nested, unreadable and refused/non-regular
-unknown-or-candidate risk remain fail-closed.
+The two concepts are now separate and are never collapsed:
+
+- **Domain knowledge** - `favorite` is a known non-required feature domain.
+- **Store knowledge** - `favorite/favorite.db` is a provenance-backed store.
+
+Knowing the domain must never imply that all future files in it are safe.
 
 ### 19.2 The invariant
 
-A `known_physical_only` parent claims: *this exact root domain is independently
-proven outside required message/identity truth, so a direct unknown regular
-database in it does not by itself imply missing Reader truth.* It does **not**
-claim that anything physically below it is safe. Domain class and row role stay
-separate axes; the exemption is a verdict decision and never relabels a row.
+A `known_physical_only` parent grants **no exemption of its own**. The exemption
+is keyed on `(domain, exact basename)` membership in `PROVEN_STORE_NAMES`, and
+only for a direct *regular-file* `ROLE_UNKNOWN` row. Domain class and row role
+stay separate axes; the exemption is a verdict decision and never relabels a row.
 
 | Observation inside a proven physical-only domain | Visible | Blocking | Token |
 |---|---|---|---|
-| direct regular-file unknown | yes | **no** | — |
+| proven exact store (`favorite/favorite.db`) | yes | **no** | - |
+| unproven / future regular-file unknown (`random_future.db`) | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
+| look-alike of a proven store (`favorite2.db`, `Favorite.db`, `favorite_1.db`) | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
 | direct regular-file message-shaped candidate (`message_future.db`, `message_0.db`, `biz_message_x.db`) | yes | **yes** | `unsupported_message_candidate` |
 | nested directory (including hidden) | yes | **yes** | `directory_unexamined` |
 | symlink, neutral name | yes | **yes** | `unknown_database` |
 | symlink, message-shaped name | yes | **yes** | `unsupported_message_candidate` |
 | symlink to a directory | yes | **yes** | `unknown_database` |
-| symlink with a recognised non-message name (`media.db`) | yes | no — no message claim, as elsewhere | — |
+| symlink with a recognised non-message name (`media.db`) | yes | no - no message claim, as elsewhere | - |
 | unreadable directory | yes | **yes** (unchanged) | `directory_unexamined` |
 
-Symlinks are never followed. Identity-anchor scope (§17.2) is unchanged and
-follows the same shape: only a regular-file unknown beside a proven anchor is
-exempt.
+Symlinks are never followed and never receive a store exemption - a store
+exemption names a regular file. No recursion is authorised. A proven store is
+non-required and can never satisfy `ordinary_message`, `session_identity` or
+`contact_identity`; a `favorite.db` or `head_image.db` row keeps its truthfully
+unknown or auxiliary role rather than being faked into a passing role.
+Identity-anchor scope (17.2) is unchanged and follows the same shape: only a
+regular-file unknown beside a proven anchor is exempt.
 
-### 19.3 What changed in code
+### 19.3 Proven store ledger
 
-One edit in `acquisition/container_accounting.py`, inside
-`_blocking_observations`: the physical-only check now applies only to
-`ROLE_UNKNOWN` database rows, and the `not outside` guards on nested and refused
-entries were removed. `classify_database_name`, `_MESSAGE_LIKE`, the
-message-resource classification, the domain set, traversal and the bridge are
-untouched. The single predicate is unchanged: `meets_requirements()` ->
-`unmet_requirements()` -> `_blocking_observations` -> `domain_summary`
-`blocking_*` counts, so a physical-only candidate increments
-`blocking_candidate_count`, a physical-only nested directory
-`blocking_nested_count`, a physical-only refused unknown `blocking_unknown_count`,
-and a direct regular-file unknown increments only the plain `unknown_count`.
+Every entry is spelled root-relative by at least two independent public sources
+(section 17.3 and 18 revisions). No pattern, prefix, suffix, substring,
+case-folding or inferred numeric variant is admitted, because no source proved
+one - S1 explicitly warns that WeChat may add a numeric suffix or introduce a new
+feature database, which is exactly the guess this table refuses to become.
 
-### 19.4 RED-first evidence
+| Domain | Exact store basename | Provenance sources | Semantics | Acceptance effect |
+|---|---|---|---|---|
+| `emoticon` | `emoticon.db` | Tier 2 `core/wechat_db.py`; S1, S6 | sticker/emoji CDN md5 index | visible, non-required, non-blocking |
+| `sns` | `sns.db` | S1, S5, S6 | Moments feature data | visible, non-required, non-blocking |
+| `favorite` | `favorite.db` | S1, S5, S6 | saved/favourite items | visible, non-required, non-blocking |
+| `favorite` | `favorite_fts.db` | S1, S5, S6 | full-text index over saved items | visible, non-required, non-blocking |
+| `head_image` | `head_image.db` | S1, S6 | avatar/head-image cache | visible, non-required, non-blocking |
+| `hardlink` | `hardlink.db` | S1, S6 | attachment link index | visible, non-required, non-blocking |
+| `bizchat` | `bizchat.db` | S1, S6 | business-chat group/user metadata | visible, non-required, non-blocking |
+| `third_app_icon` | `third_app_icon.db` | S1, S6 | third-party app icon cache | visible, non-required, non-blocking |
 
-- **RED-L** — 33 failed / 414 passed before the production edit: the updated
-  tests for candidates (3 names x 3 domains), nested and hidden-nested
-  directories, neutral and message-shaped symlinks, symlinks to directories, the
-  per-domain narrowing sweep (all seven domains), and the aggregate expectation.
-  Already green by design: direct unknown stays non-blocking, unreadable still
-  blocks, recognised-name symlinks add nothing.
+Revisions, pinned: S1 GreenBubbles `69f19c7089d7ef011e9ba43d44c6fb4e6e5be98b`;
+S5 wechat_wish_agent `069fdd9448695ed604a789a9921b85614cea2b10`;
+S6 wx-qq-decrypt `f9b3c7f9e69205d45d6ea8bdabe4444fd1f9c4a5`. S1 and S6
+independently spell all seven exact domain/store paths; S5 names most. The
+`hardlink_<n>.db` shape is Tier-2-reader auxiliary, never proven layout, so it is
+**not** an exempt store. Deliberately absent: `chatbot` (sources describe
+chatbot *messages*), `general` (documented tables hold message-event records such
+as recalled message content), `solitaire` (single-source only), `weclaw.db`
+(semantics uncertain).
+
+### 19.4 What changed in code
+
+In `acquisition/container_accounting.py`: `PROVEN_STORE_NAMES` is the new
+`(domain -> exact basenames)` table, and `is_proven_physical_store()` is the only
+exemption predicate. `_blocking_observations` now exempts an unknown row only via
+that predicate instead of via domain membership, and the now-unused
+`_is_outside_reader_boundary()` helper was deleted. `classify_database_name`,
+`_MESSAGE_LIKE`, the message-resource classification, the domain set, traversal
+and the bridge are untouched. The single predicate is unchanged:
+`meets_requirements()` -> `unmet_requirements()` -> `_blocking_observations` ->
+`domain_summary` `blocking_*` counts, so a blocking physical-only unknown
+increments `blocking_unknown_count`, while an exempt proven store increments only
+the plain `unknown_count`.
+
+### 19.5 RED-first evidence
+
+- **RED-L** (earlier section 19 narrowing, now historical) - 33 failed / 414 passed
+  before that production edit.
+- **RED-M** (Decision C) - with the new tests in place and the production
+  exemption still keyed on domain membership, 9 failed / 310 passed: the
+  per-domain narrowing sweep across all seven proven domains, the aggregate
+  blocking-split expectation, and the refused non-regular entry inside a proven
+  domain. The Decision C tests - every proven store non-blocking, an unproven
+  store blocking in each proven domain, look-alikes blocking, and a proven store
+  unable to supply required truth - were authored against the committed blanket
+  predicate, so they genuinely failed first.
 - Tests that encoded the broad exemption were rewritten, not worked around: the
-  old accounts-and-keeps-roles test, the nested-without-blocking tests, the
-  proven-domain acceptance parametrization and the blocking-split expectations.
-
-### 19.5 Verification
-
-`acquisition/tests` 447 passed, `wechatdb` 514 passed, `bridge` 272 passed; the
-aggregate-versus-verdict agreement sweep gained six physical-only builds (candidate,
-nested-hidden, symlinks, unknown) and agrees on all. The `message_resource.db`
-inventory and bridge tests are unchanged and green.
+  accounts-and-keeps-roles test, the proven-domain acceptance parametrizations,
+  the aggregate blocking-count expectations, and the refused symlink case - the
+  last of which now asserts blocking, because a symlink is never a regular-file
+  store.
 
 ### 19.6 Status
 
-A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. E-030…E-036 real evidence
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. E-030...E-036 real evidence
 is not rescored. A fresh real structural rerun under this policy, with separate
 explicit authorization, is still the only way to learn how it behaves on a real
 container.
+
+---
+
+### 19.H Superseded controller-review draft (historical record)
+
+The earlier draft of this section concluded:
+
+> **Rejected as too broad:** the blanket directory-wide exemption. In `9edbbbe`
+> membership in a physical-only domain made message-shaped candidates, nested
+> directories and some refused/non-regular entries non-blocking.
+>
+> **Accepted replacement:** only a direct regular-file unknown is exempt inside a
+> proven physical-only domain. Candidate, nested, unreadable and refused/non-regular
+> unknown-or-candidate risk remain fail-closed.
+
+That replacement was itself too broad and is superseded by 19.1 Decision C: a
+proven domain exempts nothing by itself, and only an independently proven exact
+store is exempt. Its A10 / P4-A / P4-B status lines are unchanged and still
+accurate.
