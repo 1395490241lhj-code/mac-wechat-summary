@@ -2165,3 +2165,186 @@ This is the **final real rerun under the current sealed policy**. Further real
 A10 access is not authorized and should not be attempted until independent
 provenance or synthetic work produces a materially new, sealed policy. Do not
 schedule another real rerun on the strength of this result.
+
+## 22. Residual public-provenance census — search exhausted, no threshold crossed (2026-10-02)
+
+### 22.1 Designation and boundary
+
+This phase is **research only**. No production code, test or policy changed, no
+real WeChat source was opened, listed, statted, searched or hashed, and no real
+A10 was rerun. The only inputs were public repositories and public technical
+documentation, read at pinned revisions. Private source names were never used as
+search terms and appear nowhere below.
+
+The question was narrow: can **public** provenance alone close, or materially
+shrink, the residual blockers recorded in section 21.10 without knowing the
+private identities behind them? Per section 18.3 a store may only be admitted
+when **both** parts hold — exact root-relative layout in two independent sources,
+**and** semantics described by two independent sources with none describing
+message rows.
+
+### 22.2 Sources added in this phase
+
+| ID | Source | Revision | Date | License | Evidence used |
+|---|---|---|---|---|---|
+| S7 | `https://github.com/cloudy064/wehook` | `8d5f93d702cbc0839dc48fdae21f62714e27acfd` | 2026-05-26 | none — facts only | `docs/weixin4/wcdb/`: per-database schema docs with observed table names and row counts (`general.md`, `solitaire.md`, `media.md`, `favorite.md`, `wcdb/README.md`) |
+| S8 | `https://github.com/BIBOYANG425/wechat-chat-history-mac` | `1afdd2db2a422b4965277b9dd1a750d57fbaf381` | 2026-04-17 | Apache-2.0 | `docs/WECHAT_DB_STRUCTURE.md`: macOS `db_storage` tree, shard-assignment findings, `Msg_*`/`SessionTable` schema |
+| S9 | `https://github.com/wenerme/wener` | `3cbc4e0f9bf8c4eb49dc8e52f3f278f77b5de1d2` | 2026-10-02 | CC BY-SA 4.0 | `notes/platform/wechat/wechat-inside.md`: account-root layout, `db_storage` tree, per-database role inferences |
+| S10 | `https://github.com/Ray0612/WeChat-v4-export-research` | `e28a43391c4c64900f4d2e304c950896fc9c07bf` | 2026-06-11 | none — facts only | `research/reports/M80_DB_Verification_Guide.md`: Windows `message/` listing including `weclaw.db` |
+| S11 | `https://github.com/jackwener/wx-cli-again` | `077a54cbfe679bda963cd038d8440422907fc797` | 2026-09-14 | Apache-2.0 | `src/scanner/mod.rs`: `migrate/` side-path ranking, `solitaire/solitaire.db` asserted non-critical |
+| S12 | `https://github.com/xuchengsheng/wx-dump-4j` | `b44cba21f79426054af29b98ac795dadfb5e4c4f` | 2025-03-24 | MIT | searched for layout evidence; **contributed no admissible fact** |
+
+The six section 18 sources were re-read at their already-pinned revisions; none was
+silently moved to `HEAD`/`main`. Two further candidates from this search —
+`MemoTrace/memotrace.github.io` @ `309a494dc496864c770949c3f3acfa8381a75c01` and
+the `CrackerCat/simpread` repost @ `4934fc17838c7614ad27f166570a02a246bde756` — were
+examined and **rejected as corroboration**: the repost explicitly attributes the
+original to `blog.lc044.love/post/13` and `LC044/WeChatMsg`, so both belong to the
+single MemoTrace/司小远 (lc044) lineage and are one source, not two.
+
+Seven further decrypt-tool repositories surfaced by the same search
+(`HackerDev-Felix/WechatDecrypt`, `328336690/wechat-decrypt`, `tzwkb/wechat-decrypt`,
+`lyrcsjy/wechat-decrypt`, `H3CoF6/wechat-decrypt-rs`, `dapingzui/wechat-decrypt`,
+`acidvaccines/wechat-decrypt`) were also examined and contributed nothing.
+`328336690`, `dapingzui` and `acidvaccines` ship **byte-identical** `decrypt_db.py`
+and `find_all_keys.py`, so they are one implementation at three URLs, not three
+observations. None of the seven mentions `weclaw`, `message_revoke`, `newtips`,
+`solitaire` or any `db_storage` store inventory; `HackerDev-Felix/WechatDecrypt`
+is a single `wechat.cpp` with no layout documentation at all.
+
+### 22.3 Message-domain census (`db_storage/message/`)
+
+| Shape | Purpose | Sources | Independence | Confidence | Policy candidate? |
+|---|---|---|---|---|---|
+| `message/message_<n>.db` | ordinary chat message shards | S1, S2, S6, S8, S9, S7 | S8/S9/S7 independent of the section 18 lineage | STRONG | already `ordinary_message` |
+| `message/biz_message_<n>.db` | official/business account messages | S1, S2, S3, S5, S6, S9, S7 | as above | STRONG | already `business_message` (D-040 excluded) |
+| `message/media_<n>.db` | media **index/metadata** (S1, S2, S3, S6, S9) vs **raw SILK voice blobs** (S7 `VoiceInfo`, 62 MB) | S1/S2/S3/S6/S9 vs S7 | **conflicting** | MODERATE layout, WEAK semantics | **no** |
+| `message/message_fts.db` | full-text search index | S1, S5, S6, S7, S8 | independent | STRONG | already `search_index` |
+| `message/message_resource.db` | message-attachment resource index | S1, S2, S3, S6, S7, S8 | independent | STRONG | already `media` (section 18.6) |
+| `message/weclaw.db` | S1 "WeChat internal state... no usable content tables"; S6 "消息资源/附属"; S9 "Windows 观察到，可能与客户端辅助/组件有关" (explicitly a guess); S10 lists the name with **no semantics** | S1, S6, S9, S10 | S1 independent of the lineage; S6 lineage-vendored; S9/S10 separate authors | MODERATE layout, **WEAK semantics** | **no** |
+| `message/message_revoke.db` | documented as a `message/`-domain store **only** by the MemoTrace/LC044 lineage | single lineage | **none independent** | WEAK | **no** |
+| `message/*.kvdb` | direct non-`.db` message stores | S1, S9 | independent | MODERATE | **no** |
+
+The single highest-value public candidate, `message_revoke.db`, did **not** reach
+threshold. It is documented in exactly one lineage (MemoTrace/LC044, plus its own
+repost), with no schema, no table names, no row semantics and no second
+independent observation. Section 22.6 explains why adopting it would also be
+unsafe even if a second source appeared tomorrow.
+
+### 22.4 Root-domain census (`db_storage/`)
+
+| Domain | Purpose | Sources | Independence | Confidence | Policy candidate? |
+|---|---|---|---|---|---|
+| `emoticon/`, `sns/`, `favorite/`, `head_image/`, `hardlink/`, `bizchat/`, `third_app_icon/` | as admitted in section 18.4 / 19.3 | section 18 ledger, re-confirmed by S7, S8, S9 | independent | STRONG | already `known_physical_only` |
+| `solitaire/solitaire.db` | **group chat message content**: `Solitaire_<md5(group_username)>`, `SolitaireFold_<md5>`, `SolitaireValid_<md5>` — per-group 接龙 threads, each entry holding a participant's submitted text (S7, with observed row counts) | S1, S6, S7, S9, S11 | S7 is a genuinely independent reverse-engineering author; S1 independent; S6 lineage-vendored | STRONG layout, STRONG semantics | **no — and now affirmatively excluded** |
+| `general/general.db` | misc business data; S7 enumerates `FMessageTable`, `revokemessage`, `new_tips`, `ilink_voip`, `teenager_apply_access_agree_info`, `redEnvelopeTable`, `transferTable` | S1, S5, S6, S7, S9 | S7 independent | STRONG layout, **message-event semantics confirmed** | **no** — remains `ambiguous`, correctly |
+| `chatbot/chatbot_message.db` | chatbot sessions and chatbot **messages** | S1, S6 | as section 18.4 | message-bearing | **no** — remains `ambiguous` |
+| `migrate/` | migration side-path stores, e.g. `migrate/unspportmsg.db`; S11 ranks it explicitly non-critical and below every message store | S11 only | single source | WEAK | **no** |
+| `MMKV/` | key-value component store inside `db_storage` | S9 only | single source | WEAK (existence) | **no** |
+| `biz/biz.db`, `newtips/newtips.db`, `ilinkvoip/ilinkvoip.db`, `tencentpay/tencentpay.db`, `wcfinder/wcfinder.db`, `websearch/websearch.db`, `teenager/teenager.db`, `contact/fmessage_new.db`, `contact/wa_contact_new.db` | per the MemoTrace/LC044 tree only | single lineage | **none independent** | WEAK | **no** |
+
+Every domain absent from the current ledger that any source names is accounted
+for above. The census is **complete against the searched public corpus**; the
+corpus itself, not the census, is the limit.
+
+### 22.5 Nested-layout census
+
+| Parent | Nested shape | Purpose | Sources | Confidence | Policy candidate? |
+|---|---|---|---|---|---|
+| `db_storage/` | `MMKV/` | component key-value store | S9 | WEAK (single source, no contents) | **no** |
+| `db_storage/favorite/` | *(none — media lives in the sibling `business/favorite/{data,mid,thumb,temp}/`, outside `db_storage`)* | n/a | S7 | STRONG | n/a |
+| identity domains (`session/`, `contact/`) | **no standard nested subtree is documented by any source** | n/a | — | — | **no** |
+
+**No source establishes any standard nested subtree inside `db_storage`.** This is
+the substantive negative result of the phase: it means the two residual `nested`
+blockers in section 21.10 **cannot** be preemptively exempted by any currently
+available public provenance, and section 17.2's anchor-scope contract must stand
+unchanged. S7's `business/favorite/` tree is the closest public analogue and it is
+instructive precisely because it sits **outside** `db_storage` — a nested blocker
+under `required_identity` or `ambiguous` is therefore not explained by it.
+
+### 22.6 Why the remaining candidates cannot be admitted
+
+- **Single-lineage evidence.** `message_revoke.db` and the nine root domains in
+  section 22.4 rest on MemoTrace/LC044 alone. The SimpRead repost is the same
+  article. The seven decrypt-tool forks are one implementation, or none at all.
+- **Conflicting semantics.** `media_<n>.db` is an index in five sources and a raw
+  voice-blob store in S7. `weclaw.db` is "internal state", "资源/附属" and an
+  admitted guess. Where sources disagree, section 18.3 part 2 is not satisfied.
+- **A second source is not self-sufficient.** Even if a future independent source
+  confirmed `message/message_revoke.db` exists, the current policy would classify
+  it `unsupported_message_candidate` and keep blocking — correctly, because a
+  *revoke* store plausibly holds recalled-message content. Existence is cheap;
+  semantics are the gate.
+- **Layout presence never implies a role.** Several candidates are documented as
+  bare names with no table or row description (S10's `weclaw.db`, S12 with nothing
+  at all). A name is not a semantic characterisation.
+
+### 22.7 Solitaire is now affirmatively excluded, not merely unproven
+
+Section 18.4 kept `solitaire/` `ambiguous` because only one source characterised
+it. S7 changes the *sign* of that entry. S7 documents three table families keyed
+by `md5(group_username)` — the same md5 convention as `Msg_*` — where
+`SolitaireValid_<md5>` holds 发言人 (speaker) and 接龙文字 (submitted text) per
+entry, with observed per-group row counts (for example 9 valid entries across 3
+groups). S9 independently lists `solitaire/` 接龙 under a group-chat feature.
+
+This is **user-authored chat content stored in a group**, which is exactly the
+class section 18.3 part 2 excludes. Two independent sources now establish both
+layout and message-bearing semantics, so `solitaire/` does not merely fail to
+qualify — it **fails affirmatively** and must stay `ambiguous` and fail-closed.
+Recording this is the phase's one durable semantic gain: a future capsule can no
+longer "discover" `solitaire/` and propose it as a proven physical-only domain.
+
+`media_<n>.db` is the mirror case: S7's `VoiceInfo` blob store contradicts the
+index reading, so the store stays unadmitted in **both** directions. Its current
+`media` role is unchanged — no source shows it carrying message rows, and S7's
+objection concerns kind (index versus blob), not message-bearingness.
+
+### 22.8 `.kvdb` cannot be a message blocker
+
+S1 and S9 both document direct `message_*.kvdb` / `biz_message_*.kvdb` files. They
+cannot explain any section 21.10 blocker: `_account_directory` in
+`acquisition/container_accounting.py` drops non-candidate regular files outside a
+proven physical-only domain as sidecar noise before any role is assigned, so a
+`.kvdb` never becomes a database row, a `ROLE_UNKNOWN`, or a blocker. Recorded so
+a future reader does not re-investigate it.
+
+### 22.9 `MMKV/` is a real gap this phase cannot close
+
+S9's `db_storage/` tree lists `MMKV/` as a direct subdirectory of the root. Under
+section 17.2 an unentered nested directory blocks in every domain, so if a real
+container has `db_storage/MMKV/`, it is a `nested` blocker — plausibly one of the
+two in section 21.10. But `MMKV` is documented by **one** source, with no contents,
+no tables and no second observation, and GitHub code search for it returned
+nothing independent. A single unreplicated name cannot be turned into a bounded
+exemption. This is the most concrete lead for future work, and it is explicitly
+**not** acted on.
+
+### 22.10 Verdict
+
+**A10 residual provenance census — NO MATERIAL POLICY CHANGE JUSTIFIED.**
+
+No candidate clears the section 18.3 two-part rule. Nothing found would alter A10
+acceptance; the highest-value lead (`message_revoke.db`) is single-lineage and
+semantically uncharacterised, and the most novel finding (`solitaire/`) *removes*
+an option rather than opening one. Nothing is implemented; no mapping is proposed
+for adoption.
+
+### 22.11 Recommended state
+
+- **Freeze P4-A at 9/10** and stop active A10 work until genuinely new
+  *independent* public provenance appears — a second non-lineage source
+  characterising `message_revoke.db`, or any replicated documentation of a
+  `db_storage` nested subtree.
+- **Do not run another real A10** under the current policy. It is justified only
+  after a materially different sealed policy exists.
+- Do not open a synthetic implementation capsule: there is nothing to implement.
+
+### 22.12 Verification performed
+
+No production code, test or policy changed, so no suite was rerun. `git diff
+--check` and the populated staged check were run for this documentation commit.
+No real source, credential, Keychain, decryption, process, WeChat or Database Mode
+action was taken; the operator-designated container was never accessed, listed,
+statted, searched or hashed, and no private identifier entered this document.
