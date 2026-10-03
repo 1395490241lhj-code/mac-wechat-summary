@@ -2013,3 +2013,155 @@ evidence is unchanged and is not rescored by this correction. Whether the
 companion rule behaves correctly against a real container is untested: only one
 fresh real structural rerun, under separate explicit operator authorization,
 can answer that.
+
+## 21. Final fresh real structural rerun under the sealed companion policy (2026-10-02)
+
+This is a **new distinct evidence event after
+`4d6f8a8081d3751495e205295b0a93c93af335da`**. No prior real result is
+rewritten, rescored or retroactively claimed to have run under this policy.
+Sections 3, 12, 14, 16, 18 and 20 remain exactly as recorded.
+
+### 21.1 Designation and execution
+
+The operator explicitly designated the exact container root to be used. The
+designation was a single explicit path; it was not discovered, globbed,
+searched or substituted, and no alternative root was tried. The designated
+path is deliberately not reproduced here.
+
+- Real invocation count of `account_container()`: **exactly 1**.
+- A second attempt was refused by an execution-local marker **before** the
+  container was invoked, so the one-invocation guard is behavioural evidence,
+  not a promise.
+- The single acceptance predicate was the sealed one; there was no wrapper
+  override and no second truth source.
+
+### 21.2 Source integrity
+
+The source was hashed immediately before and immediately after the run.
+
+- source pre/post unchanged: **YES**
+- no mutation, restore, normalisation, staging or write of any kind
+
+### 21.3 Acquisition boundary
+
+Confirmed **NO** for all of: discovery or substitution of the designated root,
+recursion, content access, credential retrieval, Keychain access, bootstrap,
+decryption, snapshot, LLDB, Frida, process attach, re-signing, any WeChat
+interaction, any mutation of the source, and persistent enrollment.
+
+### 21.4 Machine acceptance
+
+- `meets_requirements()`: **False**
+- Evidence tokens and direct predicate tokens were identical.
+- Exact unmet token list (fixed vocabulary, aggregate):
+  `directory_unexamined`, `unknown_database`
+- No wrapper override. No required-role failure. No
+  unsupported-message-candidate token.
+
+**A10 remains UNMET.**
+
+### 21.5 Accounting
+
+| Quantity | Value |
+|---|---:|
+| DB rows / unique DB keys | 27 / 27 |
+| Total accounting keys / unique | 45 / 45 |
+| — DB | 27 |
+| — nested rejections | 2 |
+| — companions | 16 |
+| Duplicates | 0 |
+| Examined directories | 15 |
+| `accounts_for(complete_set)` | True |
+
+Required roles:
+
+| Role | Status | Count |
+|---|---|---:|
+| ordinary message | present | 7 |
+| session identity | present | 1 |
+| contact identity | present | 1 |
+
+### 21.6 Boundary summary
+
+| Boundary | DB | Unknown | Candidate | Nested | Unreadable | Blocking unknown | Blocking candidate | Blocking nested | Blocking unreadable | Companions |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| required_message | 12 | 1 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 |
+| required_identity | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 1 | 0 | 0 |
+| known_physical_only | 8 | 7 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 16 |
+| ambiguous | 4 | 4 | 0 | 1 | 0 | 4 | 0 | 1 | 0 | 0 |
+
+- Blocking totals: **5** unknown, **2** nested, **0** candidate.
+- Companion total: **16**, all inside `known_physical_only`.
+- Unknown balance: **13** = 5 blocking + 8 exempt.
+- The candidate blocker present under earlier policies **disappeared** under
+  the sealed companion policy.
+- All 16 companions were correctly excluded from DB rows and from role
+  assignment. Under the superseded `9507592` policy the same 16 artifacts
+  would instead have contributed 16 additional false unknown blockers.
+
+### 21.7 Role summary (aggregate)
+
+| Role | Count |
+|---|---:|
+| ordinary_message | 7 |
+| unknown | 13 |
+| media | 2 |
+| auxiliary | 1 |
+| business_message | 1 |
+| search_index | 1 |
+| session_identity | 1 |
+| contact_identity | 1 |
+
+### 21.8 Companion summary
+
+- total `companion_count`: **16**
+- by boundary class: `required_message` 0, `required_identity` 0,
+  `known_physical_only` 16, `ambiguous` 0
+
+### 21.9 Independent review
+
+A read-only review of the sealed implementation and the sanitized receipt was
+performed after the run. The reviewer did **not** invoke the real container a
+second time.
+
+- Result: **no Critical and no Important finding.**
+- Confirmed: exact-source authorization honoured; no discovery or
+  substitution; exactly one real invocation; source-unchanged guard valid;
+  store-level exemption rather than a domain blanket exemption; unproven
+  stores still block; the candidate class still blocks; nested rejections
+  still block; anchor scope preserved; the exact-resource rule preserved;
+  companions isolated from DB rows and roles; one acceptance predicate only;
+  `blocking_*` totals agree with the machine unmet tokens; no source mutation.
+- Privacy scan of the receipt found no real path, filename, account identifier
+  or digest. Only fixed vocabulary tokens such as `message_directory` and
+  `business_message_unread` matched.
+- No execution defect was found, so the production-fix path was not triggered.
+
+### 21.10 Residual blockers (aggregate only)
+
+Blocking classes remaining: **5 unknown** and **2 nested**, spread across the
+`required_message`, `required_identity` and `ambiguous` boundary classes. No
+candidate blocker and no unreadable blocker remain. No file, store or domain is
+identified here; resolving these requires independent provenance work, not
+another run under the current policy.
+
+### 21.11 Tests
+
+No production code changed in this phase, so only the synthetic suites were
+run:
+
+- focused container accounting + database inventory: **425 passed**
+- full `acquisition`: **575 passed**
+- `git diff --check`: clean
+- repository was production-clean immediately afterwards
+
+### 21.12 Status
+
+- **A10 UNMET**
+- **P4-A 9/10**
+- **P4-B MET 4/4**
+
+This is the **final real rerun under the current sealed policy**. Further real
+A10 access is not authorized and should not be attempted until independent
+provenance or synthetic work produces a materially new, sealed policy. Do not
+schedule another real rerun on the strength of this result.
