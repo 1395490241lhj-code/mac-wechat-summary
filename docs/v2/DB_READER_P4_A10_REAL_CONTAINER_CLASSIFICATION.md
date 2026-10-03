@@ -1651,7 +1651,8 @@ stay separate axes; the exemption is a verdict decision and never relabels a row
 | symlink to a directory | yes | **yes** | `unknown_database` |
 | symlink with a recognised non-message name (`media.db`) | yes | **yes** in a proven domain (unproven store); no elsewhere | `unknown_database` |
 | unproven basename the generic ledger recognises elsewhere (`sns.db`, `chatbot.db`, `media.db`, `message_fts.db`, `session.db`) inside a proven domain | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
-| non-`.db` regular file or proven-store sidecar (`favorite.db.bak`, `favorite.db-wal`, `favorite.db-journal`) inside a proven domain | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
+| non-`.db` regular file (`favorite.db.bak`, `favorite.db.wal`) inside a proven domain | yes, `ROLE_UNKNOWN` | **yes** | `unknown_database` |
+| proven-store sidecar (`favorite.db-wal`, `favorite.db-shm`, `favorite.db-journal`) inside a proven domain | yes, companion row | **no** (see 20) | - |
 | unreadable directory | yes | **yes** (unchanged) | `directory_unexamined` |
 
 Symlinks are never followed and never receive a store exemption - a store
@@ -1806,6 +1807,12 @@ staged check passed. Counts recorded in earlier sections are historical and are
 left as they stood. No real source, credential, Keychain, decryption, process,
 WeChat or Database Mode action was taken.
 
+The row for proven-store sidecars in the 19.2 table and the `-wal`/`-journal`
+examples in 19.7 and 19.8 are **superseded by section 20**. The RED-N failures
+they describe were real and are kept as history; the conclusion drawn from them
+-- that a standard SQLite companion of a proven store is an unproven store -- is
+withdrawn.
+
 ---
 
 ### 19.H Superseded controller-review draft (historical record)
@@ -1824,3 +1831,185 @@ That replacement was itself too broad and is superseded by 19.1 Decision C: a
 proven domain exempts nothing by itself, and only an independently proven exact
 store is exempt. Its A10 / P4-A / P4-B status lines are unchanged and still
 accurate.
+
+## 20. SQLite companion semantics reconciled (2026-10-02)
+
+Still synthetic and policy-only: **no real source was accessed, listed, statted
+or searched**, no real name or count shaped any rule, and A10 was not run. This
+section supersedes only the sidecar rows of 19.2 / 19.7 / 19.8. Every historical
+real result, count and verdict in this document stands unchanged.
+
+### 20.1 The defect in the 9507592 policy
+
+`9507592` was over-conservative for exactly one class of name. It made every
+non-hidden, non-`.db` regular file inside a proven physical-only domain a
+blocking `ROLE_UNKNOWN`, and its own RED-N bullet lists
+`favorite.db-wal` and `favorite.db-journal` among the names it expected to block.
+
+That contradicts committed architecture this same repository already relies on:
+
+- `database_inventory._is_candidate()` accepts only a name ending in `.db`,
+  documented as the choice that "excludes the -wal and -shm sidecars, which
+  belong to a database rather than standing for one".
+- `BoundedSourceRefresher` attaches `name + "-wal"` and `name + "-shm"` to the
+  main database's `EncryptedSource`.
+- `EncryptedSource` / `EncryptedSnapshot` carry wal/shm as companion paths on
+  **one** source rather than as independent stores.
+- `bridge/database_bootstrap.py` forms the same two names.
+
+So the reader already knows a sidecar belongs to a database. Physical-only
+accounting contradicted it and made `favorite.db-wal` read as an independent
+unproven store inside a domain the same table proves. Fail-closed governs
+*uncertain* Reader truth; an artifact already known to belong to a known
+database is not uncertain. Conservatism that blocks a fact the project has
+already established is a false blocker, not safety.
+
+### 20.2 The corrected invariant
+
+A standard SQLite companion of an exact provenance-backed store is a companion
+of that database, not an independent store.
+
+Recognition is exact on all three axes, with a closed three-suffix set
+(`PROVEN_STORE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")`):
+
+    <exact proven store basename> + "-wal"
+    <exact proven store basename> + "-shm"
+    <exact proven store basename> + "-journal"
+
+The suffix is appended to the **complete** database basename. The companion of
+`favorite.db` is `favorite.db-wal`, never `favorite-wal`.
+
+Such a companion is:
+
+- structurally accounted, with the same exactly-once key as any other row;
+- given **no** database role -- not `ROLE_AUXILIARY`, not `ROLE_MEDIA`, not
+  `ROLE_UNKNOWN`, because all three are false claims about a file that exists
+  only to serve another database;
+- never entering `_blocking_observations`, so it satisfies no required role and
+  cannot produce `unknown_database`;
+- strengthening no coverage and adding no `domain_summary` database or role
+  count.
+
+No file is opened and no content is read; this stays a name-shape decision.
+
+| Observation | DB role? | Visible / accounted? | Blocking? |
+|---|---|---|---|
+| `favorite/favorite.db` (proven store) | truthful existing role, unchanged | yes | no |
+| `favorite/favorite.db-wal` | no role | yes, companion row | **no** |
+| `favorite/favorite.db-shm` | no role | yes, companion row | **no** |
+| `favorite/favorite.db-journal` | no role | yes, companion row | **no** |
+| `favorite/favorite.db.bak` | `ROLE_UNKNOWN` | yes | **yes** |
+| `favorite/favorite.db.wal` (dot variant) | `ROLE_UNKNOWN` | yes | **yes** |
+| `favorite/future.db-wal` (unproven store) | `ROLE_UNKNOWN` | yes | **yes** |
+
+### 20.3 What the correction explicitly refuses
+
+Matching is exact. No fuzzy, prefix, case-folding, recursive-stripping or
+inferred-variant matching, and no suffix beyond the three SQLite itself
+appends. All of these remain unproven and blocking inside a proven domain:
+
+- `favorite.db.wal`, `favorite.db.shm` -- dot variants, not SQLite sidecars;
+- `favorite-wal`, `favorite-shm`, `favorite-journal` -- suffix on a truncated
+  basename;
+- `favorite.db-wal-wal` -- a sidecar of a sidecar;
+- `favorite.db-wal.bak`, `favorite.db.backup` -- a backup, not a companion;
+- `Favorite.db-wal`, `favorite_1.db-wal` -- look-alikes, no case-folding and no
+  inferred numeric variant;
+- `future.db-wal` -- see below.
+
+**A sidecar of an unproven store inherits no exemption.** `future.db-wal` is
+formed from `future.db`, which is not in `PROVEN_STORE_NAMES["favorite"]`, so
+both the store and its companion remain visible blocking unknowns. Companion
+naming must never become a way to bypass store provenance: exempting the
+companion of an unproven store would silently drop the main database from
+accounting while the bytes it names still sit there.
+
+`ContainerSidecar.__post_init__` re-validates every row against
+`is_proven_store_sidecar`, so a caller cannot hand the accounting a row that
+merely claims to be a companion. Verified directly: `ContainerSidecar(...,
+"future.db-wal", "favorite")`, `"favorite-wal"` and `"sns.db-wal"` are all
+refused with `ValueError`.
+
+Symlink and non-regular behaviour is unchanged and verified independently of the
+name: a `favorite.db-wal` **symlink**, a `favorite.db-shm` symlink and a real
+`favorite.db-journal` **directory** all produce `not_a_regular_file` /
+`nested_directory` rejections, no companion row, and still block. Only a plain
+regular file can be a companion, exactly as only a plain regular file can be a
+proven store. Hidden files remain ignorable everywhere.
+
+Outside a proven physical-only domain nothing changes at all: message-source
+semantics are preserved untouched, so `message/message_0.db-wal` and
+`message/message_0.db-shm` remain non-independent, out of the database
+inventory, and are not represented as companions here. This section
+reconciles physical-only accounting with the already-sealed global sidecar
+model; it does not redesign message acquisition.
+
+### 20.4 Representation and evidence
+
+The minimal representation is a dedicated row type, `ContainerSidecar`, plus a
+`ContainerAccounting.sidecars` tuple. A companion is deliberately *not* a role,
+so it gets its own type instead of being squeezed into `ContainerDatabase` with
+a misleading role token.
+
+`accounts_for()` counts companions in the exactly-once key set, so total
+accounting stays true in both directions -- dropping them would leave real bytes
+unaccounted inside a domain whose whole exemption rests on accounting for
+everything it holds. Verified: `accounts_for` over the complete row set is
+`True`; omitting sidecar keys makes it `False`.
+
+Aggregate evidence stays name-free and path-free. `evidence()` adds a
+top-level `companion_count` and each `domain_summary` boundary class gains a
+`companion_count`; the count is deliberately absent from `database_count` and
+`role_counts`, since a companion adds no coverage and no role. A fresh real A10
+can therefore say "known physical-only companions: N" without identifying any
+of them. Verified: neither `favorite`, `db-wal`, `db-shm`, `db-journal` nor the
+root path appears anywhere in `evidence()` or `domain_summary`.
+
+The single acceptance truth is preserved with no wrapper override:
+`meets_requirements()` -> `unmet_requirements()` -> `_blocking_observations()`.
+Sidecars never enter `_blocking_observations` and never satisfy a required
+role, so `favorite/favorite.db` + `favorite/favorite.db-wal` alone yields only
+`required_role_missing` and never `unknown_database`, while
+`favorite/future.db` + `favorite/future.db-wal` yields both
+`unknown_database` and `required_role_missing`.
+
+### 20.5 Test correction and RED-first evidence
+
+The pre-existing test `test_a_proven_store_sidecar_stays_a_blocking_unknown`
+built its name with the equivalent of `"favorite.db".replace(".db", "-wal")`,
+which yields `favorite-wal` -- **not** `favorite.db-wal`. It therefore never
+tested the SQLite WAL naming convention at all, and its passing result was
+evidence about a name SQLite never produces. The defect was corrected
+RED-first: the wrong-naming test was removed and replaced with explicit
+companion tests for all three suffixes, including a direct assertion that
+documents the `favorite-wal` / `favorite.db-wal` distinction. The production
+edit came after the behavioural RED, not before it.
+
+- **RED-O** - against unmodified `9507592` production: **52 failed / 339
+  passed**. The failures were behavioural, caused by the missing structural
+  companion handling (`ContainerAccounting.sidecars` did not exist), not a
+  collection failure. No production code had been edited when that RED was
+  recorded. (An earlier attempt that failed at collection -- because the tests
+  imported a not-yet-defined production constant -- was discarded and is not
+  counted as RED evidence.)
+- Several RED expectations were corrected during GREEN because they
+  contradicted the sealed architecture rather than the code under test: a
+  proven store keeps its truthful generic role (`sns.db` is auxiliary,
+  `favorite.db` is unknown-but-exempt) and the verdict, not the role count,
+  proves non-blocking; `future.db-wal` belongs to an unproven store so it must
+  remain a second visible blocking unknown; `accounts_for()` expects the
+  complete accounted key set; and message-side sidecars stay ignored rather
+  than becoming `ContainerSidecar` rows.
+
+Final synthetic counts: `acquisition/tests/test_container_accounting.py` 391
+passed, `test_database_inventory.py` 34 passed, `acquisition` 575 passed,
+`wechatdb` 514 passed, `bridge` 272 passed. No real source, credential,
+Keychain, decryption, process, WeChat or Database Mode action was taken.
+
+### 20.6 Status
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. All historical real A10
+evidence is unchanged and is not rescored by this correction. Whether the
+companion rule behaves correctly against a real container is untested: only one
+fresh real structural rerun, under separate explicit operator authorization,
+can answer that.

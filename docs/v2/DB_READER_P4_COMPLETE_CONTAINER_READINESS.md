@@ -887,3 +887,70 @@ database inventory 34 passed, `acquisition` 520 passed, `wechatdb` 514 passed,
 
 A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**; no historical E-030...E-036
 evidence was rescored.
+
+## 16. SQLite companion semantics reconciled (2026-10-02)
+
+Synthetic and policy-only; **no real source was accessed, listed, statted or
+searched**; A10 not run.
+
+Section 15 corrected two escapes in the proven-store predicate, but its second
+correction went one step too far in the other direction. Because every
+non-hidden, non-`.db` regular file inside a proven physical-only domain became a
+blocking `ROLE_UNKNOWN`, it also made `favorite.db-wal`, `favorite.db-shm` and
+`favorite.db-journal` -- standard companions of a store that section 15's own
+ledger proves -- read as independent unproven stores. That is false
+conservatism rather than safety: this repository already states the opposite in
+committed code. `database_inventory._is_candidate()` excludes `-wal` and `-shm`
+documented as "belong to a database rather than standing for one";
+`BoundedSourceRefresher` attaches `name + "-wal"` and `name + "-shm"` to the
+main database's `EncryptedSource`; `EncryptedSource`/`EncryptedSnapshot` carry
+wal/shm as companion paths on one source; `bridge/database_bootstrap.py` forms
+the same two names. Fail-closed governs uncertain Reader truth, not artifacts
+already known to belong to a known database.
+
+The corrected invariant: **a standard SQLite companion of an exact
+provenance-backed store is a companion, not an independent store.** Recognition
+is exact -- an exact proven `(domain, basename)` pair from the section 19.3
+ledger plus one of the three suffixes SQLite itself appends to the complete
+basename (`-wal`, `-shm`, `-journal`). The companion of `favorite.db` is
+`favorite.db-wal`, never `favorite-wal`.
+
+A companion is structurally accounted and visible, receives **no** database role
+(not auxiliary, not media, not unknown), never satisfies a required role, never
+strengthens coverage, and never produces `unknown_database`. It is represented by
+a dedicated `ContainerSidecar` row type rather than by a role token, and appears
+in `accounts_for()`'s exactly-once key set so total accounting stays true.
+`ContainerSidecar.__post_init__` re-validates against the exact predicate, so no
+caller can inject a row that merely claims to be a companion.
+
+Nothing else widens. `favorite.db.bak`, `favorite.db.wal`, `favorite.db.shm`,
+`favorite-wal`, `favorite.db-wal-wal`, `Favorite.db-wal` and `favorite_1.db-wal`
+all remain unproven and blocking -- the arbitrary-file and backup policy is
+unchanged. **A sidecar of an unproven store inherits no exemption**:
+`future.db-wal` stays a visible blocking unknown alongside `future.db`, so
+companion naming can never bypass store provenance. Symlinks and directories
+named like sidecars take the existing rejection paths and still block; only a
+plain regular file can be a companion. Outside a proven physical-only domain
+nothing changes, so message-side `-wal`/`-shm` companions stay non-independent
+and out of the database inventory exactly as before. One acceptance predicate
+remains, `meets_requirements()` -> `unmet_requirements()` ->
+`_blocking_observations()`, with no wrapper override; aggregate evidence adds
+only a name-free `companion_count` (total and per boundary class) so a fresh real
+gate can report how many companions it saw without identifying any.
+
+The pre-existing sidecar test built its name with the equivalent of
+`"favorite.db".replace(".db", "-wal")`, which yields `favorite-wal`, not
+`favorite.db-wal`; it never tested the SQLite convention. Corrected RED-first,
+with a direct assertion documenting the distinction: **RED-O**, 52 failed / 339
+passed against unmodified `9507592` production, caused by the missing structural
+companion handling rather than a collection failure.
+
+Full table, refusal list, representation, evidence and review: A10 gate document
+section 20. Synthetic verification: container accounting 391 passed, database
+inventory 34 passed, `acquisition` 575 passed, `wechatdb` 514 passed, `bridge` 272
+passed; `git diff --check` and the populated staged check passed. The section 15
+rows describing proven-store sidecars as blocking are superseded; every
+historical real A10 result is unchanged and was not rescored.
+
+A10 remains **UNMET**, P4-A **9/10**, P4-B **MET 4/4**. The only remaining step is
+one fresh real A10 structural rerun under new explicit operator authorization.

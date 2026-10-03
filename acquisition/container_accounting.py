@@ -18,6 +18,13 @@ is never mutated. And *every* directory in the boundary is examined, because
 skipped: a name or a directory outside the vocabulary becomes a visible gap
 rather than a silent omission.
 
+A standard SQLite sidecar -- ``<exact proven store basename>`` plus ``-wal``,
+``-shm`` or ``-journal`` -- is a *companion of* a database, not a store. It is
+accounted as its own non-blocking row type, carries no role and strengthens no
+coverage, exactly as ``database_inventory`` and ``BoundedSourceRefresher``
+already treat it elsewhere. Every other name inside a proven domain remains
+ROLE_UNKNOWN and blocking.
+
 The message-directory classifier is left alone. Session and contact identity
 are accounted as required roles here rather than pushed back into a shard
 classifier that has no reason to know about anchors. That disagreement between
@@ -250,6 +257,49 @@ def is_proven_physical_store(directory_identity: str, location: str, name: str) 
     return name in PROVEN_STORE_NAMES.get(directory_identity, frozenset())
 
 
+#: The only three suffixes SQLite itself appends to a database file: the
+#: write-ahead log, the shared-memory index and the rollback journal. Each is
+#: formed by appending the suffix to the *complete* database basename, so the
+#: companion of ``favorite.db`` is ``favorite.db-wal`` and never ``favorite-wal``.
+#: Closed set, exact match, nothing else inferred.
+PROVEN_STORE_SIDECAR_SUFFIXES: tuple[str, ...] = ("-wal", "-shm", "-journal")
+
+
+def is_proven_store_sidecar(directory_identity: str, location: str, name: str) -> bool:
+    """Whether this exact name is a standard companion of an exact proven store.
+
+    A SQLite sidecar belongs to a database rather than standing for one. The
+    rest of this project already says so: ``database_inventory._is_candidate``
+    excludes the ``-wal`` and ``-shm`` sidecars because they "belong to a
+    database rather than standing for one"; ``BoundedSourceRefresher`` attaches
+    ``name + "-wal"`` and ``name + "-shm"`` to the main database's
+    ``EncryptedSource``; and ``EncryptedSource``/``EncryptedSnapshot`` carry
+    wal/shm as companion paths on one source rather than as independent stores.
+
+    Physical-only accounting had drifted from that. At ``9507592`` any non-hidden,
+    non-``.db`` regular file inside a proven physical-only domain became
+    ``ROLE_UNKNOWN`` and blocked, so ``favorite.db-wal`` -- a file the reader
+    itself treats as a companion of a store this same table proves -- read as an
+    independent unproven store. Fail-closed governs *uncertain* Reader truth; an
+    artifact already known to belong to a known database is not uncertain.
+
+    The match is exact on all three axes: a proven physical-only domain, an
+    exact basename from ``PROVEN_STORE_NAMES`` for that domain, and one of the
+    three exact suffixes appended to it. No fuzzy, prefix, suffix, case-folding
+    or inferred-variant matching, and no recursive stripping, so
+    ``favorite.db-wal-wal`` and ``future.db-wal`` are not companions.
+    """
+    if not isinstance(name, str):
+        raise ValueError("database name invalid")
+    for suffix in PROVEN_STORE_SIDECAR_SUFFIXES:
+        if not name.endswith(suffix):
+            continue
+        store = name[: -len(suffix)]
+        if store and is_proven_physical_store(directory_identity, location, store):
+            return True
+    return False
+
+
 #: Which required role each named directory exists to hold, and the name that
 #: carries it. A location that exists but does not hold the role has not lost the
 #: role -- it has misplaced it, which is a different fixed condition.
@@ -429,6 +479,37 @@ class ContainerRejection:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainerSidecar:
+    """One standard SQLite companion of an exact proven store.
+
+    Structurally accounted and never a database: a companion carries no role,
+    satisfies no required role, strengthens no coverage and raises no gap. It is
+    a distinct row type precisely so it cannot be mistaken for a store --
+    ``ROLE_AUXILIARY``, ``ROLE_MEDIA`` and ``ROLE_UNKNOWN`` are all wrong
+    claims about a file that exists only to serve another database. Like every
+    other row it is keyed by concrete directory identity plus basename so the
+    accounting stays duplicate-free and deterministic.
+
+    Constructed only by the walker, and validated here against the same exact
+    predicate, so a caller cannot hand the accounting a row that merely claims
+    to be a companion -- laundering an unproven store would be the whole failure
+    this type exists to prevent.
+    """
+
+    location: str
+    name: str = field(repr=False)
+    directory_identity: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.name, str) or not self.name
+                or self.location not in CONTAINER_LOCATIONS
+                or not _valid_directory_identity(self.directory_identity, self.location)
+                or not is_proven_store_sidecar(
+                    self.directory_identity, self.location, self.name)):
+            raise ValueError("container sidecar invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerAccounting:
     """Every database inside one selected boundary, accounted for exactly once.
 
@@ -441,27 +522,34 @@ class ContainerAccounting:
     databases: tuple[ContainerDatabase, ...] = ()
     examined_directories: tuple[ExaminedDirectory, ...] = field(default=(), repr=False)
     rejections: tuple[ContainerRejection, ...] = ()
+    sidecars: tuple[ContainerSidecar, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         databases = tuple(self.databases)
         examined = tuple(self.examined_directories)
         rejections = tuple(self.rejections)
+        sidecars = tuple(self.sidecars)
         if (any(not isinstance(row, ContainerDatabase) for row in databases)
                 or any(not isinstance(row, ContainerRejection) for row in rejections)
-                or any(not isinstance(row, ExaminedDirectory) for row in examined)):
+                or any(not isinstance(row, ExaminedDirectory) for row in examined)
+                or any(not isinstance(row, ContainerSidecar) for row in sidecars)):
             raise ValueError("container accounting invalid")
-        keys = [(row.directory_identity, row.name) for row in databases + rejections]
+        keys = [(row.directory_identity, row.name)
+                for row in databases + rejections + sidecars]
         if (len(set(keys)) != len(keys)
                 or len({row.identity for row in examined}) != len(examined)
                 or examined != tuple(sorted(examined, key=lambda row: row.identity))
                 or databases != tuple(sorted(databases, key=lambda row: (
                     row.location, row.directory_identity, row.name)))
                 or rejections != tuple(sorted(rejections, key=lambda row: (
-                    row.location, row.directory_identity, row.name, row.reason)))):
+                    row.location, row.directory_identity, row.name, row.reason)))
+                or sidecars != tuple(sorted(sidecars, key=lambda row: (
+                    row.location, row.directory_identity, row.name)))):
             raise ValueError("container accounting invalid")
         object.__setattr__(self, "databases", databases)
         object.__setattr__(self, "examined_directories", examined)
         object.__setattr__(self, "rejections", rejections)
+        object.__setattr__(self, "sidecars", sidecars)
 
     @property
     def role_counts(self) -> dict[str, int]:
@@ -510,6 +598,7 @@ class ContainerAccounting:
             "blocking_candidate_count": 0,
             "blocking_nested_count": 0,
             "blocking_unreadable_count": 0,
+            "companion_count": 0,
             "role_counts": {},
         } for boundary in sorted(CONTAINER_DOMAIN_CLASSES)}
         for row in self.databases:
@@ -522,6 +611,14 @@ class ContainerAccounting:
                 entry["candidate_count"] += 1
             counts = entry["role_counts"]
             counts[row.role] = counts.get(row.role, 0) + 1
+        # Companions are counted, never named. A sidecar is not a database, so it
+        # is deliberately absent from database_count and from role_counts: it adds
+        # no coverage and no role. The count exists so a real gate can say "known
+        # physical-only companions: N" without ever naming one.
+        for row in self.sidecars:
+            entry = summary[domain_boundary_class(
+                row.directory_identity, row.location)]
+            entry["companion_count"] += 1
         for row in self.rejections:
             boundary = domain_boundary_class(row.directory_identity, row.location)
             entry = summary[boundary]
@@ -544,11 +641,14 @@ class ContainerAccounting:
         """True only when these (directory identity, name) keys occur once.
 
         The root identity is the empty string; other identities are internal
-        direct-entry basenames. Neither key is a reportable location class.
+        direct-entry basenames. Neither key is a reportable location class. A
+        companion is accounted content like any other row, so it appears here
+        too: dropping it would make total accounting false in the opposite
+        direction.
         """
         expected = set(keys)
         accounted = [(row.directory_identity, row.name)
-                     for row in self.databases + self.rejections]
+                     for row in self.databases + self.rejections + self.sidecars]
         return (expected == set(accounted)
                 and len(set(accounted)) == len(accounted))
 
@@ -565,7 +665,9 @@ class ContainerAccounting:
         """A renderable, structural-only summary: counts and closed tokens.
 
         No name, no path, no identifier, no digest, nothing read out of a
-        database. This is the shape a gate document records.
+        database. Companions appear as a count and inside ``domain_summary``, so
+        a real gate can report how many physical-only companions it saw without
+        identifying any of them. This is the shape a gate document records.
         """
         counts = self.role_counts
         return {
@@ -574,6 +676,7 @@ class ContainerAccounting:
             "role_counts": {role: count
                             for role, count in sorted(counts.items()) if count},
             "examined_directory_count": len(self.examined_directories),
+            "companion_count": len(self.sidecars),
             "location_counts": {
                 location: sum(1 for row in self.databases
                               if row.location == location)
@@ -625,15 +728,28 @@ def _account_directory(directory: Path, location: str, rejections: list) -> list
     for child in children:
         if not _is_candidate(child):
             # Outside a proven domain a regular file with no ".db" suffix is
-            # sidecar noise belonging to some database. Inside one, dropping it
-            # silently would leave unaccounted bytes in a domain whose whole
-            # exemption rests on accounting for everything it holds, so name it
-            # and let it block as unknown. Hidden files stay ignorable and a
-            # directory or symlink keeps its existing refusal below.
+            # sidecar noise belonging to some database: ignorable, and unchanged
+            # here -- message/message_0.db-wal stays out of the database inventory
+            # exactly as database_inventory already excludes it. Inside a proven
+            # domain, dropping it silently would leave unaccounted bytes in a
+            # domain whose whole exemption rests on accounting for everything it
+            # holds, so name it. An exact companion of an exact proven store is
+            # then accounted as a companion; any other name blocks as unknown.
+            # Hidden files stay ignorable and a directory or symlink keeps its
+            # existing refusal below.
             if (not child.name.startswith(".") and _is_regular_file(child)
                     and _is_proven_physical_only_domain(directory.name, location)):
-                rows.append(ContainerDatabase(
-                    location, child.name, ROLE_UNKNOWN, directory.name))
+                # A standard SQLite companion of an exact proven store is not an
+                # independent store, so it never takes a role -- not even the
+                # unknown one. Anything else in that domain stays ROLE_UNKNOWN and
+                # still blocks; see is_proven_store_sidecar.
+                if is_proven_store_sidecar(
+                        directory.name, location, child.name):
+                    rows.append(ContainerSidecar(
+                        location, child.name, directory.name))
+                else:
+                    rows.append(ContainerDatabase(
+                        location, child.name, ROLE_UNKNOWN, directory.name))
                 continue
             # A subdirectory is not a database, but if it holds one then part of
             # the boundary was not walked. Failing closed is the only honest
@@ -670,6 +786,7 @@ def account_container(source_root) -> ContainerAccounting:
     databases: list[ContainerDatabase] = []
     examined: list[ExaminedDirectory] = []
     rejections: list[ContainerRejection] = []
+    sidecars: list[ContainerSidecar] = []
     if not root.is_dir():
         return ContainerAccounting()
 
@@ -684,7 +801,9 @@ def account_container(source_root) -> ContainerAccounting:
             # too. Only hidden *files* stay ignorable as sidecar noise.
             location = _NAMED_DIRECTORIES.get(child.name, LOCATION_OTHER_DIRECTORY)
             examined.append(ExaminedDirectory(child.name, location))
-            databases += _account_directory(child, location, rejections)
+            rows = _account_directory(child, location, rejections)
+            databases += [row for row in rows if isinstance(row, ContainerDatabase)]
+            sidecars += [row for row in rows if isinstance(row, ContainerSidecar)]
         elif _is_candidate(child):
             # A database can sit directly in the root, so the root is listed for
             # its own children rather than only for its directories. Dropping
@@ -704,6 +823,8 @@ def account_container(source_root) -> ContainerAccounting:
         tuple(sorted(examined, key=lambda row: row.identity)),
         tuple(sorted(rejections, key=lambda row: (
             row.location, row.directory_identity, row.name, row.reason))),
+        tuple(sorted(sidecars, key=lambda row: (
+            row.location, row.directory_identity, row.name))),
     )
 
 
@@ -857,14 +978,18 @@ __all__ = [
     "DOMAIN_REQUIRED_IDENTITY",
     "DOMAIN_REQUIRED_MESSAGE",
     "KNOWN_PHYSICAL_ONLY_DIRECTORIES",
+    "PROVEN_STORE_NAMES",
+    "PROVEN_STORE_SIDECAR_SUFFIXES",
     "NESTED_DIRECTORY",
     "SESSION_DIRECTORY_NAME",
     "UNREADABLE_DIRECTORY",
     "ContainerAccounting",
     "ContainerDatabase",
     "ContainerRejection",
+    "ContainerSidecar",
     "ExaminedDirectory",
     "account_container",
     "domain_boundary_class",
+    "is_proven_store_sidecar",
     "unmet_requirements",
 ]

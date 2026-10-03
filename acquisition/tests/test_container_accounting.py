@@ -406,7 +406,7 @@ def test_directory_identity_stays_internal_and_diagnostics_are_sanitized(tmp_pat
     assert set(evidence) == {
         "classification", "database_count", "role_counts", "examined_directory_count",
         "location_counts", "rejections", "gaps", "domain_summary",
-        "unmet_requirements"}
+        "companion_count", "unmet_requirements"}
     rendered = repr(accounting) + repr(evidence) + repr(accounting.examined_directories)
     for private in (str(root), "extra_a", "extra_b", "extra_c"):
         assert private not in rendered
@@ -1808,7 +1808,8 @@ def test_a_locally_proven_basename_in_an_unproven_store_blocks_in_a_proven_domai
 
 
 @pytest.mark.parametrize("name", [
-    "favorite.db.bak", "favorite.db-journal", "favorite.db.wal",
+    "favorite.db.bak", "favorite.db.wal", "favorite.db.shm",
+    "favorite.db.backup", "favorite.db-wal.bak",
 ])
 def test_a_non_db_look_alike_inside_a_proven_domain_is_accounted_and_blocks(
         tmp_path, name):
@@ -1827,13 +1828,203 @@ def test_a_non_db_look_alike_inside_a_proven_domain_is_accounted_and_blocks(
     assert not accounting.meets_requirements()
 
 
-@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
-def test_a_proven_store_sidecar_stays_a_blocking_unknown(tmp_path, domain):
-    # A -wal/-shm/-journal companion belongs to a database rather than standing
-    # for one, so outside a proven domain it is ignorable sidecar noise. Inside
-    # one it is unproven file content the reader never accounts for.
-    root = _domain_root(tmp_path, domain)
-    (root / domain / sorted(PROVEN_STORE_NAMES[domain])[0].replace(
-        ".db", "-wal")).write_bytes(b"synthetic")
+_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
-    assert GAP_UNKNOWN_DATABASE in unmet_requirements(account_container(root))
+
+# -- a standard SQLite sidecar is a companion, not an independent store -------
+#
+# The invariant is exact: an exact proven store basename plus "-wal", "-shm" or
+# "-journal". The test this replaces built its name with
+# "favorite.db".replace(".db", "-wal"), which yields "favorite-wal" -- a name
+# SQLite never creates. It exercised a look-alike, not the companion case.
+
+
+def test_the_real_sqlite_wal_companion_name_is_not_the_replace_look_alike():
+    # Pin the naming convention itself so the substitution cannot quietly return
+    # and let a look-alike test read as a companion test.
+    assert "favorite.db".replace(".db", "-wal") == "favorite-wal"
+    assert "favorite.db" + "-wal" == "favorite.db-wal"
+
+
+@pytest.mark.parametrize("domain,store", sorted(
+    (domain, store)
+    for domain, stores in PROVEN_STORE_NAMES.items()
+    for store in stores))
+@pytest.mark.parametrize("suffix", _SIDECAR_SUFFIXES)
+def test_an_exact_standard_sidecar_of_a_proven_store_is_a_companion(
+        tmp_path, domain, store, suffix):
+    root = _domain_root(tmp_path, domain)
+    (root / domain / store).write_bytes(b"synthetic")
+    (root / domain / (store + suffix)).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    # Structurally visible and accounted exactly once, but never a database.
+    assert [(row.directory_identity, row.name) for row in accounting.sidecars] \
+        == [(domain, store + suffix)]
+    assert [row.name for row in accounting.databases
+            if row.directory_identity == domain] == [store]
+    # The companion itself is not a database, so it contributes no role at all.
+    # A proven store keeps whatever truthful role the generic ledger gave it
+    # (sns.db is auxiliary, favorite.db is unknown-but-exempt), so the portable
+    # observables are the row counts and the verdict.
+    assert len(accounting.databases) == 5
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 2
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 1
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 1
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("name", [
+    "favorite.db.wal", "favorite.db.shm", "favorite.db.bak",
+    "favorite.db.backup", "favorite-wal", "favorite-shm", "favorite-journal",
+    "favorite.db-wal.bak", "favorite.db-wal-wal",
+])
+def test_a_sidecar_look_alike_of_a_proven_store_still_blocks(tmp_path, name):
+    # Only the three exact suffixes on an exact proven basename are companions.
+    # A dotted variant, a bare-name variant and an extra suffix all stay
+    # unproven file content.
+    root = _domain_root(tmp_path, "favorite")
+    (root / "favorite" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.sidecars == ()
+    assert [row.name for row in accounting.databases
+            if row.directory_identity == "favorite"] == [name]
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("name", [
+    "Favorite.db-wal", "favorite_1.db-wal", "favorite_fts.DB-wal",
+    "favorite.db-WAL", "FAVORITE.DB-wal", "sns.db-wal",
+])
+def test_a_look_alike_store_cannot_lend_its_name_to_a_companion(tmp_path, name):
+    # Case, a numeric variant and a case-shifted suffix all fail exact matching.
+    root = _domain_root(tmp_path, "favorite")
+    (root / "favorite" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.sidecars == ()
+    assert accounting.role_counts[ROLE_UNKNOWN] == 1
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+
+
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_a_sidecar_of_an_unproven_store_inherits_no_exemption(tmp_path, domain):
+    # favorite/future.db-wal must never become a way to smuggle an unproven
+    # store past the store predicate. Both files stay visible and both block: the
+    # companion rule is keyed on a *proven* basename, so an unproven one buys no
+    # exemption for its own sidecar either.
+    root = _domain_root(tmp_path, domain)
+    (root / domain / "future.db").write_bytes(b"synthetic")
+    (root / domain / "future.db-wal").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.sidecars == ()
+    assert [row.name for row in accounting.databases
+            if row.directory_identity == domain] == [
+                "future.db", "future.db-wal"]
+    assert accounting.role_counts[ROLE_UNKNOWN] == 2
+    assert unmet_requirements(accounting) == (GAP_UNKNOWN_DATABASE,)
+    assert not accounting.meets_requirements()
+
+
+@pytest.mark.parametrize("domain", sorted(PROVEN_STORE_NAMES))
+def test_a_companion_alone_cannot_satisfy_any_required_role(tmp_path, domain):
+    root = _root(tmp_path, message=(), session=False, contact=False,
+                 directories=(domain,))
+    store = sorted(PROVEN_STORE_NAMES[domain])[0]
+    (root / domain / (store + "-shm")).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_ORDINARY_MESSAGE] == 0
+    assert accounting.role_counts[ROLE_SESSION_IDENTITY] == 0
+    assert accounting.role_counts[ROLE_CONTACT_IDENTITY] == 0
+    assert REQUIRED_ROLE_MISSING in unmet_requirements(accounting)
+    assert not accounting.meets_requirements()
+
+
+def test_a_message_shaped_name_is_still_a_candidate_beside_a_companion(tmp_path):
+    # The companion handling must not become a laundering path for the one
+    # shape that always blocks.
+    root = _domain_root(tmp_path, "favorite")
+    (root / "favorite" / "favorite.db-wal").write_bytes(b"synthetic")
+    (root / "favorite" / "message_0.db").write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert accounting.role_counts[ROLE_UNSUPPORTED_MESSAGE_CANDIDATE] == 1
+    assert unmet_requirements(accounting) == (GAP_UNSUPPORTED_MESSAGE_CANDIDATE,)
+    assert not accounting.meets_requirements()
+
+
+def test_companion_accounting_is_exactly_once_and_deterministic(tmp_path):
+    root = _domain_root(tmp_path, "favorite")
+    for name in ("favorite.db", "favorite.db-wal", "favorite.db-shm",
+                 "favorite.db-journal"):
+        (root / "favorite" / name).write_bytes(b"synthetic")
+
+    first = account_container(root)
+    second = account_container(root)
+
+    keys = [(row.location, row.directory_identity, row.name)
+            for row in first.databases + first.rejections + first.sidecars]
+    assert len(set(keys)) == len(keys)
+    assert first.sidecars == second.sidecars
+    assert list(first.sidecars) == sorted(
+        first.sidecars,
+        key=lambda row: (row.location, row.directory_identity, row.name))
+    # accounts_for is the total-claim helper, so it takes every accounted key.
+    assert first.accounts_for((
+        ("contact", "contact.db"),
+        ("favorite", "favorite.db"), ("favorite", "favorite.db-journal"),
+        ("favorite", "favorite.db-shm"), ("favorite", "favorite.db-wal"),
+        ("message", "message_0.db"), ("message", "message_1.db"),
+        ("session", "session.db")))
+    assert first.meets_requirements()
+
+
+def test_aggregate_evidence_counts_companions_without_naming_them(tmp_path):
+    root = _domain_root(tmp_path, "favorite")
+    for name in ("favorite.db", "favorite.db-wal", "favorite.db-shm",
+                 "future.db"):
+        (root / "favorite" / name).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+    rendered = repr(accounting.evidence())
+
+    entry = accounting.domain_summary["known_physical_only"]
+    assert entry["companion_count"] == 2
+    assert all(other["companion_count"] == 0
+               for boundary, other in accounting.domain_summary.items()
+               if boundary != "known_physical_only")
+    assert "favorite" not in rendered
+    assert "future.db" not in rendered
+    assert "-wal" not in rendered
+
+
+@pytest.mark.parametrize("suffix", _SIDECAR_SUFFIXES)
+def test_a_companion_of_a_message_shard_is_not_an_independent_entry(
+        tmp_path, suffix):
+    # Unchanged global model: outside a proven store domain a sidecar is
+    # companion noise, so message/message_0.db-wal stays out of the database
+    # inventory and blocks nothing.
+    root = _root(tmp_path)
+    (root / "message" / ("message_0.db" + suffix)).write_bytes(b"synthetic")
+
+    accounting = account_container(root)
+
+    assert [row.name for row in accounting.databases
+            if row.location == LOCATION_MESSAGE_DIRECTORY] == [
+                "message_0.db", "message_1.db"]
+    assert accounting.sidecars == ()
+    assert accounting.gaps == ()
+    assert unmet_requirements(accounting) == ()
+    assert accounting.meets_requirements()
