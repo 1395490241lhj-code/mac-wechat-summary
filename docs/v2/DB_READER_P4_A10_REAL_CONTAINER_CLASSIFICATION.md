@@ -2251,17 +2251,21 @@ corpus itself, not the census, is the limit.
 
 | Parent | Nested shape | Purpose | Sources | Confidence | Policy candidate? |
 |---|---|---|---|---|---|
-| `db_storage/` | `MMKV/` | component key-value store | S9 | WEAK (single source, no contents) | **no** |
+| `db_storage/` | `MMKV/` | component key-value store | S9 | WEAK (single source, unreplicated, no contents) | **no** |
 | `db_storage/favorite/` | *(none — media lives in the sibling `business/favorite/{data,mid,thumb,temp}/`, outside `db_storage`)* | n/a | S7 | STRONG | n/a |
-| identity domains (`session/`, `contact/`) | **no standard nested subtree is documented by any source** | n/a | — | — | **no** |
+| identity domains (`session/`, `contact/`) | **no nested subtree is documented by any source** | n/a | — | — | **no** |
+| any `db_storage/` domain | **no nested subtree is replicated across independent sources** — `MMKV/` is named by S9 alone | n/a | — | — | **no** |
 
-**No source establishes any standard nested subtree inside `db_storage`.** This is
-the substantive negative result of the phase: it means the two residual `nested`
-blockers in section 21.10 **cannot** be preemptively exempted by any currently
-available public provenance, and section 17.2's anchor-scope contract must stand
-unchanged. S7's `business/favorite/` tree is the closest public analogue and it is
-instructive precisely because it sits **outside** `db_storage` — a nested blocker
-under `required_identity` or `ambiguous` is therefore not explained by it.
+**No source establishes a standard, safely bounded nested subtree inside
+`db_storage`.** The only nested name any source gives is S9's `MMKV/`, and it is a
+single unreplicated mention with no contents — documented in the table above for
+completeness, not usable as an exemption. This is the substantive negative result
+of the phase: the two residual `nested` blockers in section 21.10 **cannot** be
+preemptively exempted by any currently available public provenance, and section
+17.2's anchor-scope contract must stand unchanged. S7's `business/favorite/` tree
+is the closest public analogue and it is instructive precisely because it sits
+**outside** `db_storage` — a nested blocker under `required_identity` or
+`ambiguous` is therefore not explained by it.
 
 ### 22.6 Why the remaining candidates cannot be admitted
 
