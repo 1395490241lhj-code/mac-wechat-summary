@@ -93,6 +93,21 @@ actor LocalMessageHistory {
         return CaptureLedger(storeState: state, conversations: conversations, health: health)
     }
 
+    /// Consumer list content never enters the aggregate capture ledger.
+    func retainedConsumerConversationIDs() async -> Set<ConsumerConversationID> {
+        guard storeState == .ready, let store else { return [] }
+        let ids = (try? await store.retainedConsumerConversationIDs()) ?? []
+        guard storeState == .ready, self.store === store else { return [] }
+        return ids
+    }
+
+    func consumerConversationPreviews(ids: [ConsumerConversationID]) async -> [ConsumerConversationID: ConsumerConversationPreview] {
+        guard storeState == .ready, let store else { return [:] }
+        let result = (try? await store.consumerConversationPreviews(ids: ids)) ?? [:]
+        guard storeState == .ready, self.store === store else { return [:] }
+        return result
+    }
+
     func recentVisualMessages(conversationID: Int64) async -> [PersistedMessage]? {
         guard storeState == .ready, let store else { return nil }
         return try? await store.recentMessagesIfConversationExists(id: conversationID, limit: 100)

@@ -549,6 +549,64 @@ actor MessageStore {
     /// One grouped statement rather than a count per conversation, because the
     /// ledger refreshes on the capture cadence. Read-only: it adds no table,
     /// no column and no schema version.
+    /// Current canonical owners for publication-time disappearance checks.
+    func retainedConsumerConversationIDs() throws -> Set<ConsumerConversationID> {
+        Set(try query("SELECT id, 0 FROM archive_imports UNION ALL SELECT id, 1 FROM conversations;") { statement in
+            let id = sqlite3_column_int64(statement, 0)
+            return sqlite3_column_int(statement, 1) == 0
+                ? ConsumerConversationID.archiveImport(id) : .visualConversation(id)
+        })
+    }
+
+    /// Consumer-only projection, separate from the content-free capture ledger.
+    /// One tail per requested canonical owner; no reader window or time ranking.
+    func consumerConversationPreviews(ids: [ConsumerConversationID]) throws -> [ConsumerConversationID: ConsumerConversationPreview] {
+        var result: [ConsumerConversationID: ConsumerConversationPreview] = [:]
+        for isArchive in [true, false] {
+            let owners = Set(ids.compactMap { id -> Int64? in
+                switch id {
+                case .archiveImport(let value): return isArchive ? value : nil
+                case .visualConversation(let value): return isArchive ? nil : value
+                }
+            }).sorted()
+            // Bound SQLite parameters and each result batch, not history depth.
+            for start in stride(from: 0, to: owners.count, by: 200) {
+                let batch = Array(owners[start..<min(start + 200, owners.count)])
+                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                let sql = isArchive ? """
+                    SELECT i.id, r.sender, r.text, NULL
+                    FROM archive_imports i JOIN archive_attributed_records r ON r.import_id = i.id
+                    WHERE i.transcript_shape = 'attributed' AND i.id IN (\(placeholders))
+                      AND r.sequence = (SELECT MAX(sequence) FROM archive_attributed_records WHERE import_id = i.id)
+                    UNION ALL
+                    SELECT i.id, NULL, r.record_text, NULL
+                    FROM archive_imports i JOIN archive_unattributed_records r ON r.import_id = i.id
+                    WHERE i.transcript_shape = 'unattributed' AND i.id IN (\(placeholders))
+                      AND r.sequence = (SELECT MAX(sequence) FROM archive_unattributed_records WHERE import_id = i.id);
+                    """ : """
+                    SELECT c.id, m.sender, m.text, m.kind
+                    FROM conversations c JOIN messages m ON m.conversation_id = c.id
+                    WHERE c.id IN (\(placeholders))
+                      AND m.id = (SELECT id FROM messages WHERE conversation_id = c.id
+                                  ORDER BY sequence DESC, id DESC LIMIT 1);
+                    """
+                let bindings = isArchive ? batch + batch : batch
+                let rows = try query(sql, bind: { statement in
+                    for (index, id) in bindings.enumerated() {
+                        sqlite3_bind_int64(statement, Int32(index + 1), id)
+                    }
+                }) { statement in
+                    let owner = sqlite3_column_int64(statement, 0)
+                    return (isArchive ? ConsumerConversationID.archiveImport(owner) : .visualConversation(owner),
+                            ConsumerConversationPreview(sender: Self.string(statement, 1), text: Self.string(statement, 2),
+                                kind: Self.string(statement, 3).flatMap(VisibleMessageKind.init(rawValue:))))
+                }
+                for (id, preview) in rows { result[id] = preview }
+            }
+        }
+        return result
+    }
+
     func conversationSummaries() throws -> [CapturedConversationSummary] {
         try query(
             """

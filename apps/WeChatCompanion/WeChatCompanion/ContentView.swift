@@ -3572,7 +3572,7 @@ private struct HomeView: View {
 }
 
 /// Each row is one observation. A title never merges exports or sources.
-/// The aggregate readers do not provide last-message text, so no preview is invented.
+/// Previews come from retained canonical tails, independently of reader selection.
 private struct ConsumerConversationList: View {
     @Bindable var model: AppModel
     var recentOnly = false
@@ -3611,6 +3611,12 @@ private struct ConsumerConversationList: View {
                 }
                 .listStyle(.plain)
             }
+            if !rows.isEmpty {
+                Text("Previews show saved evidence and may cover only part of a conversation.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+            }
         }
         .overlay(alignment: .center) {
             if rows.isEmpty {
@@ -3625,7 +3631,8 @@ private struct ConsumerConversationList: View {
     }
 
     private var rows: [ConsumerConversationRow] {
-        let filtered = ConsumerConversationRow.rows(archive: model.archiveEvidence, visual: model.captureLedger)
+        let filtered = ConsumerConversationRow.rows(archive: model.archiveEvidence, visual: model.captureLedger,
+            previews: model.consumerConversationPreviews)
             .filter { nameFilter.isEmpty || $0.title.localizedCaseInsensitiveContains(nameFilter) }
         return recentOnly ? Array(filtered.prefix(5)) : filtered
     }
@@ -3675,6 +3682,8 @@ private struct CompanionConversationRow: View {
                         timestamp
                     }
                 }
+                Text(row.preview).font(.callout).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail)
                 Text(row.note).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -3848,7 +3857,8 @@ private struct PreviewCredentials: CredentialStoring {
         id: .archiveImport(1),
         title: "A long conversation name that must remain readable in a narrow macOS column",
         date: Date(timeIntervalSince1970: 1_791_151_200),
-        note: "Saved on this Mac · The secondary text also remains readable without a status badge"
+        note: "Saved at 18:00",
+        preview: "Ana: A long saved preview with Unicode 你好👩🏽‍💻 that should truncate to a single visual line"
     ))
     .environment(\.dynamicTypeSize, .accessibility3)
     .frame(width: 260)

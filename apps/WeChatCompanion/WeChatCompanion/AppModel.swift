@@ -55,6 +55,14 @@ final class AppModel {
     /// Which conversations have been captured and how much is still kept.
     /// Aggregates only -- this never carries message text.
     var captureLedger = CaptureLedger.empty
+    /// Session-only consumer content, keyed by source-scoped canonical owner.
+    private(set) var consumerConversationPreviews: [ConsumerConversationID: ConsumerConversationPreview] = [:]
+    @ObservationIgnored private var consumerPreviewGeneration: UInt64 = 0
+    @ObservationIgnored private var consumerPreviewVisualCounts: [Int64: Int]?
+    @ObservationIgnored private var consumerPreviewStore: MessageStore?
+    @ObservationIgnored private var consumerPreviewRetentionSweepAt: Date?
+    @ObservationIgnored private var consumerPreviewMessagesWritten: Int?
+    @ObservationIgnored private let consumerPreviewReader: @Sendable ([ConsumerConversationID]) async -> [ConsumerConversationID: ConsumerConversationPreview]
     private(set) var selectedVisualConversationID: Int64?
     private(set) var selectedVisualMessages: [PersistedMessage] = []
     private(set) var visualContextUnavailable = false
@@ -157,7 +165,8 @@ final class AppModel {
         followUpCandidates: any FollowUpCandidateRunning = AppModel.defaultFollowUpRunner(),
         answerEvidence: any AnswerEvidenceRunning = AppModel.defaultAnswerEvidenceRunner(),
         answerRunner: any AnswerRunning = SystemLanguageModelAnswerRunner(),
-        reminderStore: any ReminderStoring = AppModel.defaultReminderStore()
+        reminderStore: any ReminderStoring = AppModel.defaultReminderStore(),
+        consumerPreviewReader: (@Sendable ([ConsumerConversationID]) async -> [ConsumerConversationID: ConsumerConversationPreview])? = nil
     ) {
         self.service = service
         self.store = store
@@ -165,6 +174,9 @@ final class AppModel {
         self.observerStore = observerStore
         self.extractionCoordinator = extractionCoordinator
         self.messageHistory = messageHistory
+        self.consumerPreviewReader = consumerPreviewReader ?? { ids in
+            await messageHistory.consumerConversationPreviews(ids: ids)
+        }
         self.shareInbox = shareInbox
         self.credentials = credentials
         self.geminiTransport = geminiTransport
@@ -844,6 +856,7 @@ final class AppModel {
     /// future writes is not a request to delete. Use `deleteLocalMessageHistory`
     /// for that.
     func setAllowsLocalPersistence(_ isAllowed: Bool) async {
+        invalidateConsumerConversationPreviews()
         let navigation = navigationGeneration
         let selection = revealGeneration
         allowsLocalPersistence = isAllowed
@@ -874,6 +887,7 @@ final class AppModel {
     /// already expired. Only meaningful while persistence is on.
     func setRetentionPolicy(_ policy: RetentionPolicy) async {
         guard policy != retentionPolicy else { return }
+        invalidateConsumerConversationPreviews()
         retentionPolicy = policy
         consentDefaults.set(policy.rawValue, forKey: Self.retentionPolicyKey)
         await messageHistory.setRetention(policy)
@@ -883,6 +897,13 @@ final class AppModel {
     }
 
     func refreshArchiveEvidence() async {
+        let generation = invalidateConsumerConversationPreviews()
+        await refreshArchiveReader()
+        await loadConsumerConversationPreviews(generation: generation)
+    }
+
+    /// Keep preview suspension after the existing reader reconciliation.
+    private func refreshArchiveReader() async {
         let snapshot = await messageHistory.archiveEvidenceSnapshot()
         archiveEvidence = snapshot
 
@@ -1469,6 +1490,7 @@ final class AppModel {
     /// persistence consent, the retention choice and the diagnostics records
     /// are all left alone.
     func deleteLocalMessageHistory() async {
+        invalidateConsumerConversationPreviews()
         await messageHistory.deleteAllHistory()
         await applyExtractionConfiguration()
         await refreshCaptureLedger()
@@ -1819,10 +1841,67 @@ final class AppModel {
     }
 #endif
 
-    /// The ledger also has to follow user actions that change what is kept --
-    /// consent, retention and deletion -- because capture polling may not be
-    /// running when any of them happens.
+    @discardableResult
+    private func invalidateConsumerConversationPreviews() -> UInt64 {
+        consumerPreviewGeneration &+= 1
+        consumerPreviewVisualCounts = nil
+        consumerPreviewStore = nil
+        consumerPreviewRetentionSweepAt = nil
+        consumerPreviewMessagesWritten = nil
+        consumerConversationPreviews = [:]
+        return consumerPreviewGeneration
+    }
+
+    func refreshConsumerConversationPreviews() async {
+        let generation = invalidateConsumerConversationPreviews()
+        await loadConsumerConversationPreviews(generation: generation)
+    }
+
+    private func loadConsumerConversationPreviews(generation: UInt64) async {
+        let ids = ConsumerConversationRow.rows(archive: archiveEvidence, visual: captureLedger).map(\.id)
+        let visualCounts = Dictionary(uniqueKeysWithValues:
+            captureLedger.conversations.map { ($0.id, $0.retainedMessageCount) })
+        let retentionSweepAt = captureLedger.health.lastRetentionSweepAt
+        let messagesWritten = captureLedger.health.messagesAppended + captureLedger.health.messagesPrepended
+        guard allowsLocalPersistence, let store = await messageHistory.openStore(),
+              await messageHistory.storeState == .ready,
+              generation == consumerPreviewGeneration else { return }
+        consumerPreviewStore = store
+        consumerPreviewVisualCounts = visualCounts
+        consumerPreviewRetentionSweepAt = retentionSweepAt
+        consumerPreviewMessagesWritten = messagesWritten
+        guard !ids.isEmpty else { return }
+        let previews = await consumerPreviewReader(ids)
+        let retainedIDs = await messageHistory.retainedConsumerConversationIDs()
+        let state = await messageHistory.storeState
+        let currentStore = await messageHistory.openStore()
+        guard generation == consumerPreviewGeneration, allowsLocalPersistence, state == .ready,
+              currentStore === store else { return }
+        let currentIDs = Set(ConsumerConversationRow.rows(archive: archiveEvidence, visual: captureLedger).map(\.id))
+        consumerConversationPreviews = previews.filter { currentIDs.contains($0.key) && retainedIDs.contains($0.key) }
+    }
+
+    /// The ledger follows consent, retention and deletion even without capture polling.
     func refreshCaptureLedger() async {
+        await refreshVisualReader()
+        let store = await messageHistory.openStore()
+        guard allowsLocalPersistence, captureLedger.storeState == .ready, store != nil else {
+            if consumerPreviewStore != nil || consumerPreviewVisualCounts != nil || !consumerConversationPreviews.isEmpty {
+                invalidateConsumerConversationPreviews()
+            }
+            return
+        }
+        // Activity timestamps affect ordering, not the retained canonical tail.
+        let counts = Dictionary(uniqueKeysWithValues:
+            captureLedger.conversations.map { ($0.id, $0.retainedMessageCount) })
+        // Sweeps can expire Archive alone; completed writes cover balanced sweep/write races.
+        guard consumerPreviewStore !== store || consumerPreviewVisualCounts != counts
+            || consumerPreviewRetentionSweepAt != captureLedger.health.lastRetentionSweepAt
+            || consumerPreviewMessagesWritten != captureLedger.health.messagesAppended + captureLedger.health.messagesPrepended else { return }
+        await refreshConsumerConversationPreviews()
+    }
+
+    private func refreshVisualReader() async {
         captureLedger = await messageHistory.captureLedger()
         guard captureLedger.storeState == .ready else {
             selectedVisualConversationID = nil
@@ -2546,6 +2625,9 @@ extension AppModel {
                 importedAt: date, recordCount: 2, firstSentAt: date, lastSentAt: date,
                 isAnonymous: true, link: nil, attachmentBatchCount: 0, attachmentCount: 0, materializedAttachmentCount: 0)
         ])
+        consumerConversationPreviews = [
+            .archiveImport(1): ConsumerConversationPreview(sender: "Sam", text: "I will bring the notes.", kind: nil)
+        ]
         selectedArchiveImportID = 1
         selectedArchiveRecords = [
             ArchiveEvidenceRecord(importID: 1, importedAt: date, shape: .attributed, sequence: 0,

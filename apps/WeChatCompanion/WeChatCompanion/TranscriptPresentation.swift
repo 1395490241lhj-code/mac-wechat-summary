@@ -278,9 +278,43 @@ enum TranscriptState: Equatable {
 }
 
 // Consumer conversation list, separate from canonical transcript grouping.
-enum ConsumerConversationID: Hashable {
+enum ConsumerConversationID: Hashable, Sendable {
     case archiveImport(Int64)
     case visualConversation(Int64)
+}
+
+struct ConsumerConversationPreview: Sendable, Equatable {
+    let sender: String?
+    let text: String?
+    let kind: VisibleMessageKind?
+
+    /// Display only: canonical text and attribution remain untouched.
+    func line(attachmentCount: Int = 0) -> String {
+        let body = Self.oneLine(text)
+        let fallback: String?
+        switch kind {
+        case .image: fallback = "Image observed"
+        case .file: fallback = "File observed"
+        case .voice: fallback = "Voice message observed"
+        case .link: fallback = "Link observed"
+        case .system: fallback = "System message observed"
+        default: fallback = nil
+        }
+        if let content = body ?? fallback {
+            return Self.oneLine(sender).map { "\($0): \(content)" } ?? content
+        }
+        // Counts describe the whole import, never its tail record.
+        if attachmentCount > 0 {
+            return attachmentCount == 1 ? "1 attachment in saved copy" : "\(attachmentCount) attachments in saved copy"
+        }
+        return "No text preview available"
+    }
+
+    private static func oneLine(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let line = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return line.isEmpty ? nil : line
+    }
 }
 
 struct ConsumerConversationRow: Identifiable, Equatable {
@@ -289,20 +323,25 @@ struct ConsumerConversationRow: Identifiable, Equatable {
     /// Save/observation time, never represented as the last sent-message time.
     let date: Date
     let note: String
+    var preview: String = "No text preview available"
 
     /// The visual row splits date and time; its spoken label retains both.
     var accessibilityDescription: String {
-        "\(title), \(date.formatted(date: .complete, time: .omitted)), \(note)"
+        "\(title), \(date.formatted(date: .complete, time: .omitted)), \(note), \(preview)"
     }
 
-    static func rows(archive: ArchiveEvidenceSnapshot, visual: CaptureLedger) -> [Self] {
+    static func rows(archive: ArchiveEvidenceSnapshot, visual: CaptureLedger,
+                     previews: [ConsumerConversationID: ConsumerConversationPreview] = [:]) -> [Self] {
         let saved = archive.storeState == .ready ? archive.imports.map {
             Self(id: .archiveImport($0.id), title: $0.displayName ?? "Saved conversation", date: $0.importedAt,
-                 note: "Saved at \($0.importedAt.formatted(date: .omitted, time: .shortened))")
+                 note: "Saved at \($0.importedAt.formatted(date: .omitted, time: .shortened))",
+                 preview: (previews[.archiveImport($0.id)] ?? ConsumerConversationPreview(sender: nil, text: nil, kind: nil))
+                    .line(attachmentCount: $0.attachmentCount))
         } : []
         let observed = visual.storeState == .ready ? visual.conversations.map {
             Self(id: .visualConversation($0.id), title: $0.title, date: $0.lastCapturedAt,
-                 note: "Last seen at \($0.lastCapturedAt.formatted(date: .omitted, time: .shortened))")
+                 note: "Last seen at \($0.lastCapturedAt.formatted(date: .omitted, time: .shortened))",
+                 preview: (previews[.visualConversation($0.id)] ?? ConsumerConversationPreview(sender: nil, text: nil, kind: nil)).line())
         } : []
         return (saved + observed).sorted {
             if $0.date != $1.date { return $0.date > $1.date }
