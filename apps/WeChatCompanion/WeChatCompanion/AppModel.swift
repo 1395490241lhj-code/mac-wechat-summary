@@ -29,12 +29,14 @@ struct ArchiveSearchRequest: Equatable {
 final class AppModel {
     var selectedDestination: Destination? = .overview {
         didSet {
+            navigationGeneration &+= 1
             if selectedDestination == .search, oldValue != .search {
                 searchParentDestination = (oldValue ?? .overview).primaryDestination
             }
         }
     }
     /// Presentation-only, session-local return context. Search/reveal data is unchanged.
+    @ObservationIgnored private var navigationGeneration: UInt64 = 0
     private var searchParentDestination: Destination = .overview
     var primaryNavigationDestination: Destination {
         selectedDestination == .search
@@ -134,6 +136,8 @@ final class AppModel {
     /// still finish after capture is paused, and Chats must show that result.
     @ObservationIgnored private var extractionPollingTask: Task<Void, Never>?
     @ObservationIgnored private var isConsumingShareInbox = false
+    /// Only pending transport IDs; retries do not renew an already-offered reader intent.
+    @ObservationIgnored private var shareHandoffOfferedItemIDs: Set<String> = []
     @ObservationIgnored private var shareInboxObserver: NSObjectProtocol?
     @ObservationIgnored private var didBootstrap = false
 
@@ -840,6 +844,8 @@ final class AppModel {
     /// future writes is not a request to delete. Use `deleteLocalMessageHistory`
     /// for that.
     func setAllowsLocalPersistence(_ isAllowed: Bool) async {
+        let navigation = navigationGeneration
+        let selection = revealGeneration
         allowsLocalPersistence = isAllowed
         consentDefaults.set(isAllowed, forKey: Self.localPersistenceConsentKey)
         LocalPersistenceConsentState.record(allowsLocalMessageStorage: isAllowed, in: consentDefaults)
@@ -859,7 +865,7 @@ final class AppModel {
         await refreshCaptureLedger()
         await refreshArchiveEvidence()
         if isAllowed {
-            await consumePendingShareArchives()
+            await consumePendingShareArchives(navigation: navigation, selection: selection)
             await refreshSavedFollowUps()
         }
     }
@@ -1174,6 +1180,7 @@ final class AppModel {
 
     func selectArchiveImport(_ importID: Int64) async {
         revealGeneration &+= 1
+        let generation = revealGeneration
         directContextSelectionGeneration &+= 1
         contextRevealRequest = nil
         searchHitUnavailable = false
@@ -1189,13 +1196,15 @@ final class AppModel {
         visualContextUnavailable = false
         selectedArchiveImportID = importID
         contextNavigationTarget = .archiveImport(importID)
+        selectedArchiveRecords = []
+        selectedArchiveAttachmentBatches = []
         let records = await messageHistory.archiveRecords(importID: importID)
-        guard selectedArchiveImportID == importID else { return }
+        guard revealGeneration == generation, selectedArchiveImportID == importID else { return }
         selectedArchiveRecords = records
         let batches = await messageHistory.archiveAttachmentBatches(
             importID: importID
         )
-        guard selectedArchiveImportID == importID else { return }
+        guard revealGeneration == generation, selectedArchiveImportID == importID else { return }
         selectedArchiveAttachmentBatches = batches
     }
 
@@ -1342,10 +1351,19 @@ final class AppModel {
     }
 
     func importWeChatArchive(from url: URL) async {
-        _ = await performArchiveImport(from: url)
+        let navigation = navigationGeneration
+        let selection = revealGeneration
+        let result = await performArchiveImport(from: url)
+        if let importID = result.importID {
+            await openImportedConversation(importID, navigation: navigation, selection: selection)
+        }
     }
 
     func consumePendingShareArchives() async {
+        await consumePendingShareArchives(navigation: navigationGeneration, selection: revealGeneration)
+    }
+
+    private func consumePendingShareArchives(navigation: UInt64, selection: UInt64) async {
         guard !isConsumingShareInbox, let shareInbox else { return }
         isConsumingShareInbox = true
         defer { isConsumingShareInbox = false }
@@ -1356,24 +1374,42 @@ final class AppModel {
         } catch {
             return
         }
+        shareHandoffOfferedItemIDs.formIntersection(items.map(\.id))
         guard !items.isEmpty else { return }
-        selectedDestination = .chats
+        var didOfferHandoff = false
 
         for item in items {
-            let terminal = await performArchiveImport(from: item.archiveURL)
-            guard terminal else { return }
+            let result = await performArchiveImport(from: item.archiveURL)
+            // One offer per drain, using only the canonical persistence identity.
+            // A newer user action supersedes the whole drain's presentation intent.
+            if let importID = result.importID {
+                let isNewIntent = shareHandoffOfferedItemIDs.insert(item.id).inserted
+                if !didOfferHandoff, isNewIntent {
+                    didOfferHandoff = true
+                    await openImportedConversation(importID, navigation: navigation, selection: selection)
+                }
+            }
+            guard result.terminal else { return }
             shareInbox.remove(item)
         }
     }
 
-    private func performArchiveImport(from url: URL) async -> Bool {
+    private func openImportedConversation(_ importID: Int64, navigation: UInt64, selection: UInt64) async {
+        guard navigationGeneration == navigation, revealGeneration == selection,
+              archiveEvidence.imports.contains(where: { $0.id == importID }) else { return }
+        // Set the destination before the reader suspends, never after a newer intent.
+        selectedDestination = .chats
+        await selectArchiveImport(importID)
+    }
+
+    private func performArchiveImport(from url: URL) async -> (terminal: Bool, importID: Int64?) {
         guard allowsLocalPersistence else {
             archiveImportStatus = .localPersistenceConsentRequired
-            return false
+            return (false, nil)
         }
         guard await messageHistory.storeState == .ready else {
             archiveImportStatus = .localStoreUnavailable
-            return false
+            return (false, nil)
         }
 
         archiveImportStatus = .importing
@@ -1413,16 +1449,16 @@ final class AppModel {
             // transcript committed but attachment materialization/persistence
             // failed, keep the transport ZIP so a later pass can retry the
             // same import idempotently and finish the attachment batch.
-            return outcome.attachments != .unavailable
+            return (outcome.attachments != .unavailable, outcome.importID)
         } catch ArchivePersistenceError.localPersistenceConsentRequired {
             archiveImportStatus = .localPersistenceConsentRequired
-            return false
+            return (false, nil)
         } catch ArchivePersistenceError.localStoreUnavailable {
             archiveImportStatus = .localStoreUnavailable
-            return false
+            return (false, nil)
         } catch {
             archiveImportStatus = .invalidArchive
-            return true
+            return (true, nil)
         }
     }
 
@@ -1988,7 +2024,7 @@ enum ArchiveAttachmentImportStatus: Equatable {
         case .alreadyPersisted(let count, let materialized):
             "Attachment batch already recorded (\(count) item(s), \(materialized) materialized)."
         case .unavailable:
-            "Chat text imported, but attachment evidence could not be persisted."
+            "Conversation text is saved, but attachments could not be saved. Adding this conversation is not finished; try again later."
         }
     }
 }
@@ -2006,7 +2042,7 @@ enum ArchiveImportStatus: Equatable {
         switch self {
         case .importing: "Adding your conversation…"
         case .invalidArchive: "Could not read that conversation export. Choose a supported WeChat ZIP."
-        case .localPersistenceConsentRequired: "Enable local storage in Settings to add this conversation."
+        case .localPersistenceConsentRequired: "This conversation is waiting. Enable local storage in Settings to save and read it."
         case .localStoreUnavailable: "Local storage is unavailable. The conversation was not added."
         default: ""
         }

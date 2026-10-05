@@ -1898,6 +1898,174 @@ struct WeChatShareInboxAppModelTests {
     }
 
     @Test
+    func newAndDuplicateSharesOpenCanonicalImportDespiteAnotherSelection() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip("target.zip") {
+            $0.add("聊天记录.txt", transcript([("Fixture", m35, "exact target")]))
+        }
+        let other = try scratch.zip("other.zip") {
+            $0.add("聊天记录.txt", transcript([("Fixture", m35, "other saved text")]))
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+        await app.setAllowsLocalPersistence(true)
+        let importer = WeChatArchiveImportService(history: history)
+        let otherOutcome = try await importer.importArchive(contentsOf: other)
+        guard case .inserted(let otherID, _) = otherOutcome.persistence else {
+            Issue.record("Expected insert")
+            return
+        }
+        await app.refreshArchiveEvidence()
+        await app.selectArchiveImport(otherID)
+        _ = try inbox.enqueueCopy(from: source)
+        await app.consumePendingShareArchives()
+        let canonical = try await importer.importArchive(contentsOf: source)
+        guard case .alreadyImported(let targetID) = canonical.persistence else {
+            Issue.record("Expected duplicate")
+            return
+        }
+        #expect(targetID != otherID)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.selectedArchiveImportID == targetID)
+        #expect(app.contextNavigationTarget == .archiveImport(targetID))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["exact target"])
+
+        await app.selectArchiveImport(otherID)
+        app.selectedDestination = .overview
+        _ = try inbox.enqueueCopy(from: source)
+        await app.consumePendingShareArchives()
+        #expect(app.archiveImportStatus == .alreadyImported)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.selectedArchiveImportID == targetID)
+        #expect(app.selectedArchiveRecords.map(\.text) == ["exact target"])
+        #expect(try inbox.pendingItems().isEmpty)
+    }
+
+    @Test
+    func batchOffersOnlyOneReaderHandoff() async throws {
+        let scratch = try Scratch()
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+        await app.setAllowsLocalPersistence(true)
+        for index in 0..<3 {
+            let source = try scratch.zip("share-\(index).zip") {
+                $0.add("聊天记录.txt", transcript([("Fixture", m35, "share \(index)")]))
+            }
+            _ = try inbox.enqueueCopy(from: source)
+        }
+        let pending = try inbox.pendingItems()
+        let canonical = try await WeChatArchiveImportService(history: history).importArchive(contentsOf: pending[0].archiveURL)
+        guard case .inserted(let firstID, _) = canonical.persistence else {
+            Issue.record("Expected insert")
+            return
+        }
+        let generation = app.directContextSelectionGeneration
+        await app.consumePendingShareArchives()
+        #expect(app.directContextSelectionGeneration == generation &+ 1)
+        #expect(app.archiveEvidence.imports.count == 3)
+        #expect(try inbox.pendingItems().isEmpty)
+        #expect(app.selectedArchiveImportID == firstID)
+        #expect(app.contextNavigationTarget == .archiveImport(firstID))
+    }
+
+    @Test(arguments: [false, true])
+    func suspendedBatchCannotOverrideNewerUserIntent(selectConversation: Bool) async throws {
+        let scratch = try Scratch()
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+        await app.setAllowsLocalPersistence(true)
+        let other = try scratch.zip("other.zip") {
+            $0.add("聊天记录.txt", transcript([("Fixture", m35, "manual target")]))
+        }
+        let outcome = try await WeChatArchiveImportService(history: history).importArchive(contentsOf: other)
+        guard case .inserted(let otherID, _) = outcome.persistence else {
+            Issue.record("Expected insert")
+            return
+        }
+        await app.refreshArchiveEvidence()
+        for index in 0..<2 {
+            let source = try scratch.zip("pending-\(index).zip") {
+                $0.add("聊天记录.txt", transcript([("Fixture", m35, "pending \(index)")]))
+            }
+            _ = try inbox.enqueueCopy(from: source)
+        }
+        let store = try #require(await history.openStore())
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let hold = Task.detached { await store.holdShareImport(entered: entered, release: release) }
+        await Task.detached { waitForShareImport(entered) }.value
+        let drain = Task { await app.consumePendingShareArchives() }
+        while app.archiveImportStatus != .importing { await Task.yield() }
+        let generation = app.directContextSelectionGeneration
+        let selection: Task<Void, Never>?
+        if selectConversation {
+            selection = Task { await app.selectArchiveImport(otherID) }
+            while app.directContextSelectionGeneration == generation { await Task.yield() }
+        } else {
+            selection = nil
+            app.selectedDestination = .settings
+        }
+        release.signal()
+        await hold.value
+        await selection?.value
+        await drain.value
+        if selectConversation {
+            #expect(app.selectedArchiveImportID == otherID)
+            #expect(app.contextNavigationTarget == .archiveImport(otherID))
+            #expect(app.selectedArchiveRecords.map(\.text) == ["manual target"])
+        } else {
+            #expect(app.selectedDestination == .settings)
+            #expect(app.contextNavigationTarget == nil)
+        }
+        #expect(app.directContextSelectionGeneration == generation &+ (selectConversation ? 1 : 0))
+        #expect(app.archiveEvidence.imports.count == 3)
+        #expect(try inbox.pendingItems().isEmpty)
+    }
+
+    @Test
+    func consentContinuationPreservesNavigationMadeWhileEnablingStorage() async throws {
+        let scratch = try Scratch()
+        let source = try scratch.zip {
+            $0.add("聊天记录.txt", transcript([("Fixture", m35, "waiting conversation")]))
+        }
+        let inbox = WeChatShareInbox(rootURL: scratch.url.appendingPathComponent("inbox"))
+        _ = try inbox.enqueueCopy(from: source)
+        let (storedDefaults, suite) = defaults()
+        defer { storedDefaults.removePersistentDomain(forName: suite) }
+        let history = LocalMessageHistory(url: nil)
+        let app = model(inbox: inbox, history: history, defaults: storedDefaults)
+        await app.consumePendingShareArchives()
+        app.selectedDestination = .settings
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let hold = Task.detached { await history.holdConsentContinuation(entered: entered, release: release) }
+        await Task.detached { waitForShareImport(entered) }.value
+        let enable = Task { await app.setAllowsLocalPersistence(true) }
+        while !app.allowsLocalPersistence { await Task.yield() }
+        app.selectedDestination = .overview
+        release.signal()
+        await hold.value
+        await enable.value
+        #expect(app.selectedDestination == .overview)
+        #expect(app.contextNavigationTarget == nil)
+        #expect(app.archiveEvidence.imports.count == 1)
+        #expect(try inbox.pendingItems().isEmpty)
+        // The exact saved conversation remains reachable through an explicit action.
+        await app.selectArchiveImport(1)
+        #expect(app.contextNavigationTarget == .archiveImport(1))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["waiting conversation"])
+    }
+
+    @Test
     func consentOffLeavesPendingTransportUnreadAndIntact() async throws {
         let scratch = try Scratch()
         let source = try scratch.zip {
@@ -1916,6 +2084,14 @@ struct WeChatShareInboxAppModelTests {
         #expect(FileManager.default.fileExists(atPath: queued.archiveURL.path))
         #expect(try inbox.pendingItems().map(\.id) == [queued.id])
         #expect(await history.hasOpenStore == false)
+        #expect(app.selectedDestination == .overview)
+        #expect(app.contextNavigationTarget == nil)
+        #expect(app.selectedArchiveImportID == nil)
+        // Consent is checked before ZIP parsing, even for an unreadable payload.
+        try Data("invalid while waiting".utf8).write(to: queued.archiveURL)
+        await app.consumePendingShareArchives()
+        #expect(app.archiveImportStatus == .localPersistenceConsentRequired)
+        #expect(try inbox.pendingItems().map(\.id) == [queued.id])
     }
 
     @Test
@@ -1933,7 +2109,14 @@ struct WeChatShareInboxAppModelTests {
         let history = LocalMessageHistory(url: nil)
         let app = model(inbox: inbox, history: history, defaults: storedDefaults)
 
+        await app.consumePendingShareArchives()
+        #expect(app.archiveImportStatus == .localPersistenceConsentRequired)
+        app.selectedDestination = .settings
         await app.setAllowsLocalPersistence(true)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.contextNavigationTarget == .archiveImport(1))
+        #expect(app.selectedArchiveImportID == 1)
+        #expect(app.selectedArchiveRecords.map(\.text) == ["x", "y"])
 
         #expect(app.archiveImportStatus == .imported(
             recordCount: 2,
@@ -2023,13 +2206,20 @@ struct WeChatShareInboxAppModelTests {
             transcriptShape: "attributed"
         ))
         #expect(app.archiveAttachmentImportStatus == .unavailable)
+        #expect(app.selectedDestination == .chats)
+        #expect(app.contextNavigationTarget == .archiveImport(1))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["x"])
         #expect(FileManager.default.fileExists(atPath: queued.directoryURL.path))
         #expect(try inbox.pendingItems().map(\.id) == [queued.id])
         #expect(app.archiveEvidence.imports.count == 1)
         #expect(app.archiveEvidence.imports.first?.attachmentCount == 0)
 
         try FileManager.default.removeItem(at: attachmentRoot)
+        app.selectedDestination = .settings
+        let generation = app.directContextSelectionGeneration
         await app.consumePendingShareArchives()
+        #expect(app.selectedDestination == .settings)
+        #expect(app.directContextSelectionGeneration == generation)
 
         #expect(app.archiveImportStatus == .alreadyImported)
         #expect(app.archiveAttachmentImportStatus == .inserted(
@@ -2059,6 +2249,9 @@ struct WeChatShareInboxAppModelTests {
         await app.setAllowsLocalPersistence(true)
 
         #expect(app.archiveImportStatus == .invalidArchive)
+        #expect(app.selectedDestination == .overview)
+        #expect(app.contextNavigationTarget == nil)
+        #expect(app.selectedArchiveImportID == nil)
         #expect(!FileManager.default.fileExists(atPath: queued.directoryURL.path))
         #expect(try inbox.pendingItems().isEmpty)
     }
@@ -2106,5 +2299,22 @@ private final class ShareInboxTestCredentials: CredentialStoring, @unchecked Sen
 
     func remove(account: String) throws {
         lock.withLock { storage[account] = nil }
+    }
+}
+
+// Suspend the real persistence actor; no production hook or substitute importer.
+private extension MessageStore {
+    func holdShareImport(entered: DispatchSemaphore, release: DispatchSemaphore) {
+        entered.signal()
+        release.wait()
+    }
+}
+
+private func waitForShareImport(_ semaphore: DispatchSemaphore) { semaphore.wait() }
+
+private extension LocalMessageHistory {
+    func holdConsentContinuation(entered: DispatchSemaphore, release: DispatchSemaphore) {
+        entered.signal()
+        release.wait()
     }
 }

@@ -10,6 +10,7 @@ enum WeChatArchiveAttachmentImportOutcome: Sendable, Equatable {
 
 struct WeChatArchiveImportOutcome: Sendable, Equatable {
     let persistence: ArchivePersistenceResult
+    let importID: Int64
     let transcriptShape: String
     let recordCount: Int
     let attachments: WeChatArchiveAttachmentImportOutcome
@@ -137,6 +138,7 @@ struct WeChatArchiveImportService: Sendable {
 
         return WeChatArchiveImportOutcome(
             persistence: persistence,
+            importID: importID,
             transcriptShape: archive.transcriptShape,
             recordCount: archive.recordCount,
             attachments: attachmentOutcome

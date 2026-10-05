@@ -807,7 +807,7 @@ private struct ChatsView: View {
             ToolbarItem {
                 Menu("More", systemImage: "ellipsis") {
                     Button("Summary of prepared conversations") { model.openArchiveDailySummary() }
-                    Button("Safe Share — add from WeChat") { isShowingShareHelp = true }
+                    Button("Add a conversation from WeChat") { isShowingShareHelp = true }
                     Button("Add saved conversation…") { isChoosingArchive = true }
                         .disabled(model.archiveImportStatus == .importing)
                     Button("Advanced…") { model.selectedDestination = .settings }
@@ -815,10 +815,13 @@ private struct ChatsView: View {
                 .accessibilityIdentifier("chats.more")
             }
         }
-        .alert("Add a conversation with Safe Share", isPresented: $isShowingShareHelp) {
+        .alert("Add a conversation from WeChat", isPresented: $isShowingShareHelp) {
+            if !model.allowsLocalPersistence {
+                Button("Open Settings") { model.selectedDestination = .settings }
+            }
             Button("OK", role: .cancel) {}
         } message: {
-            Text("In WeChat, share a supported conversation export to WeChat Companion. Local storage consent is required. This adds a saved copy; it does not send messages or change WeChat.")
+            Text("In WeChat, select the messages you want to keep, forward them together, then use the Share menu to choose WeChat Companion. Enable local storage to save and read the conversation here. No Screen Recording or provider credentials are needed.")
         }
         .onAppear {
             guard model.contextRevealRequest == nil else { return }
@@ -968,7 +971,7 @@ private struct ArchiveEvidenceBrowser: View {
     private var readyContent: some View {
         if model.archiveEvidence.imports.isEmpty {
             if consumerMode {
-                ContentUnavailableView("Your conversations, in one place", systemImage: "bubble.left.and.bubble.right", description: Text("Share a conversation from WeChat to WeChat Companion, or add a saved conversation from the More menu."))
+                ContentUnavailableView("Add a conversation from WeChat", systemImage: "bubble.left.and.bubble.right", description: Text("In WeChat, forward the messages together, then choose WeChat Companion from the Share menu. A saved copy appears here."))
             } else {
                 TranscriptStateRow(state: .neverCaptured)
             }
@@ -3520,6 +3523,7 @@ private struct HomeView: View {
                 Text("Home").font(.largeTitle.weight(.semibold))
                 Text("Find, read and revisit your WeChat conversations.")
                     .foregroundStyle(.secondary)
+                ImportAttentionView(model: model)
                 HStack {
                     TextField("Search saved messages or people", text: $query)
                         .textFieldStyle(.roundedBorder)
@@ -3539,8 +3543,8 @@ private struct HomeView: View {
                     .frame(minHeight: 300)
                 if model.archiveEvidence.storeState == .disabled {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Start with a conversation you choose to share.").font(.headline)
-                        Text("In WeChat, share a conversation export to WeChat Companion. Enable local storage to keep and read it here.")
+                        Text("Add a conversation from WeChat").font(.headline)
+                        Text("In WeChat, forward the messages together, then choose WeChat Companion from the Share menu. Enable local storage to save and read the conversation here. No Screen Recording or provider credentials are needed.")
                             .foregroundStyle(.secondary)
                         Button("Set up local storage") { model.selectedDestination = .settings }
                     }
@@ -3613,7 +3617,7 @@ private struct ConsumerConversationList: View {
                 ContentUnavailableView(
                     nameFilter.isEmpty ? "No saved conversations" : "No matching conversations",
                     systemImage: nameFilter.isEmpty ? "bubble.left.and.bubble.right" : "magnifyingglass",
-                    description: Text(nameFilter.isEmpty ? "Conversations you share from WeChat appear here." : "Try another name, or search saved messages.")
+                    description: Text(nameFilter.isEmpty ? "Add a conversation from WeChat: forward messages together, then choose WeChat Companion from the Share menu." : "Try another name, or search saved messages.")
                 )
                 .allowsHitTesting(false)
             }
