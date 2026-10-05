@@ -204,6 +204,20 @@ struct LocalMessageSearchQueryPrivacyTests {
 /// absent from the type the UI actually consumes.
 struct LocalMessageSearchUIWiringTests {
     @Test @MainActor
+    func homeSearchHandsOffAllSourcesWithoutRunningAndIsConsumedOnce() throws {
+        let defaults = UserDefaults(suiteName: "consumer-search-\(UUID().uuidString)")!
+        let app = AppModel(messageHistory: makeTestMessageHistory(), shareInbox: nil, consentDefaults: defaults)
+        let query = "  synthetic OR marker\n"
+        app.beginConsumerSearch(query)
+        #expect(app.selectedDestination == .search)
+        #expect(app.localSearch.status == .idle)
+        let request = try #require(app.consumeArchiveSearchRequest())
+        #expect(request.query == query)
+        #expect(request.filter == .all)
+        #expect(app.consumeArchiveSearchRequest() == nil)
+    }
+
+    @Test @MainActor
     func archiveSearchHandsOffExactQueryWithoutExecutingAndIsConsumedOnce() throws {
         let app = AppModel(messageHistory: makeTestMessageHistory(), shareInbox: nil)
         let query = "  synthetic OR marker\n"
@@ -264,11 +278,12 @@ struct LocalMessageSearchUIWiringTests {
     }
 
     @Test
-    func searchIsItsOwnSidebarDestination() {
+    func searchRemainsReachableWithinHome() {
         #expect(Destination.allCases.contains(.search))
         #expect(Destination.search.rawValue == "Search")
         #expect(Destination.search.systemImage == "magnifyingglass")
-        // It is not folded into the archive surface.
+        #expect(!Destination.primary.contains(.search))
+        #expect(Destination.search.primaryDestination == .overview)
         #expect(Destination.chats.systemImage != Destination.search.systemImage)
     }
 

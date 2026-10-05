@@ -8,6 +8,36 @@ import XCTest
 /// like a senderless attributed one, and grouping never changes which row a
 /// search hit scrolls to.
 final class TranscriptPresentationTests: XCTestCase {
+    func testSpokenConversationDescriptionsDistinguishSameTimeOnDifferentDates() {
+        let first = ConsumerConversationRow(id: .archiveImport(1), title: "Fixture chat",
+            date: Date(timeIntervalSince1970: 1_700_000_000), note: "Saved at 18:00")
+        let second = ConsumerConversationRow(id: .archiveImport(2), title: "Fixture chat",
+            date: first.date.addingTimeInterval(86_400), note: first.note)
+        XCTAssertNotEqual(first.accessibilityDescription, second.accessibilityDescription)
+        XCTAssertTrue(first.accessibilityDescription.contains(first.title))
+        XCTAssertTrue(first.accessibilityDescription.contains(first.note))
+    }
+    func testConsumerListDoesNotMergeSameNamesOrCollidingSourceIDs() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        func saved(_ id: Int64) -> ArchiveEvidenceImportSummary {
+            ArchiveEvidenceImportSummary(id: id, displayName: "Same name", shape: .unattributed,
+                importedAt: date, recordCount: 2, firstSentAt: nil, lastSentAt: nil, isAnonymous: true,
+                link: nil, attachmentBatchCount: 0, attachmentCount: 0, materializedAttachmentCount: 0)
+        }
+        let archive = ArchiveEvidenceSnapshot(storeState: .ready, imports: [saved(2), saved(1)])
+        let visual = CaptureLedger(storeState: .ready, conversations: [
+            CapturedConversationSummary(id: 1, title: "Same name", retainedMessageCount: 2,
+                firstCapturedAt: date.addingTimeInterval(-10), lastCapturedAt: date)
+        ])
+        let rows = ConsumerConversationRow.rows(archive: archive, visual: visual)
+        XCTAssertEqual(rows.map(\.id), [.archiveImport(1), .archiveImport(2), .visualConversation(1)])
+        XCTAssertEqual(Set(rows.map(\.id)).count, 3)
+        XCTAssertTrue(rows[0].note.hasPrefix("Saved "))
+        XCTAssertTrue(rows[2].note.hasPrefix("Last seen "))
+        XCTAssertTrue(rows.allSatisfy { $0.date == date })
+        XCTAssertTrue(ConsumerConversationRow.rows(archive: .unavailable(.disabled), visual: .empty).isEmpty)
+    }
+
     // MARK: - Grouping
 
     func testConsecutiveSameSenderOnSameDayIsOneGroup() {

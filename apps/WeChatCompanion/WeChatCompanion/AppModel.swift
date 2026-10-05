@@ -27,7 +27,20 @@ struct ArchiveSearchRequest: Equatable {
 @MainActor
 @Observable
 final class AppModel {
-    var selectedDestination: Destination? = .overview
+    var selectedDestination: Destination? = .overview {
+        didSet {
+            if selectedDestination == .search, oldValue != .search {
+                searchParentDestination = (oldValue ?? .overview).primaryDestination
+            }
+        }
+    }
+    /// Presentation-only, session-local return context. Search/reveal data is unchanged.
+    private var searchParentDestination: Destination = .overview
+    var primaryNavigationDestination: Destination {
+        selectedDestination == .search
+            ? searchParentDestination
+            : (selectedDestination ?? .overview).primaryDestination
+    }
     var systemStatus = SystemStatus.unknown
     var lastDiagnostic: DiagnosticResult?
     var isRunningDiagnostics = false
@@ -377,6 +390,7 @@ final class AppModel {
     private(set) var dailySummaryPhase: DailySummaryPhase = .idle
     private(set) var dailySummarySnapshot: DailySummarySnapshot?
     private var memorySettingsRequested = false
+    var hasMemorySettingsRequest: Bool { memorySettingsRequested }
 
     func openArchiveDailySummary() {
         guard !dailySummaryPhase.isRunning else { return }
@@ -1101,6 +1115,7 @@ final class AppModel {
 
     func selectVisualConversation(_ conversationID: Int64) async {
         revealGeneration &+= 1
+        let generation = revealGeneration
         directContextSelectionGeneration &+= 1
         contextRevealRequest = nil
         searchHitUnavailable = false
@@ -1111,6 +1126,9 @@ final class AppModel {
         selectedArchiveIsHitWindow = false
         archiveContextUnavailable = false
         await refreshCaptureLedger()
+        // A newer row selection or exact reveal owns the reader after this
+        // suspension. Conversation identity alone cannot distinguish intents.
+        guard revealGeneration == generation else { return }
         selectedArchiveImportID = nil
         selectedArchiveRecords = []
         selectedArchiveAttachmentBatches = []
@@ -1120,12 +1138,14 @@ final class AppModel {
         visualContextUnavailable = false
         guard let messages = await messageHistory.recentVisualMessages(conversationID: conversationID)
         else {
-            guard selectedVisualConversationID == conversationID else { return }
+            guard revealGeneration == generation,
+                  selectedVisualConversationID == conversationID else { return }
             selectedVisualConversationID = nil
             visualContextUnavailable = true
             return
         }
-        guard selectedVisualConversationID == conversationID else { return }
+        guard revealGeneration == generation,
+              selectedVisualConversationID == conversationID else { return }
         selectedVisualMessages = messages
     }
 
@@ -1177,6 +1197,11 @@ final class AppModel {
         )
         guard selectedArchiveImportID == importID else { return }
         selectedArchiveAttachmentBatches = batches
+    }
+
+    func beginConsumerSearch(_ query: String) {
+        archiveSearchRequest = ArchiveSearchRequest(query: query, filter: .all)
+        selectedDestination = .search
     }
 
     func beginArchiveSearch(_ query: String) {
@@ -1946,6 +1971,14 @@ enum ArchiveAttachmentImportStatus: Equatable {
     case alreadyPersisted(attachmentCount: Int, materializedCount: Int)
     case unavailable
 
+    var needsAttention: Bool {
+        switch self {
+        case .unavailable: true
+        case .inserted(let count, let materialized), .alreadyPersisted(let count, let materialized): materialized < count
+        case .idle, .none: false
+        }
+    }
+
     var message: String? {
         switch self {
         case .idle, .none:
@@ -1969,6 +2002,23 @@ enum ArchiveImportStatus: Equatable {
     case localStoreUnavailable
     case invalidArchive
 
+    var consumerMessage: String {
+        switch self {
+        case .importing: "Adding your conversation…"
+        case .invalidArchive: "Could not read that conversation export. Choose a supported WeChat ZIP."
+        case .localPersistenceConsentRequired: "Enable local storage in Settings to add this conversation."
+        case .localStoreUnavailable: "Local storage is unavailable. The conversation was not added."
+        default: ""
+        }
+    }
+
+    var needsAttention: Bool {
+        switch self {
+        case .idle, .imported, .alreadyImported: false
+        default: true
+        }
+    }
+
     var message: String {
         switch self {
         case .idle:
@@ -1990,14 +2040,24 @@ enum ArchiveImportStatus: Equatable {
 }
 
 enum Destination: String, CaseIterable, Identifiable {
-    case overview = "Overview"
+    case overview = "Home"
     case chats = "Chats"
     case search = "Search"
     case dailySummary = "Daily Summary"
-    case reminders = "Reminders"
+    case reminders = "Follow-ups"
     case agents = "Agents"
     case diagnostics = "Diagnostics"
     case settings = "Settings"
+
+    static let primary: [Self] = [.overview, .chats, .settings]
+
+    var primaryDestination: Self {
+        switch self {
+        case .search, .dailySummary, .reminders: .overview
+        case .agents, .diagnostics: .settings
+        default: self
+        }
+    }
 
     var id: Self { self }
 
@@ -2435,6 +2495,41 @@ struct VisualQualityReconciliationTracker {
         conversationTitle = nil
         storedHead.removeAll(keepingCapacity: false)
         storedTail.removeAll(keepingCapacity: false)
+    }
+}
+#endif
+
+#if DEBUG
+extension AppModel {
+    /// Presentation-only synthetic data for Xcode previews; never bootstraps a store.
+    func configureConsumerPreview(destination: Destination, followUpPreparationRequired: Bool = false) {
+        let date = Date(timeIntervalSince1970: 1_791_151_200)
+        allowsLocalPersistence = true
+        archiveEvidence = ArchiveEvidenceSnapshot(storeState: .ready, imports: [
+            ArchiveEvidenceImportSummary(id: 1, displayName: "Weekend plans", shape: .attributed,
+                importedAt: date, recordCount: 2, firstSentAt: date, lastSentAt: date,
+                isAnonymous: true, link: nil, attachmentBatchCount: 0, attachmentCount: 0, materializedAttachmentCount: 0)
+        ])
+        selectedArchiveImportID = 1
+        selectedArchiveRecords = [
+            ArchiveEvidenceRecord(importID: 1, importedAt: date, shape: .attributed, sequence: 0,
+                sender: "Alex", sentAt: date, sentAtText: nil, text: "Let’s meet at the cafe tomorrow."),
+            ArchiveEvidenceRecord(importID: 1, importedAt: date, shape: .attributed, sequence: 1,
+                sender: "Sam", sentAt: date, sentAtText: nil, text: "I will bring the notes.")
+        ]
+        if destination == .reminders {
+            if followUpPreparationRequired { followUpPhase = .failed(.memoryUnavailable(state: "not_ready")) }
+            savedFollowUps = [SavedFollowUpStatus.pending, .completed].map { status in
+                SavedFollowUp(id: UUID(), source: .archive, conversationLabel: "Weekend plans",
+                    sender: "Alex", evidenceTimestamp: date, evidenceTimestampKind: "source_created",
+                    scanWindowStart: date.addingTimeInterval(-3600), scanWindowEnd: date,
+                    coverageStatus: "partial", coverageCaveats: ["archive:partial"], savedAt: date,
+                    text: status == .pending ? "Confirm the cafe booking" : "Bring the notes",
+                    reasons: ["explicit_request"], status: status,
+                    archiveEvidence: ArchiveEvidenceAnchor(importID: 1, sequence: 0))
+            }
+        }
+        selectedDestination = destination
     }
 }
 #endif

@@ -276,3 +276,55 @@ enum TranscriptState: Equatable {
         }
     }
 }
+
+// Consumer conversation list, separate from canonical transcript grouping.
+enum ConsumerConversationID: Hashable {
+    case archiveImport(Int64)
+    case visualConversation(Int64)
+}
+
+struct ConsumerConversationRow: Identifiable, Equatable {
+    let id: ConsumerConversationID
+    let title: String
+    /// Save/observation time, never represented as the last sent-message time.
+    let date: Date
+    let note: String
+
+    /// The visual row splits date and time; its spoken label retains both.
+    var accessibilityDescription: String {
+        "\(title), \(date.formatted(date: .complete, time: .omitted)), \(note)"
+    }
+
+    static func rows(archive: ArchiveEvidenceSnapshot, visual: CaptureLedger) -> [Self] {
+        let saved = archive.storeState == .ready ? archive.imports.map {
+            Self(id: .archiveImport($0.id), title: $0.displayName ?? "Saved conversation", date: $0.importedAt,
+                 note: "Saved at \($0.importedAt.formatted(date: .omitted, time: .shortened))")
+        } : []
+        let observed = visual.storeState == .ready ? visual.conversations.map {
+            Self(id: .visualConversation($0.id), title: $0.title, date: $0.lastCapturedAt,
+                 note: "Last seen at \($0.lastCapturedAt.formatted(date: .omitted, time: .shortened))")
+        } : []
+        return (saved + observed).sorted {
+            if $0.date != $1.date { return $0.date > $1.date }
+            switch ($0.id, $1.id) {
+            case (.archiveImport(let left), .archiveImport(let right)),
+                 (.visualConversation(let left), .visualConversation(let right)): return left < right
+            case (.archiveImport, .visualConversation): return true
+            case (.visualConversation, .archiveImport): return false
+            }
+        }
+    }
+}
+
+/// User-facing completeness wording; unknown states never imply a complete history.
+enum FollowUpCoveragePresentation {
+    static func message(for status: String) -> String? {
+        switch status {
+        case "complete": nil
+        case "partial": "Based on part of this conversation."
+        case "unavailable": "Conversation history is unavailable."
+        case "not_observed": "Conversation history has not been checked."
+        default: "Full conversation history could not be confirmed."
+        }
+    }
+}

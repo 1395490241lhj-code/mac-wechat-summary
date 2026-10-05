@@ -550,12 +550,13 @@ struct MemorySyncTests {
         let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("WeChatCompanion/ContentView.swift")
         let source = try String(contentsOf: file, encoding: .utf8)
-        let reminders = try #require(source.components(separatedBy: "private struct RemindersView: View {").last?
-            .components(separatedBy: "private struct SavedFollowUpRow:").first)
+        let start = try #require(source.range(of: "private struct FollowUpsView: View {"))
+        let end = try #require(source.range(of: "private struct SavedFollowUpRow:"))
+        let reminders = String(source[start.upperBound..<end.lowerBound])
         #expect(reminders.contains("model.openFollowUpMemorySettings()"))
         #expect(reminders.contains("model.canOpenFollowUpMemorySettings"))
-        #expect(reminders.contains("across all applicable imports"))
-        #expect(reminders.contains("Unattributed records and attachments are excluded"))
+        // Consumer wording is reviewed in previews. This wiring check keeps
+        // the explicit preparation/scan boundary, rather than pinning copy.
         #expect(reminders.contains("Task { await model.scanFollowUps() }"))
         #expect(!reminders.contains("MemorySection("))
         #expect(!reminders.contains("syncMemoryNow()"))

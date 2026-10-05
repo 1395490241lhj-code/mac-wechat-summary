@@ -7,7 +7,10 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(Destination.allCases, selection: $model.selectedDestination) { destination in
+            List(Destination.primary, selection: Binding<Destination?>(
+                get: { model.primaryNavigationDestination },
+                set: { model.selectedDestination = $0 ?? .overview }
+            )) { destination in
                 Label(destination.rawValue, systemImage: destination.systemImage)
                     .tag(destination)
             }
@@ -16,7 +19,7 @@ struct ContentView: View {
         } detail: {
             switch model.selectedDestination ?? .overview {
             case .overview:
-                OverviewView(model: model)
+                HomeView(model: model)
             case .chats:
                 ChatsView(model: model)
             case .search:
@@ -24,7 +27,7 @@ struct ContentView: View {
             case .dailySummary:
                 DailySummaryView(model: model)
             case .reminders:
-                RemindersView(model: model)
+                FollowUpsView(model: model)
             case .agents:
                 AgentsView(model: model)
             case .settings:
@@ -33,6 +36,16 @@ struct ContentView: View {
                 DiagnosticsView(model: model)
             case let destination:
                 PlaceholderView(destination: destination)
+            }
+        }
+        .toolbar {
+            if let destination = model.selectedDestination,
+               !Destination.primary.contains(destination) {
+                ToolbarItem(placement: .navigation) {
+                    Button("Back to \(model.primaryNavigationDestination.rawValue)", systemImage: "chevron.left") {
+                        model.selectedDestination = model.primaryNavigationDestination
+                    }
+                }
             }
         }
     }
@@ -57,7 +70,7 @@ private struct OverviewView: View {
                             Task { await model.openArchiveBrowser() }
                         }
                         .buttonStyle(.borderedProminent)
-                        Text("Then explicitly sync eligible attributed Archive evidence into Memory for Daily Summary and Reminders. Preparation, candidate scanning and saving remain explicit.")
+                        Text("Then explicitly sync eligible attributed Archive evidence into Memory for Daily Summary and Follow-ups. Preparation, candidate scanning and saving remain explicit.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         Divider()
@@ -751,31 +764,34 @@ private struct DiagnosticMetric: View {
 private struct ChatsView: View {
     @Bindable var model: AppModel
     @State private var isChoosingArchive = false
+    @State private var isShowingShareHelp = false
     @State private var highlightedAnchor: ContextRevealAnchor?
     @State private var highlightGeneration: UInt64 = 0
 
     var body: some View {
-        ScrollViewReader { scroll in
+        HSplitView {
+            ConsumerConversationList(model: model)
+                .frame(minWidth: 210, idealWidth: 250, maxWidth: 320)
+            ScrollViewReader { scroll in
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Chats")
                     .font(.largeTitle.weight(.semibold))
 
-                let ledger = CaptureLedgerPresentation(ledger: model.captureLedger)
+                ImportAttentionView(model: model)
 
-                CaptureLedgerSection(model: model, highlightedAnchor: highlightedAnchor)
-                    .id("captured")
-
-                ArchiveEvidenceBrowser(
-                    model: model,
-                    isChoosingArchive: $isChoosingArchive,
-                    highlightedAnchor: highlightedAnchor
-                )
-                .id("archives")
-
-                CaptureStatusDisclosure(model: model, ledger: ledger)
-
-                DiagnosticsDisclosure(model: model)
+                if model.selectedVisualConversationID != nil || model.visualContextUnavailable {
+                    CaptureLedgerSection(model: model, highlightedAnchor: highlightedAnchor, readerOnly: true)
+                        .id("visual-context")
+                } else {
+                    ArchiveEvidenceBrowser(
+                        model: model,
+                        isChoosingArchive: $isChoosingArchive,
+                        highlightedAnchor: highlightedAnchor,
+                        consumerMode: true
+                    )
+                    .id("archives")
+                }
 
                 Spacer(minLength: 0)
             }
@@ -783,6 +799,27 @@ private struct ChatsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Chats")
+        .toolbar {
+            ToolbarItem {
+                Button("Search messages", systemImage: "magnifyingglass") { model.selectedDestination = .search }
+                    .keyboardShortcut("f", modifiers: .command)
+            }
+            ToolbarItem {
+                Menu("More", systemImage: "ellipsis") {
+                    Button("Summary of prepared conversations") { model.openArchiveDailySummary() }
+                    Button("Safe Share — add from WeChat") { isShowingShareHelp = true }
+                    Button("Add saved conversation…") { isChoosingArchive = true }
+                        .disabled(model.archiveImportStatus == .importing)
+                    Button("Advanced…") { model.selectedDestination = .settings }
+                }
+                .accessibilityIdentifier("chats.more")
+            }
+        }
+        .alert("Add a conversation with Safe Share", isPresented: $isShowingShareHelp) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("In WeChat, share a supported conversation export to WeChat Companion. Local storage consent is required. This adds a saved copy; it does not send messages or change WeChat.")
+        }
         .onAppear {
             guard model.contextRevealRequest == nil else { return }
             switch model.contextNavigationTarget {
@@ -840,6 +877,25 @@ private struct ChatsView: View {
             Task { await model.importWeChatArchive(from: url) }
         }
         }
+        }
+    }
+}
+
+private struct AdvancedChatsView: View {
+    @Bindable var model: AppModel
+    @State private var isChoosingArchive = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            CaptureLedgerSection(model: model, highlightedAnchor: nil)
+            ArchiveEvidenceBrowser(model: model, isChoosingArchive: $isChoosingArchive, highlightedAnchor: nil)
+            CaptureStatusDisclosure(model: model, ledger: CaptureLedgerPresentation(ledger: model.captureLedger))
+            DiagnosticsDisclosure(model: model)
+        }
+        .fileImporter(isPresented: $isChoosingArchive, allowedContentTypes: [.zip], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            Task { await model.importWeChatArchive(from: url) }
+        }
     }
 }
 
@@ -848,6 +904,7 @@ private struct ArchiveEvidenceBrowser: View {
     @State private var searchText = ""
     @Binding var isChoosingArchive: Bool
     let highlightedAnchor: ContextRevealAnchor?
+    var consumerMode = false
 
     private var trimmedSearch: String {
         searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -855,6 +912,7 @@ private struct ArchiveEvidenceBrowser: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !consumerMode {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text("Archive Conversations")
                     .font(.title3.weight(.semibold))
@@ -870,10 +928,11 @@ private struct ArchiveEvidenceBrowser: View {
                 .disabled(model.archiveImportStatus == .importing)
             }
 
-            Text("Read and search imported evidence here. For Daily Summary and Reminders, explicitly sync eligible attributed Archive evidence in Settings → Memory. Their selected source and time window can span applicable imports. Unattributed exports remain available for reading/search, not Memory. Imports are not complete WeChat history.")
+            Text("Read and search imported evidence here. For Daily Summary and Follow-ups, explicitly sync eligible attributed Archive evidence in Settings → Memory. Their selected source and time window can span applicable imports. Unattributed exports remain available for reading/search, not Memory. Imports are not complete WeChat history.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            }
             if model.archiveContextUnavailable {
                 TranscriptStateRow(state: .contextVanished)
             }
@@ -886,13 +945,14 @@ private struct ArchiveEvidenceBrowser: View {
                 readyContent
             }
 
-            if model.archiveEvidence.storeState == .ready {
+            if model.archiveEvidence.storeState == .ready && !consumerMode {
                 Text(model.archiveImportStatus.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             if let attachmentMessage = model.archiveAttachmentImportStatus.message,
-                model.archiveEvidence.storeState == .ready {
+                model.archiveEvidence.storeState == .ready,
+                !consumerMode {
                 Text(attachmentMessage)
                     .font(.caption)
                     .foregroundStyle(
@@ -907,8 +967,13 @@ private struct ArchiveEvidenceBrowser: View {
     @ViewBuilder
     private var readyContent: some View {
         if model.archiveEvidence.imports.isEmpty {
-            TranscriptStateRow(state: .neverCaptured)
+            if consumerMode {
+                ContentUnavailableView("Your conversations, in one place", systemImage: "bubble.left.and.bubble.right", description: Text("Share a conversation from WeChat to WeChat Companion, or add a saved conversation from the More menu."))
+            } else {
+                TranscriptStateRow(state: .neverCaptured)
+            }
         } else {
+            if !consumerMode {
             HStack(spacing: 8) {
                 TextField("Search imported messages", text: $searchText)
                     .textFieldStyle(.roundedBorder)
@@ -917,12 +982,14 @@ private struct ArchiveEvidenceBrowser: View {
                     .disabled(trimmedSearch.isEmpty)
             }
 
+            }
             importsAndRecords
         }
     }
 
     @ViewBuilder
     private var importsAndRecords: some View {
+        if !consumerMode {
         Text("Imports")
             .font(.callout.weight(.medium))
         ForEach(model.archiveEvidence.imports) { summary in
@@ -934,19 +1001,20 @@ private struct ArchiveEvidenceBrowser: View {
             }
         }
 
+        }
         if let selected = model.archiveEvidence.imports.first(where: {
             $0.id == model.selectedArchiveImportID
         }) {
-            Divider()
+            if !consumerMode { Divider() }
             VStack(alignment: .leading, spacing: 4) {
                 TranscriptContextHeader(
-                    title: selected.displayName ?? "Imported WeChat Archive",
-                    summary: "Archive · imported "
+                    title: selected.displayName ?? (consumerMode ? "Saved conversation" : "Imported WeChat Archive"),
+                    summary: (consumerMode ? "Saved " : "Archive · imported ")
                         + selected.importedAt.formatted(date: .abbreviated, time: .shortened)
-                        + " · \(selected.recordCount) records"
+                        + (consumerMode ? "" : " · \(selected.recordCount) records")
                         + (selected.attachmentCount > 0
                             ? " · \(selected.attachmentCount) attachments" : "")
-                        + (selected.isAnonymous
+                        + (!consumerMode && selected.isAnonymous
                             ? (selected.link == nil ? " · Unlinked export" : " · Explicitly linked")
                             : ""),
                     caveat: transcriptWindowNote(summary: selected)
@@ -956,10 +1024,11 @@ private struct ArchiveEvidenceBrowser: View {
             // Naming and linking are real controls, but they are not what the
             // reader came for. They stay one disclosure away instead of
             // sitting between the header and the transcript at full weight.
-            DisclosureGroup("Conversation details") {
+            DisclosureGroup("Details") {
                 ArchiveLinkControls(model: model, summary: selected)
             }
-            .font(.callout.weight(.medium))
+            .font(.caption)
+            .foregroundStyle(.secondary)
 
             if model.searchHitUnavailable {
                 TranscriptStateRow(state: .searchHitVanished)
@@ -992,13 +1061,16 @@ private struct ArchiveEvidenceBrowser: View {
     /// row.
     private func transcriptWindowNote(summary: ArchiveEvidenceImportSummary) -> String {
         if model.selectedArchiveIsHitWindow {
-            return "Showing a window of up to 500 records around the search result."
+            return consumerMode ? "Showing part of this conversation around your search result." : "Showing a window of up to 500 records around the search result."
         }
         if summary.recordCount > model.selectedArchiveRecords.count {
+            if consumerMode { return "Showing the beginning of this saved conversation; more messages are not shown here." }
             return "Showing the first \(model.selectedArchiveRecords.count) of "
                 + "\(summary.recordCount) records."
         }
-        return summary.shape.label + " import · read-only local evidence."
+        return consumerMode
+            ? "This saved copy may include only part of the conversation."
+            : summary.shape.label + " import · read-only local evidence."
     }
 }
 
@@ -1324,6 +1396,7 @@ private struct TranscriptRowView: View {
     /// when the import happened; the reader does not otherwise repeat it.
     var caption: String?
     var isHighlighted = false
+    var showsSender = true
     var action: (() -> Void)?
 
     var body: some View {
@@ -1353,12 +1426,15 @@ private struct TranscriptRowView: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(row.sender)
-                    .font(.callout.weight(.medium))
+                if showsSender {
+                    Text(row.sender)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 12)
                 if let literalTime = row.literalTime {
                     Text(row.timeLabel ?? literalTime)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else if let shortTime = row.shortTime {
                     Text(shortTime)
@@ -1367,6 +1443,7 @@ private struct TranscriptRowView: View {
                 }
             }
             Text(row.body)
+                .font(.body)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1464,12 +1541,12 @@ private struct TranscriptList: View {
                     ForEach(group.rows) { row in
                         TranscriptRowView(
                             row: row,
-                            isHighlighted: highlightedAnchor == row.id
+                            isHighlighted: highlightedAnchor == row.id,
+                            showsSender: row.id == group.rows.first?.id
                         )
-                        Divider()
                     }
                 }
-                .padding(.bottom, 6)
+                .padding(.bottom, 16)
             }
         }
         .frame(maxWidth: TranscriptLayout.readableWidth, alignment: .leading)
@@ -1483,6 +1560,7 @@ private struct TranscriptList: View {
 private struct CaptureLedgerSection: View {
     @Bindable var model: AppModel
     let highlightedAnchor: ContextRevealAnchor?
+    var readerOnly = false
     @State private var hoveredConversationID: Int64?
 
     private var presentation: CaptureLedgerPresentation {
@@ -1492,6 +1570,7 @@ private struct CaptureLedgerSection: View {
     var body: some View {
         let shown = presentation
         VStack(alignment: .leading, spacing: 12) {
+            if !readerOnly {
             Text("Captured Conversations")
                 .font(.title3.weight(.semibold))
 
@@ -1531,24 +1610,25 @@ private struct CaptureLedgerSection: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            }
             Group {
                 if model.visualContextUnavailable {
                     TranscriptStateRow(state: .contextVanished)
                 } else if let selected = model.captureLedger.conversations.first(where: {
                     $0.id == model.selectedVisualConversationID
                 }) {
-                    Divider()
+                    if !readerOnly { Divider() }
                     VStack(alignment: .leading, spacing: 10) {
                         let count = model.selectedVisualMessages.count
                         let windowNote = model.selectedVisualIsHitWindow
                             ? "Showing a window of up to 100 messages around the search result."
                             : "Showing the newest retained messages."
-                        let summary = "Visual capture · \(count) retained messages · captured "
+                        let summary = (readerOnly ? "\(count) saved messages · first seen " : "Visual capture · \(count) retained messages · captured ")
                             + firstCapturedRange(selected)
                         TranscriptContextHeader(
                             title: selected.title,
                             summary: summary,
-                            caveat: "Times are first observed, not sent times. " + windowNote
+                            caveat: (readerOnly ? "This is part of the conversation. Times show when messages were seen, not sent. " : "Times are first observed, not sent times. ") + windowNote
                         )
                         if model.searchHitUnavailable {
                             TranscriptStateRow(state: .searchHitVanished)
@@ -1872,16 +1952,11 @@ private struct ExtractedMessageRow: View {
     }
 }
 
-private struct SettingsView: View {
+private struct AdvancedSettingsView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        ScrollViewReader { proxy in
-        ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("Settings")
-                    .font(.largeTitle.weight(.semibold))
-
                 GroupBox("Gemini Extraction Provider") {
                     VStack(alignment: .leading, spacing: 0) {
                         StatusRow(
@@ -1969,71 +2044,6 @@ private struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                GroupBox("Local Message Storage") {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Toggle(
-                            "Save Archive imports and extracted Visual text on this Mac",
-                            isOn: Binding(
-                                get: { model.allowsLocalPersistence },
-                                set: { newValue in
-                                    Task { await model.setAllowsLocalPersistence(newValue) }
-                                }
-                            )
-                        )
-                        .padding(.vertical, 10)
-                        Divider()
-                        Text("Off by default, and separate from remote processing. Enables local persistence of Safe Share Archive imports and extracted Visual text. When off, new Archive imports wait for consent and Visual extraction results are not saved. Enabling storage can resume queued shares. Screenshots are never saved.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 10)
-                        Divider()
-                        Picker("Keep messages for", selection: Binding(
-                            get: { model.retentionPolicy },
-                            set: { newValue in
-                                Task { await model.setRetentionPolicy(newValue) }
-                            }
-                        )) {
-                            ForEach(RetentionPolicy.allCases) { option in
-                                Text(option.label).tag(option)
-                            }
-                        }
-                        .disabled(!model.allowsLocalPersistence)
-                        .padding(.vertical, 10)
-                        Divider()
-                        Text("Older messages are removed based on when they were first "
-                            + "seen on screen.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .padding(.vertical, 10)
-                        Divider()
-                        HStack {
-                            Button("Delete Local Message History\u{2026}", role: .destructive) {
-                                model.isConfirmingHistoryDeletion = true
-                            }
-                            Text("Turning the setting off does not delete what is already "
-                                + "stored.")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.vertical, 10)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .confirmationDialog(
-                    "Delete all locally stored WeChat message history?",
-                    isPresented: $model.isConfirmingHistoryDeletion,
-                    titleVisibility: .visible
-                ) {
-                    Button("Delete Message History", role: .destructive) {
-                        Task { await model.deleteLocalMessageHistory() }
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This permanently removes every stored conversation and message "
-                        + "from this Mac. Your API key, permissions, and diagnostics are "
-                        + "not affected.")
-                }
-
                 MemorySection(model: model)
                     .id("memory")
 
@@ -2041,14 +2051,6 @@ private struct SettingsView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .navigationTitle("Settings")
-        .onAppear {
-            if model.consumeMemorySettingsRequest() {
-                proxy.scrollTo("memory", anchor: .top)
-            }
-        }
-        }
     }
 }
 
@@ -2226,6 +2228,7 @@ private struct DailySummaryView: View {
 
                 GroupBox("Summary Window") {
                     VStack(alignment: .leading, spacing: 12) {
+                        DisclosureGroup("Advanced source options") {
                         HStack {
                             Text("Source")
                             Spacer()
@@ -2245,6 +2248,7 @@ private struct DailySummaryView: View {
                             .disabled(model.dailySummaryPhase.isRunning)
                         }
 
+                        }
                         Divider()
 
                         HStack {
@@ -2275,7 +2279,7 @@ private struct DailySummaryView: View {
                         }
 
                         HStack {
-                            Button("Open Memory Settings") {
+                            Button("Prepare chat content…") {
                                 Task { await model.openDailySummaryMemorySettings() }
                             }
                             .disabled(!model.canOpenDailySummaryMemorySettings)
@@ -2544,117 +2548,48 @@ private struct DailySummaryConversationSection: View {
 
 
 
-private struct RemindersView: View {
+private struct FollowUpsView: View {
     @Bindable var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var completedExpanded = false
+    @State private var findingExpanded = false
     @State private var candidateToSave: FollowUpCandidate?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Reminders")
-                        .font(.largeTitle.bold())
-                    Text("Local follow-ups grounded in Memory evidence. No due date is inferred and no notification is scheduled in this phase.")
-                        .foregroundStyle(.secondary)
-                }
-
+                Text("Follow-ups").font(.largeTitle.weight(.semibold))
                 savedFollowUps
 
-                GroupBox("Find Follow-Up Candidates") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Source")
-                            Spacer()
-                            Menu(model.followUpSource.label) {
-                                ForEach(MemorySource.appSelectable, id: \.rawValue) { source in
-                                    Button {
-                                        model.setFollowUpSource(source)
-                                    } label: {
-                                        if source == model.followUpSource {
-                                            Label(source.label, systemImage: "checkmark")
-                                        } else {
-                                            Text(source.label)
-                                        }
-                                    }
-                                }
-                            }
-                            .disabled(model.followUpPhase.isRunning)
-                        }
-
-                        Divider()
-
-                        HStack {
-                            Text("Window")
-                            Spacer()
-                            Menu(model.followUpWindow.label) {
-                                ForEach(FollowUpWindow.allCases) { window in
-                                    Button {
-                                        model.setFollowUpWindow(window)
-                                    } label: {
-                                        if window == model.followUpWindow {
-                                            Label(window.label, systemImage: "checkmark")
-                                        } else {
-                                            Text(window.label)
-                                        }
-                                    }
-                                }
-                            }
-                            .disabled(model.followUpPhase.isRunning)
-                        }
-
-                        Divider()
-
-                        if model.followUpSource == .archive {
-                            Text("Uses already-synced attributed Archive evidence across all applicable imports for the selected time window, not just the export you are browsing. Unattributed records and attachments are excluded. Importing does not sync Memory, and stored evidence does not imply complete WeChat history.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-
-                        HStack {
-                            Button("Open Memory Settings") {
-                                Task { await model.openFollowUpMemorySettings() }
-                            }
-                            .disabled(!model.canOpenFollowUpMemorySettings)
-                            .help("Select the current Reminder source in Memory Settings. Sync remains explicit.")
-                            if model.followUpPhase.isRunning {
-                                Text("Wait for the candidate scan before opening Memory Settings.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            } else if !model.canOpenFollowUpMemorySettings && model.memorySyncPhase.isRunning {
-                                Text("Wait for the current Memory sync before changing its source.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-
-                        HStack {
-                            Text("Scans already-synced eligible Memory evidence for the selected source and time window. It never syncs Memory automatically.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button(model.followUpSnapshot == nil ? "Scan Candidates" : "Scan Again") {
-                                Task { await model.scanFollowUps() }
-                            }
-                            .disabled(!model.canScanFollowUps)
-                        }
+                HStack {
+                    Button("Find follow-ups", systemImage: "magnifyingglass") {
+                        findingExpanded = true
+                        Task { await model.scanFollowUps() }
                     }
-                    .padding(.vertical, 6)
+                    .disabled(!model.canScanFollowUps)
+                    Spacer()
                 }
 
                 if !model.allowsLocalPersistence {
-                    ContentUnavailableView(
-                        "Local Storage Is Off",
-                        systemImage: "externaldrive.badge.xmark",
-                        description: Text("Enable local message storage in Settings before Reminders can read Memory or save follow-ups.")
-                    )
-                } else {
-                    candidateState
+                    Text("Turn on local storage to find and keep follow-ups.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Open Settings") { model.selectedDestination = .settings }
+                } else if findingExpanded || model.followUpPhase != .idle {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("\(model.followUpWindow.label) · Prepared conversations")
+                            .font(.caption).foregroundStyle(.secondary)
+                        candidateState
+                        DisclosureGroup("Options & details") {
+                            findingOptions
+                        }
+                        .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             .padding(24)
             .frame(maxWidth: 920, alignment: .leading)
         }
-        .navigationTitle("Reminders")
+        .navigationTitle("Follow-ups")
         .task {
             await model.refreshSavedFollowUps()
         }
@@ -2677,62 +2612,103 @@ private struct RemindersView: View {
                 candidateToSave = nil
             }
         } message: {
-            Text("This saves the selected evidence as a local follow-up. It does not create a due date, notification, or system reminder.")
+            Text("Keep this follow-up on this Mac. No due date or notification will be added.")
         }
     }
 
     @ViewBuilder
     private var savedFollowUps: some View {
-        GroupBox("Saved Follow-Ups") {
-            VStack(alignment: .leading, spacing: 12) {
-                if let error = model.reminderStoreError {
-                    Label(reminderStoreMessage(error), systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.secondary)
-                } else if model.savedFollowUps.isEmpty {
-                    Text("No confirmed follow-ups yet.")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.savedFollowUps) { reminder in
-                        SavedFollowUpRow(reminder: reminder, model: model)
-                        if reminder.id != model.savedFollowUps.last?.id {
-                            Divider()
+        VStack(alignment: .leading, spacing: 12) {
+            if let error = model.reminderStoreError {
+                Label(reminderStoreMessage(error), systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+            } else if model.savedFollowUps.isEmpty {
+                ContentUnavailableView("No saved follow-ups", systemImage: "checklist",
+                    description: Text("Review a suggested follow-up and save the ones you want to keep."))
+            } else {
+                let pending = model.savedFollowUps.filter { $0.status == .pending }
+                let completed = model.savedFollowUps.filter { $0.status == .completed }
+                if pending.isEmpty {
+                    Text("No pending follow-ups.").foregroundStyle(.secondary)
+                }
+                ForEach(pending) { reminder in
+                    SavedFollowUpRow(reminder: reminder, model: model)
+                    if reminder.id != pending.last?.id { Divider() }
+                }
+                if !completed.isEmpty {
+                    DisclosureGroup("Completed (\(completed.count))", isExpanded: $completedExpanded) {
+                        ForEach(completed) { reminder in
+                            SavedFollowUpRow(reminder: reminder, model: model)
                         }
                     }
                 }
             }
-            .padding(.vertical, 6)
         }
+        // Persistence publishes the confirmed rows before they move between groups.
+        .animation(reduceMotion ? nil : CompanionMotion.standard, value: model.savedFollowUps)
+    }
+
+    private var findingOptions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Look back", selection: Binding(
+                get: { model.followUpWindow }, set: { model.setFollowUpWindow($0) }
+            )) {
+                ForEach(FollowUpWindow.allCases) { Text($0.label).tag($0) }
+            }
+            .disabled(model.followUpPhase.isRunning)
+            Picker("Source", selection: Binding(
+                get: { model.followUpSource }, set: { model.setFollowUpSource($0) }
+            )) {
+                ForEach(MemorySource.appSelectable, id: \.rawValue) { Text($0.label).tag($0) }
+            }
+            .disabled(model.followUpPhase.isRunning)
+            Text("Uses previously prepared conversations for this period, not just the chat you last opened. Finding follow-ups does not prepare or sync new content.")
+            if model.followUpSource == .archive {
+                Text("Only messages with supported sender and time information are checked. Attachments and messages without attribution are excluded.")
+            }
+            Button("Prepare conversations…") { Task { await model.openFollowUpMemorySettings() } }
+                .disabled(!model.canOpenFollowUpMemorySettings)
+            if !model.canOpenFollowUpMemorySettings && model.memorySyncPhase.isRunning {
+                Text("Preparation is already running. Wait for it to finish before switching conversations.")
+            }
+            if case .failed(let failure) = model.followUpPhase { Text(failure.message) }
+        }
+        .padding(.top, 8)
     }
 
     @ViewBuilder
     private var candidateState: some View {
         switch model.followUpPhase {
         case .idle:
-            ContentUnavailableView(
-                "Ready to Scan",
-                systemImage: "checklist",
-                description: Text("The conservative local rules look only for explicit requests, commitments, follow-up actions, and action questions.")
-            )
+            Text("Choose a period, then find follow-ups.").foregroundStyle(.secondary)
         case .running:
             HStack(spacing: 10) {
-                ProgressView()
-                Text("Scanning Memory evidence…")
-                    .foregroundStyle(.secondary)
+                ProgressView().controlSize(.small)
+                Text("Looking for follow-ups…").foregroundStyle(.secondary)
             }
-            .padding(.vertical, 12)
         case .failed(let failure):
-            ContentUnavailableView(
-                "Follow-Up Candidates Unavailable",
-                systemImage: "exclamationmark.triangle",
-                description: Text(failure.message)
-            )
+            VStack(alignment: .leading, spacing: 8) {
+                Text(followUpFailureMessage(failure)).foregroundStyle(.secondary)
+                if case .memoryUnavailable = failure {
+                    Button("Prepare conversations…") { Task { await model.openFollowUpMemorySettings() } }
+                        .disabled(!model.canOpenFollowUpMemorySettings)
+                    Text("In Settings, prepare the saved conversations you want to use. Then return here and choose Find follow-ups.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         case .ready:
             if let snapshot = model.followUpSnapshot {
-                FollowUpSnapshotView(
-                    snapshot: snapshot,
-                    candidateToSave: $candidateToSave
-                )
+                FollowUpSnapshotView(snapshot: snapshot, candidateToSave: $candidateToSave)
             }
+        }
+    }
+
+    private func followUpFailureMessage(_ failure: FollowUpFailure) -> String {
+        switch failure {
+        case .consentWithheld: "Turn on local storage to find follow-ups."
+        case .runnerUnavailable: "Finding follow-ups is unavailable in this build."
+        case .memoryUnavailable: "These conversations need to be prepared before finding follow-ups."
+        case .workerFailed: "Could not find follow-ups. Try again, or check the details below."
         }
     }
 
@@ -2751,31 +2727,28 @@ private struct RemindersView: View {
 private struct SavedFollowUpRow: View {
     let reminder: SavedFollowUp
     @Bindable var model: AppModel
+    @State private var isConfirmingDeletion = false
+    @State private var isShowingDetails = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(
-                    reminder.status == .completed ? "Completed" : "Pending",
-                    systemImage: reminder.status == .completed ? "checkmark.circle.fill" : "circle"
-                )
-                .font(.caption.weight(.semibold))
-                Spacer()
-                Text(reminder.savedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(reminder.text)
-                .strikethrough(reminder.status == .completed)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Text(provenanceText)
-                .font(.caption)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: reminder.status == .completed ? "checkmark.circle" : "circle")
                 .foregroundStyle(.secondary)
-
-            HStack {
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(reminder.text)
+                    .font(.body)
+                    .strikethrough(reminder.status == .completed)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(reminder.conversationLabel + " · " + (reminder.sender ?? "Unknown sender"))
+                    .font(.caption).foregroundStyle(.secondary)
+                if let note = FollowUpCoveragePresentation.message(for: reminder.coverageStatus) {
+                    Text(note).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 8) {
                 Button(reminder.status == .completed ? "Reopen" : "Mark Done") {
                     Task {
                         await model.setSavedFollowUpStatus(
@@ -2784,20 +2757,47 @@ private struct SavedFollowUpRow: View {
                         )
                     }
                 }
-                Button("Delete", role: .destructive) {
-                    Task { await model.deleteSavedFollowUp(reminder.id) }
-                }
-                if reminder.source == .archive, reminder.archiveEvidence != nil {
-                    Button("Show Source Evidence") {
-                        Task { await model.openSavedFollowUpEvidence(reminder.id) }
+                Menu("More", systemImage: "ellipsis") {
+                    if reminder.source == .archive, reminder.archiveEvidence != nil {
+                        Button("Show original message") {
+                            Task { await model.openSavedFollowUpEvidence(reminder.id) }
+                        }
                     }
-                    .accessibilityLabel("Show the original archive message")
+                    Button("Details…") { isShowingDetails = true }
+                    Button("Delete…", role: .destructive) { isConfirmingDeletion = true }
                 }
-                Spacer()
-                Text("No due date · no notification")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityValue(reminder.status == .completed ? "Completed" : "Pending")
+        .sheet(isPresented: $isShowingDetails) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Follow-up details").font(.headline)
+                ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                Text(provenanceText).font(.callout).foregroundStyle(.secondary)
+                ForEach(Array(reminder.coverageCaveats.enumerated()), id: \.offset) { _, caveat in
+                    Text(caveat).font(.callout).foregroundStyle(.secondary)
+                }
+                Text("Saved " + reminder.savedAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("No due date or notification.").font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button("Done") { isShowingDetails = false }.keyboardShortcut(.defaultAction)
+            }
+            .padding(24)
+            .frame(minWidth: 320, idealWidth: 440, minHeight: 240, idealHeight: 360, maxHeight: 520)
+        }
+        .confirmationDialog("Delete this follow-up?", isPresented: $isConfirmingDeletion) {
+            Button("Delete", role: .destructive) {
+                Task { await model.deleteSavedFollowUp(reminder.id) }
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -2822,52 +2822,33 @@ private struct FollowUpSnapshotView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            GroupBox("Evidence Status") {
-                VStack(spacing: 0) {
+            if snapshot.coverage.status != "complete" || snapshot.truncated {
+                Text(snapshot.coverage.status == "complete"
+                    ? "Some messages or suggestions may be missing from this search."
+                    : (FollowUpCoveragePresentation.message(for: snapshot.coverage.status) ?? ""))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if snapshot.textTruncatedCount > 0 {
+                Text("Some suggestions were shortened and cannot be saved.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            DisclosureGroup("Search details") {
+                VStack(alignment: .leading, spacing: 8) {
                     summaryRow("Source", snapshot.source.label)
-                    Divider()
-                    summaryRow("Window", windowText)
-                    Divider()
-                    summaryRow("Coverage", coverageLabel)
-                    Divider()
-                    summaryRow("Messages scanned", String(snapshot.scannedMessages))
-                    Divider()
-                    summaryRow("Candidates", String(snapshot.returnedCandidates))
+                    summaryRow("Period", windowText)
+                    summaryRow("History", coverageLabel)
+                    summaryRow("Messages checked", String(snapshot.scannedMessages))
                     if let lastSync = snapshot.freshness?.lastSuccessfulSync {
-                        Divider()
-                        summaryRow(
-                            "Last Memory sync",
-                            lastSync.formatted(date: .abbreviated, time: .shortened)
-                        )
+                        summaryRow("Last prepared", lastSync.formatted(date: .abbreviated, time: .shortened))
                     }
-                }
-                .padding(.vertical, 4)
-            }
-
-            if snapshot.truncated || snapshot.textTruncatedCount > 0 || !snapshot.coverage.caveats.isEmpty {
-                GroupBox("Caveats") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if snapshot.truncated {
-                            Label(
-                                "The scan is bounded to the newest 200 messages and at most 50 candidates.",
-                                systemImage: "ellipsis.circle"
-                            )
-                        }
-                        if snapshot.textTruncatedCount > 0 {
-                            Label(
-                                "\(snapshot.textTruncatedCount) long candidate(s) were clipped and cannot be saved in this MVP.",
-                                systemImage: "text.badge.ellipsis"
-                            )
-                        }
-                        ForEach(snapshot.coverage.caveats, id: \.self) { caveat in
-                            Label(caveat, systemImage: "info.circle")
-                        }
+                    if snapshot.truncated {
+                        Text("The search checks the newest 200 messages and returns at most 50 suggestions.")
                     }
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 6)
+                    ForEach(snapshot.coverage.caveats, id: \.self) { Text($0) }
                 }
+                .font(.caption).foregroundStyle(.secondary)
             }
+            .font(.caption).foregroundStyle(.secondary)
 
             candidates
         }
@@ -2878,19 +2859,20 @@ private struct FollowUpSnapshotView: View {
         if snapshot.candidates.isEmpty {
             if snapshot.coverage.trustworthyEmpty {
                 ContentUnavailableView(
-                    "No Explicit Follow-Up Candidates",
+                    "No follow-ups found",
                     systemImage: "checkmark.circle",
-                    description: Text("Memory reports complete coverage for this window, but no stored message matched the conservative explicit request/commitment rules.")
+                    description: Text("No clear requests or commitments were found in the prepared conversations for this period.")
                 )
             } else {
                 ContentUnavailableView(
-                    "Insufficient Stored Evidence",
+                    "No follow-ups found in the available messages",
                     systemImage: "questionmark.circle",
-                    description: Text("Coverage is incomplete, so an empty candidate list cannot be interpreted as “nothing needs follow-up.”")
+                    description: Text("Only part of the conversation history was available. There may be other follow-ups in messages not checked here.")
                 )
             }
         } else {
-            GroupBox("Candidate Follow-Ups") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Suggested follow-ups").font(.headline)
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(snapshot.candidates) { candidate in
                         FollowUpCandidateRow(
@@ -2953,42 +2935,28 @@ private struct FollowUpCandidateRow: View {
     let save: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(conversationLabel)
-                    .font(.headline)
-                Spacer()
-                Text(candidate.timestamp.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text(candidate.sender ?? "Unknown sender")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-
-            Text(reasonText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(candidateProvenanceText)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
+        VStack(alignment: .leading, spacing: 6) {
             Text(candidate.text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack {
-                if candidate.textTruncated {
-                    Label("Clipped evidence cannot be saved", systemImage: "exclamationmark.triangle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Save Follow-Up", action: save)
-                    .disabled(candidate.textTruncated)
+                .font(.body).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(conversationLabel + " · " + (candidate.sender ?? "Unknown sender"))
+                .font(.caption).foregroundStyle(.secondary)
+            if let note = FollowUpCoveragePresentation.message(for: coverageStatus) {
+                Text(note).font(.caption).foregroundStyle(.secondary)
             }
+            HStack {
+                Button("Keep follow-up", action: save).disabled(candidate.textTruncated)
+                if candidate.textTruncated {
+                    Text("Shortened message · cannot be saved")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            DisclosureGroup("Message details") {
+                Text(reasonText)
+                Text(candidateProvenanceText)
+                Text(candidate.timestamp.formatted(date: .abbreviated, time: .shortened))
+            }
+            .font(.caption).foregroundStyle(.secondary)
         }
         .padding(.vertical, 10)
     }
@@ -3043,12 +3011,12 @@ private struct SearchView: View {
                 Text("Search")
                     .font(.largeTitle.weight(.semibold))
 
-                Text("Local only · Searches currently stored evidence")
+                Text("Search messages saved on this Mac")
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
                 searchField
-                sourceFilter
+                DisclosureGroup("Search options") { sourceFilter }
 
                 Divider()
                 results
@@ -3188,40 +3156,27 @@ private struct LocalSearchResultRow: View {
     let result: LocalSearchResult
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(result.conversationLabel == "Imported WeChat Archive" ? "Saved conversation" : result.conversationLabel)
+                .font(.callout.weight(.medium))
             HStack(spacing: 6) {
-                Text(result.source.label)
-                    .font(.caption.weight(.semibold))
-                Text(result.conversationLabel)
-                    .font(.callout.weight(.medium))
-                if let linkState = result.linkState {
-                    Text(linkState)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            HStack(spacing: 6) {
-                Text(result.provenance.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 if let sender = result.sender {
                     Text(sender)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                } else if result.provenance == .archiveUnattributed {
+                    Text("Sender and message time unavailable")
                 }
                 if let timestamp = result.timestamp {
-                    Text(timestamp.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text((result.provenance == .visualCaptured ? "First seen " : "")
+                        + timestamp.formatted(date: .abbreviated, time: .shortened))
                 }
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
             if !result.excerpt.isEmpty {
-                Text(result.excerpt)
-                    .font(.callout)
-                    .lineLimit(3)
+                Text(result.excerpt).font(.callout).lineLimit(3)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -3375,8 +3330,13 @@ private struct AgentsView: View {
             )
         case .running:
             HStack(spacing: 10) {
-                ProgressView()
-                Text("Reading the Archive window and asking the on-device model…")
+                if model.answerSnapshot != nil {
+                    CompanionAIActivityIndicator()
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+                Text(model.answerSnapshot == nil
+                    ? "Preparing saved messages…" : "Waiting for the on-device answer…")
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 12)
@@ -3545,5 +3505,399 @@ private struct PlaceholderView: View {
             description: Text("This area will be added in a later reviewed phase.")
         )
         .navigationTitle(destination.rawValue)
+    }
+}
+
+// MARK: - Consumer navigation (presentation only)
+
+private struct HomeView: View {
+    @Bindable var model: AppModel
+    @State private var query = ""
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Home").font(.largeTitle.weight(.semibold))
+                Text("Find, read and revisit your WeChat conversations.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    TextField("Search saved messages or people", text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(search)
+                        .accessibilityIdentifier("home.search")
+                    Button("Search", systemImage: "magnifyingglass", action: search)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 20) { homeActions }
+                    VStack(alignment: .leading, spacing: 12) { homeActions }
+                }
+                .buttonStyle(.link)
+                Text("Recent conversations").font(.title2.weight(.semibold))
+                ConsumerConversationList(model: model, recentOnly: true)
+                    .frame(minHeight: 300)
+                if model.archiveEvidence.storeState == .disabled {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Start with a conversation you choose to share.").font(.headline)
+                        Text("In WeChat, share a conversation export to WeChat Companion. Enable local storage to keep and read it here.")
+                            .foregroundStyle(.secondary)
+                        Button("Set up local storage") { model.selectedDestination = .settings }
+                    }
+                } else if model.archiveEvidence.storeState == .unavailable {
+                    Label("Saved conversations are unavailable. Open Settings to check local storage.", systemImage: "exclamationmark.triangle")
+                    Button("Open Settings") { model.selectedDestination = .settings }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+        .navigationTitle("Home")
+    }
+
+    @ViewBuilder private var homeActions: some View {
+        Button("Today’s summary", systemImage: "text.document") { model.openArchiveDailySummary() }
+        Button("Follow-ups", systemImage: "checklist") { model.selectedDestination = .reminders }
+    }
+
+    private func search() {
+        let value = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        model.beginConsumerSearch(value)
+    }
+}
+
+/// Each row is one observation. A title never merges exports or sources.
+/// The aggregate readers do not provide last-message text, so no preview is invented.
+private struct ConsumerConversationList: View {
+    @Bindable var model: AppModel
+    var recentOnly = false
+    @State private var nameFilter = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !recentOnly {
+                TextField("Find a conversation", text: $nameFilter)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(12)
+                    .accessibilityIdentifier("chats.find")
+            }
+            if recentOnly {
+                List(rows) { row in
+                    Button { open(row.id) } label: { CompanionConversationRow(row: row) }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open \(row.accessibilityDescription)")
+                }
+                .listStyle(.plain)
+            } else {
+                // Selection belongs to AppModel. Native List handles keyboard/focus;
+                // no second selected-conversation owner and no synthetic reveal anchor.
+                List(rows, selection: Binding<ConsumerConversationID?>(
+                    get: { selectedID },
+                    set: { id in if let id { open(id) } }
+                )) { row in
+                    CompanionConversationRow(row: row)
+                        .tag(row.id)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(row.accessibilityDescription)
+                        .accessibilityAction(named: "Open conversation") { open(row.id) }
+                        .contextMenu {
+                            Button("Open conversation") { open(row.id) }
+                        }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .overlay(alignment: .center) {
+            if rows.isEmpty {
+                ContentUnavailableView(
+                    nameFilter.isEmpty ? "No saved conversations" : "No matching conversations",
+                    systemImage: nameFilter.isEmpty ? "bubble.left.and.bubble.right" : "magnifyingglass",
+                    description: Text(nameFilter.isEmpty ? "Conversations you share from WeChat appear here." : "Try another name, or search saved messages.")
+                )
+                .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private var rows: [ConsumerConversationRow] {
+        let filtered = ConsumerConversationRow.rows(archive: model.archiveEvidence, visual: model.captureLedger)
+            .filter { nameFilter.isEmpty || $0.title.localizedCaseInsensitiveContains(nameFilter) }
+        return recentOnly ? Array(filtered.prefix(5)) : filtered
+    }
+
+    private var selectedID: ConsumerConversationID? {
+        if let id = model.selectedVisualConversationID { return .visualConversation(id) }
+        if let id = model.selectedArchiveImportID { return .archiveImport(id) }
+        return nil
+    }
+
+    private func open(_ id: ConsumerConversationID) {
+        model.selectedDestination = .chats
+        Task {
+            switch id {
+            case .archiveImport(let importID): await model.selectArchiveImport(importID)
+            case .visualConversation(let id): await model.selectVisualConversation(id)
+            }
+        }
+    }
+}
+
+/// Open Row: no per-conversation surface, border or status badge.
+private struct CompanionConversationRow: View {
+    let row: ConsumerConversationRow
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if !dynamicTypeSize.isAccessibilitySize {
+                Text(String(row.title.prefix(1)).uppercased())
+                    .font(.headline)
+                    .frame(width: 34, height: 34)
+                    .background(.quaternary, in: Circle())
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(row.title).font(.body.weight(.medium))
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 4)
+                        timestamp
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(row.title).font(.body.weight(.medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                        timestamp
+                    }
+                }
+                Text(row.note).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    private var timestamp: some View {
+        Text(row.date.formatted(date: .abbreviated, time: .omitted))
+            .font(.caption).foregroundStyle(.secondary)
+            .fixedSize()
+    }
+}
+
+private struct SettingsView: View {
+    @Bindable var model: AppModel
+    @State private var advancedExpanded = false
+    @State private var preparationExpanded = false
+
+    var body: some View {
+        ScrollViewReader { proxy in
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Settings").font(.largeTitle.weight(.semibold))
+                Text("Privacy & storage").font(.title2.weight(.semibold))
+                GroupBox("Local Message Storage") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Toggle(
+                            "Keep shared conversations and extracted text on this Mac",
+                            isOn: Binding(
+                                get: { model.allowsLocalPersistence },
+                                set: { newValue in
+                                    Task { await model.setAllowsLocalPersistence(newValue) }
+                                }
+                            )
+                        )
+                        .padding(.vertical, 10)
+                        Divider()
+                        Text("Off by default. Shared conversations wait until you enable storage. Enabling it may finish pending shares. Text you choose to extract can also be kept; screenshots are never saved. Remote processing requires separate consent.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                        Divider()
+                        Picker("Keep messages for", selection: Binding(
+                            get: { model.retentionPolicy },
+                            set: { newValue in
+                                Task { await model.setRetentionPolicy(newValue) }
+                            }
+                        )) {
+                            ForEach(RetentionPolicy.allCases) { option in
+                                Text(option.label).tag(option)
+                            }
+                        }
+                        .disabled(!model.allowsLocalPersistence)
+                        .padding(.vertical, 10)
+                        Divider()
+                        Text("Older messages are removed based on when they were first "
+                            + "seen on screen.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 10)
+                        Divider()
+                        HStack {
+                            Button("Delete Local Message History\u{2026}", role: .destructive) {
+                                model.isConfirmingHistoryDeletion = true
+                            }
+                            Text("Turning the setting off does not delete what is already "
+                                + "stored.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .confirmationDialog(
+                    "Delete all locally stored WeChat message history?",
+                    isPresented: $model.isConfirmingHistoryDeletion,
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Message History", role: .destructive) {
+                        Task { await model.deleteLocalMessageHistory() }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This permanently removes every stored conversation and message "
+                        + "from this Mac. Your API key, permissions, and diagnostics are "
+                        + "not affected.")
+                }
+
+                Text("Shared conversations are saved on this Mac. Optional remote processing requires separate consent in Advanced.")
+                    .font(.callout).foregroundStyle(.secondary)
+                DisclosureGroup("Advanced", isExpanded: $advancedExpanded) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        DisclosureGroup("Sources & saved exports") { AdvancedChatsView(model: model) }
+                        DisclosureGroup("Capture & acquisition — optional") { OverviewView(model: model) }
+                        DisclosureGroup("Processing & prepared summaries", isExpanded: Binding(
+                            get: { preparationExpanded || model.hasMemorySettingsRequest },
+                            set: { preparationExpanded = $0 }
+                        )) { AdvancedSettingsView(model: model) }
+                        Button("On-device questions") { model.selectedDestination = .agents }
+                        Button("Diagnostics") { model.selectedDestination = .diagnostics }
+                        Text("Database acquisition remains unavailable until a supported access route is established.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 12)
+                }
+                .accessibilityIdentifier("settings.advanced")
+                Text("WeChat Companion · A read-only companion for conversations you choose to keep.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(24)
+        }
+        .navigationTitle("Settings")
+        .task(id: model.hasMemorySettingsRequest) {
+            guard model.hasMemorySettingsRequest else { return }
+            advancedExpanded = true
+            preparationExpanded = true
+            await Task.yield()
+            if model.consumeMemorySettingsRequest() {
+                proxy.scrollTo("memory", anchor: .top)
+            }
+        }
+        }
+    }
+}
+
+#if DEBUG
+/// Isolated production-view previews: no bootstrap, canonical store, credentials or worker.
+private struct ConsumerPreviewSurface: View {
+    let destination: Destination
+    @State private var model: AppModel
+    private let history: LocalMessageHistory
+
+    init(destination: Destination, searchFrom: Destination? = nil, followUpPreparationRequired: Bool = false) {
+        self.destination = destination
+        let history = LocalMessageHistory(url: nil)
+        self.history = history
+        let defaults = UserDefaults(suiteName: "ui-preview-\(UUID().uuidString)")!
+        let model = AppModel(
+            messageHistory: history, shareInbox: nil, credentials: PreviewCredentials(),
+            consentDefaults: defaults, memorySync: UnavailableMemorySyncRunner(),
+            dailySummary: UnavailableDailySummaryRunner(), followUpCandidates: UnavailableFollowUpRunner(),
+            answerEvidence: UnavailableAnswerEvidenceRunner(), reminderStore: VolatileReminderStore()
+        )
+        model.configureConsumerPreview(destination: destination, followUpPreparationRequired: followUpPreparationRequired)
+        if let searchFrom {
+            model.selectedDestination = searchFrom
+            model.selectedDestination = .search
+        }
+        _model = State(initialValue: model)
+    }
+
+    var body: some View {
+        ContentView(model: model)
+            .frame(width: 1000, height: 680)
+
+    }
+}
+
+private struct PreviewCredentials: CredentialStoring {
+    func save(_ secret: String, account: String) throws {}
+    func secret(account: String) throws -> String? { nil }
+    func remove(account: String) throws {}
+}
+
+#Preview("Companion Open Row — long text") {
+    CompanionConversationRow(row: ConsumerConversationRow(
+        id: .archiveImport(1),
+        title: "A long conversation name that must remain readable in a narrow macOS column",
+        date: Date(timeIntervalSince1970: 1_791_151_200),
+        note: "Saved on this Mac · The secondary text also remains readable without a status badge"
+    ))
+    .environment(\.dynamicTypeSize, .accessibility3)
+    .frame(width: 260)
+    .padding(20)
+    .background(Color(nsColor: .windowBackgroundColor))
+    .preferredColorScheme(.light)
+}
+#Preview("Consumer Chats — synthetic") { ConsumerPreviewSurface(destination: .chats) }
+#Preview("Consumer Follow-ups — synthetic") { ConsumerPreviewSurface(destination: .reminders) }
+#Preview("Consumer Home — synthetic") { ConsumerPreviewSurface(destination: .overview) }
+#Preview("Consumer Settings — isolated") { ConsumerPreviewSurface(destination: .settings) }
+#Preview("Search from Chats — isolated") { ConsumerPreviewSurface(destination: .search, searchFrom: .chats) }
+#Preview("Follow-ups preparation needed — isolated") { ConsumerPreviewSurface(destination: .reminders, followUpPreparationRequired: true) }
+#endif
+
+private struct ImportAttentionView: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if model.archiveImportStatus.needsAttention {
+                Label(model.archiveImportStatus.consumerMessage, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                if model.archiveImportStatus == .localPersistenceConsentRequired || model.archiveImportStatus == .localStoreUnavailable {
+                    Button("Open Settings") { model.selectedDestination = .settings }
+                }
+            }
+            if model.archiveAttachmentImportStatus.needsAttention,
+               let message = model.archiveAttachmentImportStatus.message {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+}
+
+/// Local semantic motion; no imported Kitchen Manager code or package dependency.
+private enum CompanionMotion {
+    static let standard: Animation = .smooth(duration: 0.28)
+}
+
+/// Genuine AI work only. A plain native wait mark; no invented reasoning stage.
+private struct CompanionAIActivityIndicator: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                Image(systemName: "sparkles").foregroundStyle(.secondary)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .accessibilityHidden(true) // Adjacent status text owns the spoken state.
     }
 }

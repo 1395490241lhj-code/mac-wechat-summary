@@ -57,6 +57,19 @@ private func makeHistory(
     return history
 }
 
+// Hold the isolated synthetic history actor at a real read boundary. Keeping
+// this seam in the test target avoids timing sleeps or production test hooks.
+private extension LocalMessageHistory {
+    func holdSelectionRead(entered: DispatchSemaphore, release: DispatchSemaphore) {
+        entered.signal()
+        release.wait()
+    }
+}
+
+private func waitForSelectionRead(_ semaphore: DispatchSemaphore) {
+    semaphore.wait()
+}
+
 // MARK: - Tokenizer and runtime gate
 
 /// B6 gate: the app's own SQLite runtime must offer FTS5 *and* the trigram
@@ -649,6 +662,44 @@ struct LocalMessageSearchConsentTests {
         #expect(app.contextNavigationTarget == .archiveImport(importID))
         #expect(app.selectedVisualConversationID == nil)
         #expect(app.archiveEvidence.imports.first?.link == nil)
+    }
+
+    @Test @MainActor
+    func newerArchiveSelectionSupersedesSuspendedVisualSelection() async throws {
+        let history = await makeHistory(
+            conversations: ["Synthetic visual": [visualMessage("visual fixture")]]
+        )
+        _ = try await history.persistArchiveEvidence(
+            transcript: try attributed([("fixture sender", "20:35", "archive fixture")]),
+            conversationKey: ArchiveConversationKey("selection-race"),
+            importedAt: Date()
+        )
+        let app = AppModel(messageHistory: history, shareInbox: nil)
+        await app.refreshCaptureLedger()
+        await app.refreshArchiveEvidence()
+        let visualID = try #require(app.captureLedger.conversations.first?.id)
+        let importID = try #require(app.archiveEvidence.imports.first?.id)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let hold = Task.detached {
+            await history.holdSelectionRead(entered: entered, release: release)
+        }
+        await Task.detached { waitForSelectionRead(entered) }.value
+        let initialGeneration = app.directContextSelectionGeneration
+        let visual = Task { await app.selectVisualConversation(visualID) }
+        while app.directContextSelectionGeneration == initialGeneration { await Task.yield() }
+        let archive = Task { await app.selectArchiveImport(importID) }
+        while app.directContextSelectionGeneration != initialGeneration &+ 2 { await Task.yield() }
+        release.signal()
+        await hold.value
+        await visual.value
+        await archive.value
+
+        #expect(app.selectedArchiveImportID == importID)
+        #expect(app.selectedVisualConversationID == nil)
+        #expect(app.contextNavigationTarget == .archiveImport(importID))
+        #expect(app.selectedArchiveRecords.map(\.text) == ["archive fixture"])
+        #expect(app.selectedVisualMessages.isEmpty)
     }
 
     @Test @MainActor
