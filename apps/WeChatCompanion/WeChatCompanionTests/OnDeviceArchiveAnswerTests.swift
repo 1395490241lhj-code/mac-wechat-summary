@@ -691,6 +691,24 @@ struct OnDeviceAnswerCoverageDisclosureTests {
         #expect(rendered.contains { $0.contains("Coverage is not complete") })
     }
 
+    @Test("A caveat reason token never reaches the answer panel")
+    func caveatTokensUseTheConsumerMapping() {
+        let rendered = lines(
+            rows: [evidenceRow(1, text: "消息")],
+            coverage: FollowUpCoverage(
+                status: "partial",
+                trustworthyEmpty: true,
+                caveats: ["archive:memory_store_missing", "archive:partial", "Some days are unindexed."]
+            )
+        )
+        #expect(!rendered.contains { $0.contains("memory_store_missing") })
+        #expect(!rendered.contains { $0.contains("Memory Store Missing") })
+        #expect(rendered.contains("Imported WeChat archives: Coverage could not be fully confirmed."))
+        #expect(rendered.contains("Imported WeChat archives: Partial"))
+        // Free-text caveats are already prose and pass through unchanged.
+        #expect(rendered.contains("Some days are unindexed."))
+    }
+
     @Test("A covered empty window says the window holds nothing")
     func trustworthyEmptyIsAbsence() {
         let rendered = lines(

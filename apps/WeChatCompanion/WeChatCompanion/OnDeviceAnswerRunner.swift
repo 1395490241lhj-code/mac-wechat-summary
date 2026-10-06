@@ -301,13 +301,7 @@ struct AnswerCoverageDisclosure: Equatable, Sendable {
     let rowCount: Int
 
     var statusLabel: String {
-        switch coverage.status {
-        case "complete": "Complete"
-        case "partial": "Partial"
-        case "unavailable": "Unavailable"
-        case "not_observed": "Not observed"
-        default: coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
-        }
+        FollowUpCoveragePresentation.label(for: coverage.status)
     }
 
     var lines: [String] {
@@ -315,13 +309,16 @@ struct AnswerCoverageDisclosure: Equatable, Sendable {
         if rowCount == 0 {
             lines.append(
                 coverage.trustworthyEmpty
-                    ? "Memory reports complete coverage for the selected source and window,"
+                    ? "Prepared conversations are fully covered for the selected source and period,"
                         + " and it holds no stored messages."
                     : "Coverage is not complete, so this cannot be interpreted as"
                         + " “no messages happened.”"
             )
         }
-        lines.append(contentsOf: coverage.caveats)
+        // Worker caveats are `source:state` / `source:reason` tokens. They go
+        // through the same consumer mapping as the other surfaces, so an
+        // internal reason token never reaches the answer panel verbatim.
+        lines.append(contentsOf: coverage.caveats.map(FollowUpCoveragePresentation.caveat(_:)))
         return lines
     }
 }

@@ -428,10 +428,13 @@ struct MemorySyncTests {
         let model = AppModel(messageHistory: makeTestMessageHistory(),
                              consentDefaults: makeDefaults(), memorySync: sync,
                              dailySummary: summary, followUpCandidates: scan, reminderStore: store)
+        // Storage is off, so this preparation-section handoff is refused; the
+        // reminder shortcut no longer implies the store is readable.
         await model.openFollowUpMemorySettings()
-        #expect(model.memorySource == .archive)
-        #expect(model.selectedDestination == .settings)
-        #expect(model.consumeMemorySettingsRequest())
+        #expect(!model.canOpenFollowUpMemorySettings)
+        #expect(model.memorySource == .visual)
+        #expect(model.preparationOrigin == nil)
+        #expect(!model.consumeMemorySettingsRequest())
         #expect(!model.isMemoryAvailable)
         #expect(!model.canScanFollowUps)
         #expect(sync.freshnessCalls.isEmpty)
@@ -439,6 +442,32 @@ struct MemorySyncTests {
         #expect(scan.calls.isEmpty)
         #expect(summary.calls.isEmpty)
         #expect(await store.calls.isEmpty)
+    }
+
+    @Test(arguments: [PreparationOrigin.dailySummary, .followUps]) @MainActor
+    func aPreparationSectionHandoffIsRefusedWhileStorageIsOff(origin: PreparationOrigin) async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: summary, followUpCandidates: scan,
+                             reminderStore: RecordingReminderStore())
+        model.setDailySummarySource(.archive)
+        model.setFollowUpSource(.archive)
+        model.selectedDestination = (origin == .dailySummary ? .dailySummary : .reminders)
+
+        #expect(!model.canOpenDailySummaryMemorySettings)
+        #expect(!model.canOpenFollowUpMemorySettings)
+        await model.openDailySummaryMemorySettings()
+        await model.openFollowUpMemorySettings()
+
+        // Refused: no navigation, no scroll request, no origin, no work.
+        #expect(model.selectedDestination == (origin == .dailySummary ? .dailySummary : .reminders))
+        #expect(model.preparationOrigin == nil)
+        #expect(!model.hasMemorySettingsRequest)
+        #expect(sync.syncCalls.isEmpty && sync.freshnessCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(scan.calls.isEmpty)
     }
 
     @Test @MainActor
@@ -638,10 +667,28 @@ struct MemorySyncTests {
                              consentDefaults: makeDefaults(), memorySync: sync,
                              dailySummary: summary)
         model.openArchiveDailySummary()
+        // Storage is off, so the preparation-section handoff is refused outright
+        // rather than quietly opening Advanced. The storage control is the route.
+        #expect(!model.canOpenDailySummaryMemorySettings)
         await model.openDailySummaryMemorySettings()
-        #expect(model.memorySource == .archive)
+        #expect(model.selectedDestination == .dailySummary)
+        #expect(model.preparationOrigin == nil)
+        #expect(!model.hasMemorySettingsRequest)
+        #expect(model.memorySource == .visual)
         #expect(!model.isMemoryAvailable)
         #expect(!model.canPrepareDailySummary)
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        // The refused preparation handoff leaves the storage route as the only
+        // way out, and turning storage on still does no work on its own.
+        model.openStorageSettings(from: .dailySummary)
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .dailySummary)
+        #expect(sync.freshnessCalls.isEmpty)
+        #expect(sync.syncCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        await model.setAllowsLocalPersistence(true)
         #expect(sync.freshnessCalls.isEmpty)
         #expect(sync.syncCalls.isEmpty)
         #expect(summary.calls.isEmpty)
@@ -1637,6 +1684,358 @@ struct MemorySyncTests {
                         .sourceUnavailable(state: "reader_unavailable"), .ingestionFailed(state: "record_malformed")] {
             #expect(!failure.message.contains("/"))
             #expect(!failure.message.contains("sqlite"))
+        }
+    }
+}
+
+/// Preparation UX: one consumer verb ("prepare conversations") and one
+/// remembered reason for being in Settings. The return is navigation only --
+/// nothing here may run preparation, a summary, or a scan.
+struct PreparationReturnTests {
+    @Test @MainActor
+    func aFreshModelHasNoPreparationOrigin() {
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
+        #expect(model.preparationOrigin == nil)
+    }
+
+    @Test @MainActor
+    func summaryHandoffRecordsSummaryOrigin() async {
+        let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: .archive))
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: FakeDailySummaryRunner(outcomes: []))
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        await model.openDailySummaryMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .dailySummary)
+        #expect(sync.syncCalls.isEmpty)
+    }
+
+    @Test @MainActor
+    func followUpHandoffRecordsFollowUpOrigin() async {
+        let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: .archive))
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, followUpCandidates: FakeFollowUpRunner(outcomes: []))
+        await model.setAllowsLocalPersistence(true)
+        model.setFollowUpSource(.archive)
+        model.selectedDestination = .reminders
+        await model.openFollowUpMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .followUps)
+        #expect(sync.syncCalls.isEmpty)
+    }
+
+    @Test @MainActor
+    func anIncompatibleHandoffRecordsNeitherRequestNorOrigin() async {
+        let sync = HeldMemorySyncRunner()
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: FakeDailySummaryRunner(outcomes: []))
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        model.selectedDestination = .dailySummary
+        let operation = Task { await model.syncMemoryNow() }
+        await sync.waitUntilStarted()
+        await model.openDailySummaryMemorySettings()
+        #expect(model.selectedDestination == .dailySummary)
+        #expect(model.preparationOrigin == nil)
+        #expect(!model.consumeMemorySettingsRequest())
+        await sync.finish()
+        await operation.value
+    }
+
+    @Test @MainActor
+    func consumingTheScrollRequestKeepsTheOrigin() async {
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: .archive)),
+                             dailySummary: FakeDailySummaryRunner(outcomes: []))
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        await model.openDailySummaryMemorySettings()
+        #expect(model.consumeMemorySettingsRequest())
+        #expect(!model.consumeMemorySettingsRequest())
+        #expect(model.preparationOrigin == .dailySummary)
+    }
+
+    @Test(arguments: [PreparationOrigin.dailySummary, .followUps]) @MainActor
+    func explicitReturnGoesBackToTheOriginatingTaskAndRunsNothing(origin: PreparationOrigin) async {
+        let sync = FakeMemorySyncRunner(outcomes: [], freshness: freshness(source: .archive))
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let store = RecordingReminderStore()
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: summary, followUpCandidates: scan,
+                             reminderStore: store)
+        await model.setAllowsLocalPersistence(true)
+        model.setDailySummarySource(.archive)
+        model.setFollowUpSource(.archive)
+        model.openStorageSettings(from: origin)
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == origin)
+        let storeCallsBeforeReturn = await store.calls
+        model.returnToPreparationOrigin()
+        #expect(model.selectedDestination == (origin == .dailySummary ? .dailySummary : .reminders))
+        #expect(model.preparationOrigin == nil)
+        #expect(sync.syncCalls.isEmpty && sync.freshnessCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(await store.calls == storeCallsBeforeReturn)
+    }
+
+    @Test @MainActor
+    func leavingSettingsAnotherWayClearsAStaleOrigin() async {
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
+        model.openStorageSettings(from: .dailySummary)
+        #expect(model.preparationOrigin == .dailySummary)
+        model.selectedDestination = .chats
+        #expect(model.preparationOrigin == nil)
+    }
+
+    @Test @MainActor
+    func aLaterOrdinarySettingsVisitHasNoStaleReturn() async {
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults())
+        model.openStorageSettings(from: .followUps)
+        // The real path: leave Settings by an unrelated destination, then come
+        // back on an ordinary visit. Nothing about that may restore the origin.
+        model.selectedDestination = .chats
+        model.selectedDestination = .settings
+        #expect(model.preparationOrigin == nil)
+    }
+
+    @Test(arguments: [PreparationOrigin.dailySummary, .followUps]) @MainActor
+    func storageOffHandoffRecordsOriginWithoutAskingForThePreparationSection(origin: PreparationOrigin) async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let store = RecordingReminderStore()
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: summary, followUpCandidates: scan,
+                             reminderStore: store)
+        model.openStorageSettings(from: origin)
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == origin)
+        // Storage is off, so the user needs the top-level control, not the
+        // preparation section further down.
+        #expect(!model.hasMemorySettingsRequest)
+        #expect(sync.syncCalls.isEmpty && sync.freshnessCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(await store.calls.isEmpty)
+    }
+
+    @Test @MainActor
+    func enablingStoragePreparesNothingOnItsOwn() async {
+        let sync = FakeMemorySyncRunner(outcomes: [])
+        let summary = FakeDailySummaryRunner(outcomes: [])
+        let scan = FakeFollowUpRunner(outcomes: [])
+        let model = AppModel(messageHistory: makeTestMessageHistory(), consentDefaults: makeDefaults(),
+                             memorySync: sync, dailySummary: summary, followUpCandidates: scan,
+                             reminderStore: RecordingReminderStore())
+        model.openStorageSettings(from: .dailySummary)
+        await model.setAllowsLocalPersistence(true)
+        #expect(sync.syncCalls.isEmpty && sync.freshnessCalls.isEmpty)
+        #expect(summary.calls.isEmpty)
+        #expect(scan.calls.isEmpty)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(model.followUpPhase == .idle)
+        // The reason for being here survives, so the return action still works.
+        #expect(model.preparationOrigin == .dailySummary)
+    }
+
+    @Test
+    func consumerPreparationSurfacesNeverRenderInternalState() throws {
+        let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("WeChatCompanion/ContentView.swift")
+        let source = try String(contentsOf: file, encoding: .utf8)
+        func view(_ start: String, _ end: String) throws -> String {
+            let from = try #require(source.range(of: start))
+            let to = try #require(source.range(of: end))
+            return String(source[from.upperBound..<to.lowerBound])
+        }
+        let summary = try view("private struct DailySummaryView: View {", "private struct DailySummarySnapshotView:")
+        let followUps = try view("private struct FollowUpsView: View {", "private struct SavedFollowUpRow:")
+        for surface in [summary, followUps] {
+            // 'failure.message' carries raw worker state; the safe consumer
+            // mapping is the only thing these surfaces may render.
+            #expect(!surface.contains("failure.message"))
+            #expect(!surface.contains("syncMemoryNow()"))
+        }
+        // Worker caveats reach these surfaces as `archive:partial` tokens.
+        // They must go through the consumer mapping, never render raw.
+        // Caveat rows sit in the snapshot/row views, not the two task views,
+        // so assert on the mapping itself plus the absence of a raw render.
+        #expect(!source.contains("Label(caveat, systemImage:"))
+        #expect(!source.contains("Text(caveat).font(.callout)"))
+
+        // Exactly one storage-off route. The model guard is what actually
+        // refuses the handoff (covered behaviourally above), so this only
+        // pins that the view has no second, unguarded copy of the action and
+        // that the storage-off state offers the top-level control.
+        #expect(summary.components(separatedBy: "openDailySummaryMemorySettings()").count == 2)
+        #expect(summary.contains("model.openStorageSettings(from: .dailySummary)"))
+    }
+
+    @Test
+    func structuredCaveatsUseConsumerVocabularyAndNeverRevealInternalTokens() {
+        // Public coverage states keep their existing consumer wording.
+        #expect(FollowUpCoveragePresentation.caveat("archive:partial") == "Imported WeChat archives: Partial")
+        #expect(FollowUpCoveragePresentation.caveat("archive:unavailable")
+            == "Imported WeChat archives: Unavailable")
+        #expect(FollowUpCoveragePresentation.caveat("visual:not_observed")
+            == "Visual capture store: Not observed")
+
+        // The worker spells these `observed_*` on the wire (see
+        // bridge/message_source.py). A real caveat must not degrade into the
+        // neutral fallback just because the token is the longer form.
+        #expect(FollowUpCoveragePresentation.caveat("archive:observed_partial")
+            == "Imported WeChat archives: Partial")
+        #expect(FollowUpCoveragePresentation.caveat("archive:observed_complete")
+            == "Imported WeChat archives: Complete")
+        #expect(FollowUpCoveragePresentation.caveat("visual:observed_partial")
+            == "Visual capture store: Partial")
+
+        // Internal reason tokens fail closed and are never prettified into copy.
+        for token in ["memory_store_missing", "archive_store_missing", "schema_unsupported"] {
+            let rendered = FollowUpCoveragePresentation.caveat("archive:\(token)")
+            #expect(!rendered.contains(token))
+            #expect(!rendered.contains(token.replacingOccurrences(of: "_", with: " ").capitalized))
+            #expect(rendered == "Imported WeChat archives: Coverage could not be fully confirmed.")
+        }
+
+        // An unknown underscore token from a source we do not know stays neutral.
+        let unknownSource = FollowUpCoveragePresentation.caveat("some_new_reader:internal_thing")
+        #expect(!unknownSource.contains("internal_thing"))
+        #expect(!unknownSource.contains("Internal Thing"))
+
+        // Free-text caveats stay byte-for-byte; they are already consumer prose.
+        for prose in ["Some days are unindexed.", "Archive import is still running.",
+                      "Note: older imports are not indexed."] {
+            #expect(FollowUpCoveragePresentation.caveat(prose) == prose)
+        }
+    }
+
+    @Test
+    func oneCoverageLabelOwnsAllFourMeanings() throws {
+        for (status, expected) in [
+            ("complete", "Complete"),
+            ("partial", "Partial"),
+            ("unavailable", "Unavailable"),
+            ("not_observed", "Not observed"),
+            ("observed_complete", "Complete"),
+            ("observed_partial", "Partial"),
+        ] {
+            #expect(FollowUpCoveragePresentation.label(for: status) == expected)
+        }
+        // Unknown stays fail-closed: readable, and never "Complete".
+        let unknown = FollowUpCoveragePresentation.label(for: "schema_unsupported")
+        #expect(unknown == "Schema Unsupported")
+        #expect(unknown != "Complete")
+
+        // Exactly one implementation exists: the shared owner, which is this
+        // file's own. No other file may re-declare the four labels.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("WeChatCompanion")
+        for name in ["ContentView.swift", "OnDeviceAnswerRunner.swift"] {
+            let text = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
+            #expect(!text.contains("case \"partial\": \"Partial\""), "\(name) re-declares a coverage label")
+        }
+    }
+
+    @Test
+    func coverageMeaningIsOneDecisionForBothSpellings() {
+        // The real wire vocabulary (bridge/message_source.py) and the legacy
+        // short forms must read identically to the consumer.
+        for status in ["complete", "observed_complete"] {
+            #expect(FollowUpCoveragePresentation.isComplete(status))
+            #expect(FollowUpCoveragePresentation.message(for: status) == nil)
+        }
+        for status in ["partial", "observed_partial"] {
+            #expect(!FollowUpCoveragePresentation.isComplete(status))
+            #expect(FollowUpCoveragePresentation.message(for: status)
+                == "Based on part of this conversation.")
+        }
+        #expect(FollowUpCoveragePresentation.message(for: "unavailable")
+            == "Conversation history is unavailable.")
+        #expect(FollowUpCoveragePresentation.message(for: "not_observed")
+            == "Conversation history has not been checked.")
+
+        // Unknown is never complete, and says so.
+        for unknown in ["schema_unsupported", "", "Observed_Complete"] {
+            #expect(!FollowUpCoveragePresentation.isComplete(unknown))
+            #expect(FollowUpCoveragePresentation.message(for: unknown)
+                == "Full conversation history could not be confirmed.")
+        }
+    }
+
+    @Test
+    func followUpSnapshotWarnsFromOneCoverageMeaning() {
+        // The view's two decisions - is coverage complete, and what note do we
+        // show - must both come from the shared helper, so a real
+        // observed_complete result cannot be presented as incomplete.
+        func note(status: String, truncated: Bool) -> String? {
+            guard !FollowUpCoveragePresentation.isComplete(status) || truncated else { return nil }
+            return FollowUpCoveragePresentation.isComplete(status)
+                ? "Some messages or suggestions may be missing from this search."
+                : FollowUpCoveragePresentation.message(for: status)
+        }
+        // Complete coverage, nothing truncated: no warning at all.
+        #expect(note(status: "observed_complete", truncated: false) == nil)
+        #expect(note(status: "complete", truncated: false) == nil)
+        // Complete coverage but truncated: only the truncation note.
+        #expect(note(status: "observed_complete", truncated: true)
+            == "Some messages or suggestions may be missing from this search.")
+        // Partial coverage: the partial-history note, never the truncation one.
+        #expect(note(status: "observed_partial", truncated: false)
+            == "Based on part of this conversation.")
+        #expect(note(status: "partial", truncated: false)
+            == "Based on part of this conversation.")
+        // Unknown stays fail-closed.
+        #expect(note(status: "schema_unsupported", truncated: false)
+            == "Full conversation history could not be confirmed.")
+    }
+
+    @Test
+    func savedFollowUpsCarryTheSameCoverageMeaning() {
+        // A saved follow-up records the worker's status verbatim, so the row
+        // note has to come from the same shared helper.
+        let model = SavedFollowUp(
+            id: UUID(), source: .archive, conversationLabel: "Weekend plans",
+            sender: "Sam",
+            evidenceTimestamp: Date(timeIntervalSince1970: 1_791_151_200),
+            evidenceTimestampKind: "archive_sent",
+            scanWindowStart: Date(timeIntervalSince1970: 1_791_151_200),
+            scanWindowEnd: Date(timeIntervalSince1970: 1_791_151_560),
+            coverageStatus: "observed_complete", coverageCaveats: [],
+            savedAt: Date(timeIntervalSince1970: 1_791_151_560),
+            text: "Reply to Sam", reasons: [], status: .pending
+        )
+        // No false incompleteness note for a genuinely complete read.
+        #expect(FollowUpCoveragePresentation.message(for: model.coverageStatus) == nil)
+        #expect(FollowUpCoveragePresentation.label(for: model.coverageStatus) == "Complete")
+        // And a partial one still warns.
+        let partial = SavedFollowUp(
+            id: model.id, source: model.source, conversationLabel: model.conversationLabel,
+            sender: model.sender, evidenceTimestamp: model.evidenceTimestamp,
+            evidenceTimestampKind: model.evidenceTimestampKind,
+            scanWindowStart: model.scanWindowStart, scanWindowEnd: model.scanWindowEnd,
+            coverageStatus: "observed_partial", coverageCaveats: ["archive:observed_partial"],
+            savedAt: model.savedAt, text: model.text, reasons: model.reasons, status: model.status
+        )
+        #expect(FollowUpCoveragePresentation.message(for: partial.coverageStatus) != nil)
+        #expect(FollowUpCoveragePresentation.label(for: partial.coverageStatus) == "Partial")
+        // The stored caveat is a real wire token, and it reads as Partial.
+        #expect(partial.coverageCaveats.map(FollowUpCoveragePresentation.caveat(_:))
+            == ["Imported WeChat archives: Partial"])
+    }
+
+    @Test
+    func noConsumerCodeComparesCoverageAgainstALiteralComplete() throws {
+        // One meaning, one owner. A direct literal comparison in a view is how a
+        // real observed_complete result became a false incompleteness warning.
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("WeChatCompanion")
+        for name in ["ContentView.swift", "OnDeviceAnswerRunner.swift"] {
+            let text = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
+            #expect(!text.contains("\"complete\""), "\(name) compares coverage against the literal complete")
         }
     }
 }

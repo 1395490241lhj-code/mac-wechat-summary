@@ -18,6 +18,16 @@ struct ContextRevealRequest: Equatable {
     let anchor: ContextRevealAnchor
 }
 
+/// Why the user is in Settings. Session-only: it keeps the originating task
+/// recoverable and names the return action. It never authorises work.
+enum PreparationOrigin: Equatable, Sendable {
+    case dailySummary
+    case followUps
+
+    var destination: Destination { self == .dailySummary ? .dailySummary : .reminders }
+    var returnTitle: String { self == .dailySummary ? "Back to Daily Summary" : "Back to Follow-ups" }
+}
+
 /// One-shot, session-only presentation intent; Search owns execution and results.
 struct ArchiveSearchRequest: Equatable {
     let query: String
@@ -32,6 +42,11 @@ final class AppModel {
             navigationGeneration &+= 1
             if selectedDestination == .search, oldValue != .search {
                 searchParentDestination = (oldValue ?? .overview).primaryDestination
+            }
+            // Any other exit from Settings retires the return action; only
+            // returnToPreparationOrigin() consumes the origin deliberately.
+            if oldValue == .settings, selectedDestination != .settings {
+                preparationOrigin = nil
             }
         }
     }
@@ -407,6 +422,8 @@ final class AppModel {
     private(set) var dailySummarySnapshot: DailySummarySnapshot?
     private var memorySettingsRequested = false
     var hasMemorySettingsRequest: Bool { memorySettingsRequested }
+    /// Why Settings was opened, kept only while the user stays there.
+    private(set) var preparationOrigin: PreparationOrigin?
 
     func openArchiveDailySummary() {
         guard !dailySummaryPhase.isRunning else { return }
@@ -415,7 +432,11 @@ final class AppModel {
     }
 
     var canOpenDailySummaryMemorySettings: Bool {
-        !dailySummaryPhase.isRunning
+        // The Advanced preparation section is only meaningful once conversations
+        // can be stored. While storage is off the single route is the
+        // top-level Local Message Storage control, via openStorageSettings(from:).
+        allowsLocalPersistence
+            && !dailySummaryPhase.isRunning
             && (!memorySyncPhase.isRunning || memorySource == dailySummarySource)
     }
 
@@ -425,10 +446,27 @@ final class AppModel {
         await setMemorySource(source)
         guard dailySummarySource == source, memorySource == source,
               canOpenDailySummaryMemorySettings else { return }
+        preparationOrigin = .dailySummary
         memorySettingsRequested = true
         selectedDestination = .settings
     }
 
+    /// Opens Settings on the top-level local-storage control while remembering
+    /// the task the user came from. Records intent and navigates; runs nothing.
+    func openStorageSettings(from origin: PreparationOrigin) {
+        preparationOrigin = origin
+        selectedDestination = .settings
+    }
+
+    /// Navigation only: no sync, summary, or scan runs on the way back.
+    func returnToPreparationOrigin() {
+        guard let origin = preparationOrigin else { return }
+        preparationOrigin = nil
+        selectedDestination = origin.destination
+    }
+
+    /// Clears only the one-shot scroll request; the origin outlives it so the
+    /// return action survives after the section has been scrolled to.
     func consumeMemorySettingsRequest() -> Bool {
         defer { memorySettingsRequested = false }
         return memorySettingsRequested
@@ -496,7 +534,8 @@ final class AppModel {
     }
 
     var canOpenFollowUpMemorySettings: Bool {
-        !followUpPhase.isRunning
+        allowsLocalPersistence
+            && !followUpPhase.isRunning
             && (!memorySyncPhase.isRunning || memorySource == followUpSource)
     }
 
@@ -506,6 +545,7 @@ final class AppModel {
         await setMemorySource(source)
         guard followUpSource == source, memorySource == source,
               canOpenFollowUpMemorySettings else { return }
+        preparationOrigin = .followUps
         memorySettingsRequested = true
         selectedDestination = .settings
     }
@@ -2617,9 +2657,14 @@ struct VisualQualityReconciliationTracker {
 #if DEBUG
 extension AppModel {
     /// Presentation-only synthetic data for Xcode previews; never bootstraps a store.
-    func configureConsumerPreview(destination: Destination, followUpPreparationRequired: Bool = false) {
+    func configureConsumerPreview(
+        destination: Destination,
+        followUpPreparationRequired: Bool = false,
+        storageOff: Bool = false,
+        preparationOrigin: PreparationOrigin? = nil
+    ) {
         let date = Date(timeIntervalSince1970: 1_791_151_200)
-        allowsLocalPersistence = true
+        allowsLocalPersistence = !storageOff
         archiveEvidence = ArchiveEvidenceSnapshot(storeState: .ready, imports: [
             ArchiveEvidenceImportSummary(id: 1, displayName: "Weekend plans", shape: .attributed,
                 importedAt: date, recordCount: 2, firstSentAt: date, lastSentAt: date,
@@ -2648,6 +2693,9 @@ extension AppModel {
             }
         }
         selectedDestination = destination
+        if let preparationOrigin {
+            openStorageSettings(from: preparationOrigin)
+        }
     }
 }
 #endif

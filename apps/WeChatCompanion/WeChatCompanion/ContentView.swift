@@ -47,6 +47,20 @@ struct ContentView: View {
                     }
                 }
             }
+            // Settings is a scroll view; the return lives in the root toolbar
+            // so it survives any scroll position. It only appears when this
+            // visit actually came from Summary or Follow-ups.
+            if let origin = model.preparationOrigin, model.selectedDestination == .settings {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        model.returnToPreparationOrigin()
+                    } label: {
+                        // Explicit Text: the toolbar drops a systemImage label
+                        // to icon-only here, and the return must be named.
+                        Text(origin.returnTitle)
+                    }
+                }
+            }
         }
     }
 }
@@ -2119,7 +2133,7 @@ private struct MemorySection: View {
                     Divider()
                 }
                 HStack(alignment: .firstTextBaseline) {
-                    Button(model.memorySyncPhase.isRunning ? "Syncing…" : "Sync Now") {
+                    Button(model.memorySyncPhase.isRunning ? "Preparing…" : "Prepare Conversations") {
                         Task { await model.syncMemoryNow() }
                     }
                     .disabled(!model.canSyncMemory)
@@ -2154,8 +2168,12 @@ private struct MemorySection: View {
         case .running:
             return "Reading the selected source into Memory."
         case .succeeded(let counts):
-            return "Done: \(counts.messagesInserted) new, \(counts.messagesUpdated) re-observed, "
-                + "\(counts.conversationsSeen) conversation(s)."
+            var done = "Prepared \(counts.conversationsSeen) conversation(s) · "
+                + "\(counts.messagesInserted) new messages"
+            if counts.messagesUpdated > 0 {
+                done += " · \(counts.messagesUpdated) existing messages refreshed"
+            }
+            return done + "."
         case .failed(let failure):
             return failure.message
         }
@@ -2225,7 +2243,7 @@ private struct DailySummaryView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Daily Summary")
                         .font(.largeTitle.bold())
-                    Text("A local evidence digest from Memory. Preparing it makes no network request and does not run an AI model.")
+                    Text("A digest of the conversations you have prepared. Reading them is local: it makes no network request and runs no AI model.")
                         .foregroundStyle(.secondary)
                 }
 
@@ -2276,30 +2294,34 @@ private struct DailySummaryView: View {
                         Divider()
 
                         if model.dailySummarySource == .archive {
-                            Text("Uses already-synced attributed Archive evidence for the selected window across all imports, not just the export you are browsing. Unattributed records and attachments are excluded. Importing does not sync Memory.")
+                            Text("Uses attributed Archive messages for the selected window across all imports, not just the export you are browsing. Unattributed records and attachments are excluded. Importing does not prepare conversations.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
 
-                        HStack {
-                            Button("Prepare chat content…") {
-                                Task { await model.openDailySummaryMemorySettings() }
-                            }
-                            .disabled(!model.canOpenDailySummaryMemorySettings)
-                            .help("Select this summary source in Memory Settings. Sync remains explicit.")
-                            if !model.canOpenDailySummaryMemorySettings && model.memorySyncPhase.isRunning {
-                                Text("Wait for the current Memory sync before changing its source.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        // While storage is off the only preparation route is the
+                        // Local Message Storage control below, so this stays hidden.
+                        if model.allowsLocalPersistence {
+                            HStack {
+                                Button("Prepare conversations…") {
+                                    Task { await model.openDailySummaryMemorySettings() }
+                                }
+                                .disabled(!model.canOpenDailySummaryMemorySettings)
+                                .help("Choose which conversations this summary reads. Preparing remains explicit.")
+                                if !model.canOpenDailySummaryMemorySettings && model.memorySyncPhase.isRunning {
+                                    Text("Wait for the current preparation to finish before changing its source.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
 
                         HStack {
-                            Text("Reads only the already-synced Memory store.")
+                            Text("Reads only conversations you have already prepared.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Button(model.dailySummarySnapshot == nil ? "Prepare Summary" : "Refresh") {
+                            Button(model.dailySummarySnapshot == nil ? summaryActionTitle : "Refresh") {
                                 Task { await model.prepareDailySummary() }
                             }
                             .disabled(!model.canPrepareDailySummary)
@@ -2312,8 +2334,9 @@ private struct DailySummaryView: View {
                     ContentUnavailableView(
                         "Local Storage Is Off",
                         systemImage: "externaldrive.badge.xmark",
-                        description: Text("Enable local message storage in Settings before Daily Summary can read Memory.")
+                        description: Text("Daily Summary reads conversations stored on this Mac. Turn local storage on in Settings to continue.")
                     )
+                    Button("Open Settings") { model.openStorageSettings(from: .dailySummary) }
                 } else {
                     summaryState
                 }
@@ -2329,27 +2352,48 @@ private struct DailySummaryView: View {
         switch model.dailySummaryPhase {
         case .idle:
             ContentUnavailableView(
-                "Ready to Prepare",
+                "Ready when you are",
                 systemImage: "text.document",
-                description: Text("Choose a source and bounded time window, then prepare a local evidence digest.")
+                description: Text("Choose a source and time period, then show a local digest of the conversations you've prepared.")
             )
         case .running:
             HStack(spacing: 10) {
                 ProgressView()
-                Text("Reading Memory evidence…")
+                Text("Reading prepared conversations…")
                     .foregroundStyle(.secondary)
             }
             .padding(.vertical, 12)
         case .failed(let failure):
             ContentUnavailableView(
-                "Summary Evidence Unavailable",
+                "Summary Unavailable",
                 systemImage: "exclamationmark.triangle",
-                description: Text(failure.message)
+                description: Text(summaryFailureMessage(failure))
             )
         case .ready:
             if let snapshot = model.dailySummarySnapshot {
                 DailySummarySnapshotView(snapshot: snapshot)
             }
+        }
+    }
+
+    private var summaryActionTitle: String {
+        switch model.dailySummaryWindow {
+        case .today: "Show today's summary"
+        case .yesterday: "Show yesterday's summary"
+        case .last24Hours: "Show summary for the last 24 hours"
+        }
+    }
+
+    /// Consumer wording for a failure. The worker state token names an internal
+    /// step the user cannot act on, and no consumer surface shows it, so the
+    /// copy promises no detail it cannot give. The raw token is not written
+    /// anywhere; changing that would be diagnostics work, out of this scope.
+    private func summaryFailureMessage(_ failure: DailySummaryFailure) -> String {
+        switch failure {
+        case .consentWithheld: "Turn on local storage to read conversations you have prepared."
+        case .runnerUnavailable: "Reading a summary is unavailable in this build."
+        case .memoryUnavailable: "These conversations need to be prepared before you can see a summary."
+        case .workerFailed: "Could not build the summary. Try again in a moment."
         }
     }
 }
@@ -2375,7 +2419,7 @@ private struct DailySummarySnapshotView: View {
                     if let lastSync = snapshot.freshness?.lastSuccessfulSync {
                         Divider()
                         summaryRow(
-                            "Last Memory sync",
+                            "Last prepared",
                             lastSync.formatted(date: .abbreviated, time: .shortened)
                         )
                     }
@@ -2399,7 +2443,7 @@ private struct DailySummarySnapshotView: View {
                             )
                         }
                         ForEach(snapshot.coverage.caveats, id: \.self) { caveat in
-                            Label(caveat, systemImage: "info.circle")
+                            Label(FollowUpCoveragePresentation.caveat(caveat), systemImage: "info.circle")
                         }
                     }
                     .font(.callout)
@@ -2419,7 +2463,7 @@ private struct DailySummarySnapshotView: View {
                 ContentUnavailableView(
                     "No Messages in This Covered Window",
                     systemImage: "checkmark.circle",
-                    description: Text("Memory reports complete coverage for the selected source and window.")
+                    description: Text("Prepared conversations are fully covered for the selected source and period.")
                 )
             } else {
                 ContentUnavailableView(
@@ -2474,13 +2518,7 @@ private struct DailySummarySnapshotView: View {
     }
 
     private var coverageLabel: String {
-        switch snapshot.coverage.status {
-        case "complete": "Complete"
-        case "partial": "Partial"
-        case "unavailable": "Unavailable"
-        case "not_observed": "Not observed"
-        default: snapshot.coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
-        }
+        FollowUpCoveragePresentation.label(for: snapshot.coverage.status)
     }
 
     private var windowText: String {
@@ -2576,7 +2614,7 @@ private struct FollowUpsView: View {
                 if !model.allowsLocalPersistence {
                     Text("Turn on local storage to find and keep follow-ups.")
                         .font(.callout).foregroundStyle(.secondary)
-                    Button("Open Settings") { model.selectedDestination = .settings }
+                    Button("Open Settings") { model.openStorageSettings(from: .followUps) }
                 } else if findingExpanded || model.followUpPhase != .idle {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("\(model.followUpWindow.label) · Prepared conversations")
@@ -2674,7 +2712,6 @@ private struct FollowUpsView: View {
             if !model.canOpenFollowUpMemorySettings && model.memorySyncPhase.isRunning {
                 Text("Preparation is already running. Wait for it to finish before switching conversations.")
             }
-            if case .failed(let failure) = model.followUpPhase { Text(failure.message) }
         }
         .padding(.top, 8)
     }
@@ -2711,7 +2748,7 @@ private struct FollowUpsView: View {
         case .consentWithheld: "Turn on local storage to find follow-ups."
         case .runnerUnavailable: "Finding follow-ups is unavailable in this build."
         case .memoryUnavailable: "These conversations need to be prepared before finding follow-ups."
-        case .workerFailed: "Could not find follow-ups. Try again, or check the details below."
+        case .workerFailed: "Could not find follow-ups. Try again in a moment."
         }
     }
 
@@ -2783,7 +2820,7 @@ private struct SavedFollowUpRow: View {
                 VStack(alignment: .leading, spacing: 12) {
                 Text(provenanceText).font(.callout).foregroundStyle(.secondary)
                 ForEach(Array(reminder.coverageCaveats.enumerated()), id: \.offset) { _, caveat in
-                    Text(caveat).font(.callout).foregroundStyle(.secondary)
+                    Text(FollowUpCoveragePresentation.caveat(caveat)).font(.callout).foregroundStyle(.secondary)
                 }
                 Text("Saved " + reminder.savedAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption).foregroundStyle(.secondary)
@@ -2809,7 +2846,7 @@ private struct SavedFollowUpRow: View {
         return "\(reminder.source.label) · \(reminder.conversationLabel) · \(sender) · "
             + reminder.evidenceTimestamp.formatted(date: .abbreviated, time: .shortened)
             + " · Coverage: "
-            + reminder.coverageStatus.replacingOccurrences(of: "_", with: " ").capitalized
+            + FollowUpCoveragePresentation.label(for: reminder.coverageStatus)
             + " · Scan: "
             + reminder.scanWindowStart.formatted(date: .abbreviated, time: .shortened)
             + " – "
@@ -2825,8 +2862,8 @@ private struct FollowUpSnapshotView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            if snapshot.coverage.status != "complete" || snapshot.truncated {
-                Text(snapshot.coverage.status == "complete"
+            if !FollowUpCoveragePresentation.isComplete(snapshot.coverage.status) || snapshot.truncated {
+                Text(FollowUpCoveragePresentation.isComplete(snapshot.coverage.status)
                     ? "Some messages or suggestions may be missing from this search."
                     : (FollowUpCoveragePresentation.message(for: snapshot.coverage.status) ?? ""))
                     .font(.caption).foregroundStyle(.secondary)
@@ -2847,7 +2884,7 @@ private struct FollowUpSnapshotView: View {
                     if snapshot.truncated {
                         Text("The search checks the newest 200 messages and returns at most 50 suggestions.")
                     }
-                    ForEach(snapshot.coverage.caveats, id: \.self) { Text($0) }
+                    ForEach(snapshot.coverage.caveats, id: \.self) { Text(FollowUpCoveragePresentation.caveat($0)) }
                 }
                 .font(.caption).foregroundStyle(.secondary)
             }
@@ -2902,13 +2939,7 @@ private struct FollowUpSnapshotView: View {
     }
 
     private var coverageLabel: String {
-        switch snapshot.coverage.status {
-        case "complete": "Complete"
-        case "partial": "Partial"
-        case "unavailable": "Unavailable"
-        case "not_observed": "Not observed"
-        default: snapshot.coverage.status.replacingOccurrences(of: "_", with: " ").capitalized
-        }
+        FollowUpCoveragePresentation.label(for: snapshot.coverage.status)
     }
 
     private var windowText: String {
@@ -2969,7 +3000,7 @@ private struct FollowUpCandidateRow: View {
     }
 
     private var candidateProvenanceText: String {
-        "Coverage: \(coverageStatus.replacingOccurrences(of: "_", with: " ").capitalized)"
+        "Coverage: \(FollowUpCoveragePresentation.label(for: coverageStatus))"
             + " · Scan: "
             + scanWindowStart.formatted(date: .abbreviated, time: .shortened)
             + " – "
@@ -3820,7 +3851,13 @@ private struct ConsumerPreviewSurface: View {
     @State private var model: AppModel
     private let history: LocalMessageHistory
 
-    init(destination: Destination, searchFrom: Destination? = nil, followUpPreparationRequired: Bool = false) {
+    init(
+        destination: Destination,
+        searchFrom: Destination? = nil,
+        followUpPreparationRequired: Bool = false,
+        storageOff: Bool = false,
+        preparationOrigin: PreparationOrigin? = nil
+    ) {
         self.destination = destination
         let history = LocalMessageHistory(url: nil)
         self.history = history
@@ -3831,7 +3868,10 @@ private struct ConsumerPreviewSurface: View {
             dailySummary: UnavailableDailySummaryRunner(), followUpCandidates: UnavailableFollowUpRunner(),
             answerEvidence: UnavailableAnswerEvidenceRunner(), reminderStore: VolatileReminderStore()
         )
-        model.configureConsumerPreview(destination: destination, followUpPreparationRequired: followUpPreparationRequired)
+        model.configureConsumerPreview(
+            destination: destination, followUpPreparationRequired: followUpPreparationRequired,
+            storageOff: storageOff, preparationOrigin: preparationOrigin
+        )
         if let searchFrom {
             model.selectedDestination = searchFrom
             model.selectedDestination = .search
@@ -3872,6 +3912,10 @@ private struct PreviewCredentials: CredentialStoring {
 #Preview("Consumer Settings — isolated") { ConsumerPreviewSurface(destination: .settings) }
 #Preview("Search from Chats — isolated") { ConsumerPreviewSurface(destination: .search, searchFrom: .chats) }
 #Preview("Follow-ups preparation needed — isolated") { ConsumerPreviewSurface(destination: .reminders, followUpPreparationRequired: true) }
+#Preview("Daily Summary — synthetic") { ConsumerPreviewSurface(destination: .dailySummary) }
+#Preview("Daily Summary, storage off — isolated") { ConsumerPreviewSurface(destination: .dailySummary, storageOff: true) }
+#Preview("Settings from Daily Summary — isolated") { ConsumerPreviewSurface(destination: .settings, preparationOrigin: .dailySummary) }
+#Preview("Settings from Follow-ups — isolated") { ConsumerPreviewSurface(destination: .settings, preparationOrigin: .followUps) }
 #endif
 
 private struct ImportAttentionView: View {

@@ -357,10 +357,55 @@ struct ConsumerConversationRow: Identifiable, Equatable {
 
 /// User-facing completeness wording; unknown states never imply a complete history.
 enum FollowUpCoveragePresentation {
+    /// One interpretation for both spellings of a coverage state. The worker
+    /// wire vocabulary (`bridge/message_source.py`) sends `observed_*`; older
+    /// and synthetic callers send the short forms. Every consumer comparison
+    /// must go through here, so a real `observed_complete` is never mistaken
+    /// for an incomplete history. Unknown states are not complete.
+    static func isComplete(_ status: String) -> Bool {
+        status == "complete" || status == "observed_complete"
+    }
+
+    static func label(for status: String) -> String {
+        switch status {
+        case "complete", "observed_complete": "Complete"
+        case "partial", "observed_partial": "Partial"
+        case "unavailable": "Unavailable"
+        case "not_observed": "Not observed"
+        default: status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    /// Worker caveats arrive as `source:status` / `source:reason` tokens
+    /// ("archive:observed_partial", "archive:memory_store_missing"). Only the
+    /// public coverage vocabulary and known source names may reach the
+    /// consumer; an unknown machine token degrades to one neutral sentence
+    /// rather than becoming prettified implementation vocabulary. Free-text
+    /// caveats are already prose and pass through byte-for-byte.
+    static func caveat(_ raw: String) -> String {
+        // Worker prose (including prose that happens to contain a colon) keeps
+        // its own wording; only a whitespace-free `source:token` is machine
+        // vocabulary that must be translated.
+        guard !raw.contains(where: \.isWhitespace) else { return raw }
+        let parts = raw.split(separator: ":", maxSplits: 1).map(String.init)
+        // No colon means no machine token: worker prose, shown as written.
+        guard parts.count == 2 else { return raw }
+        let source = MemorySource(rawValue: parts[0])?.label ?? "Coverage"
+        let token = parts[1]
+        switch token {
+        case "complete", "observed_complete", "partial", "observed_partial",
+             "unavailable", "not_observed":
+            return "\(source): \(label(for: token))"
+        default:
+            // Fail closed. An internal reason is never re-spelled for the user.
+            return "\(source): Coverage could not be fully confirmed."
+        }
+    }
+
     static func message(for status: String) -> String? {
         switch status {
-        case "complete": nil
-        case "partial": "Based on part of this conversation."
+        case "complete", "observed_complete": nil
+        case "partial", "observed_partial": "Based on part of this conversation."
         case "unavailable": "Conversation history is unavailable."
         case "not_observed": "Conversation history has not been checked."
         default: "Full conversation history could not be confirmed."
