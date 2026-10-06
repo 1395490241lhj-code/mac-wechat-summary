@@ -43,7 +43,7 @@ struct ContentView: View {
                !Destination.primary.contains(destination) {
                 ToolbarItem(placement: .navigation) {
                     Button("Back to \(model.primaryNavigationDestination.rawValue)", systemImage: "chevron.left") {
-                        model.selectedDestination = model.primaryNavigationDestination
+                        model.returnFromNonPrimaryDestination()
                     }
                 }
             }
@@ -820,6 +820,12 @@ private struct ChatsView: View {
             }
             ToolbarItem {
                 Menu("More", systemImage: "ellipsis") {
+                    if let selected = model.archiveEvidence.imports.first(where: { $0.id == model.selectedArchiveImportID }),
+                       selected.shape == .attributed {
+                        Button("Ask about this conversation") {
+                            Task { await model.askAboutCurrentArchiveConversation() }
+                        }
+                    }
                     Button("Summary of prepared conversations") { model.openArchiveDailySummary() }
                     Button("Add a conversation from WeChat") { isShowingShareHelp = true }
                     Button("Add saved conversation…") { isChoosingArchive = true }
@@ -1036,6 +1042,19 @@ private struct ArchiveEvidenceBrowser: View {
                             : ""),
                     caveat: transcriptWindowNote(summary: selected)
                 )
+
+                if consumerMode && selected.shape == .attributed {
+                    HStack {
+                        Button {
+                            Task { await model.askAboutCurrentArchiveConversation() }
+                        } label: {
+                            Label("Ask about this conversation", systemImage: "sparkle")
+                        }
+                        .help("Ask questions about this saved conversation using the on-device model.")
+                        Spacer()
+                    }
+                    .padding(.top, 4)
+                }
             }
 
             // Naming and linking are real controls, but they are not what the
@@ -3228,13 +3247,20 @@ private struct AgentsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Agents")
+                    Text("Questions")
                         .font(.largeTitle.bold())
-                    Text("One question about already-synced Archive Memory, answered on this Mac. No API key, no remote processing, and nothing kept after you quit.")
+                    Text("Ask one question at a time about conversations you’ve prepared. Answers are produced on this Mac, with no remote processing or saved question history.")
                         .foregroundStyle(.secondary)
                 }
 
-                if let reason = model.answerAvailability.reason {
+                if !model.allowsLocalPersistence {
+                    ContentUnavailableView(
+                        "Local Storage Is Off",
+                        systemImage: "externaldrive.badge.xmark",
+                        description: Text("Questions require conversations stored on this Mac. Turn local storage on in Settings to continue.")
+                    )
+                    Button("Open Settings") { model.openStorageSettings(from: .questions) }
+                } else if let reason = model.answerAvailability.reason {
                     unavailable(reason)
                 } else {
                     controls
@@ -3244,7 +3270,7 @@ private struct AgentsView: View {
             .padding(24)
             .frame(maxWidth: 920, alignment: .leading)
         }
-        .navigationTitle("Agents")
+        .navigationTitle("Questions")
         .onAppear {
             // Availability is ephemeral system state, so it is re-read when
             // the surface appears rather than only at launch.
@@ -3270,11 +3296,39 @@ private struct AgentsView: View {
     private var controls: some View {
         GroupBox("Question") {
             VStack(alignment: .leading, spacing: 12) {
+                if case .exactLoading = model.questionTargetState {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking conversation preparation…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                } else if case .exactNeedsPreparation = model.questionTargetState {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("This conversation needs to be prepared before you can ask questions.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Button("Prepare conversations…") {
+                            Task { await model.openQuestionsMemorySettings() }
+                        }
+                        .disabled(!model.canOpenQuestionsMemorySettings)
+                    }
+                    .padding(.vertical, 4)
+                } else if case .exactUnavailable(_, let reason) = model.questionTargetState {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(reason.message)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 TextField("Ask about the selected window", text: $question, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...3)
                     .accessibilityLabel("Question about the Archive")
-                    .disabled(model.answerPhase.isRunning)
+                    .disabled(!model.canAskArchiveQuestion)
 
                 HStack {
                     Menu {
@@ -3282,9 +3336,9 @@ private struct AgentsView: View {
                             model.setAnswerConversation(nil)
                         } label: {
                             if model.selectedArchiveConversationID == nil {
-                                Label("All Archive snapshots", systemImage: "checkmark")
+                                Label("All prepared imported conversations", systemImage: "checkmark")
                             } else {
-                                Text("All Archive snapshots")
+                                Text("All prepared imported conversations")
                             }
                         }
                         ForEach(model.archiveSnapshots) { snapshot in
@@ -3306,7 +3360,7 @@ private struct AgentsView: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(model.archiveSnapshots.first(where: {
                                 $0.id == model.selectedArchiveConversationID
-                            })?.label ?? "All Archive snapshots")
+                            })?.label ?? "All prepared imported conversations")
                             if let snapshot = model.archiveSnapshots.first(where: {
                                 $0.id == model.selectedArchiveConversationID
                             }) {
@@ -3817,7 +3871,7 @@ private struct SettingsView: View {
                             get: { preparationExpanded || model.hasMemorySettingsRequest },
                             set: { preparationExpanded = $0 }
                         )) { AdvancedSettingsView(model: model) }
-                        Button("On-device questions") { model.selectedDestination = .agents }
+                        Button("On-device questions") { model.openQuestionsFromSettings() }
                         Button("Diagnostics") { model.selectedDestination = .diagnostics }
                         Text("Database acquisition remains unavailable until a supported access route is established.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -3856,7 +3910,10 @@ private struct ConsumerPreviewSurface: View {
         searchFrom: Destination? = nil,
         followUpPreparationRequired: Bool = false,
         storageOff: Bool = false,
-        preparationOrigin: PreparationOrigin? = nil
+        preparationOrigin: PreparationOrigin? = nil,
+        questionOrigin: QuestionOrigin? = nil,
+        questionTargetImportID: Int64? = nil,
+        questionPreparationRequired: Bool = false
     ) {
         self.destination = destination
         let history = LocalMessageHistory(url: nil)
@@ -3870,7 +3927,9 @@ private struct ConsumerPreviewSurface: View {
         )
         model.configureConsumerPreview(
             destination: destination, followUpPreparationRequired: followUpPreparationRequired,
-            storageOff: storageOff, preparationOrigin: preparationOrigin
+            storageOff: storageOff, preparationOrigin: preparationOrigin,
+            questionOrigin: questionOrigin, questionTargetImportID: questionTargetImportID,
+            questionPreparationRequired: questionPreparationRequired
         )
         if let searchFrom {
             model.selectedDestination = searchFrom
@@ -3916,6 +3975,11 @@ private struct PreviewCredentials: CredentialStoring {
 #Preview("Daily Summary, storage off — isolated") { ConsumerPreviewSurface(destination: .dailySummary, storageOff: true) }
 #Preview("Settings from Daily Summary — isolated") { ConsumerPreviewSurface(destination: .settings, preparationOrigin: .dailySummary) }
 #Preview("Settings from Follow-ups — isolated") { ConsumerPreviewSurface(destination: .settings, preparationOrigin: .followUps) }
+#Preview("Questions — synthetic") { ConsumerPreviewSurface(destination: .agents) }
+#Preview("Questions from Chats — prepared") { ConsumerPreviewSurface(destination: .agents, questionOrigin: .chats, questionTargetImportID: 1) }
+#Preview("Questions from Chats — needs preparation") { ConsumerPreviewSurface(destination: .agents, questionOrigin: .chats, questionTargetImportID: 1, questionPreparationRequired: true) }
+#Preview("Questions, storage off — isolated") { ConsumerPreviewSurface(destination: .agents, storageOff: true) }
+#Preview("Settings from Questions — isolated") { ConsumerPreviewSurface(destination: .settings, preparationOrigin: .questions) }
 #endif
 
 private struct ImportAttentionView: View {

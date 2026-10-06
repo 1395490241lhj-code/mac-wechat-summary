@@ -69,6 +69,7 @@ try:
         relative_store_path,
     )
     from archive_message_source import ArchiveMessageSource, SOURCE_ARCHIVE
+    from memory_identity import conversation_canonical_id
     from memory_query import MemoryQueryService
     from memory_store import MemoryStore, MemoryStoreError
     from memory_sync import build_selected_source, sync_from_source
@@ -131,6 +132,7 @@ MAX_MESSAGE_LIMIT: int = 2_000
 MAX_SUMMARY_MESSAGES: int = 200
 MAX_SUMMARY_TEXT_CHARS: int = 2_000
 MAX_FOLLOW_UP_CANDIDATES: int = 50
+INT64_MAX: int = (1 << 63) - 1
 
 #: The evidence window is asked for by shape, not by wording. The request is a
 #: closed set of fields, not a bag to ignore unknown keys from: a question,
@@ -279,10 +281,29 @@ def _archive_conversations(store: MemoryStore, request: dict[str, Any]) -> dict[
         for observation in group.observations:
             if observation.source != SOURCE_ARCHIVE:
                 continue
+            raw_id = observation.source_conversation_id
+            if (
+                not isinstance(raw_id, str)
+                or not raw_id.isdigit()
+                or int(raw_id) <= 0
+                or int(raw_id) > INT64_MAX
+                or str(int(raw_id)) != raw_id
+            ):
+                raise MemoryStoreError(
+                    "archive_conversations_malformed",
+                    "Archive conversation discovery encountered malformed source identity.",
+                )
+            expected_canonical_id = conversation_canonical_id(SOURCE_ARCHIVE, raw_id)
+            if observation.canonical_conversation_id != expected_canonical_id:
+                raise MemoryStoreError(
+                    "archive_conversations_malformed",
+                    "Archive conversation discovery encountered mismatched canonical identity.",
+                )
             rows.append({
                 "canonical_conversation_id": observation.canonical_conversation_id,
                 "source": SOURCE_ARCHIVE,
                 "label": observation.display_name or "Imported Archive snapshot",
+                "import_id": int(raw_id),
                 "first_seen_at": observation.first_seen_at,
                 "last_seen_at": observation.last_seen_at,
             })

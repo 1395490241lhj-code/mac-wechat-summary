@@ -147,9 +147,9 @@ private let archiveConversationsReply = """
  "counts": {"returned_conversations": 2},
  "conversations": [
    {"canonical_conversation_id": "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source": "archive",
-    "label": "Imported Archive snapshot", "first_seen_at": 100.0, "last_seen_at": 100.0},
+    "label": "Imported Archive snapshot", "import_id": 1, "first_seen_at": 100.0, "last_seen_at": 100.0},
    {"canonical_conversation_id": "conv:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "source": "archive",
-    "label": "Imported Archive snapshot", "first_seen_at": 300.0, "last_seen_at": 300.0}
+    "label": "Imported Archive snapshot", "import_id": 2, "first_seen_at": 300.0, "last_seen_at": 300.0}
  ]}
 """
 
@@ -716,6 +716,7 @@ struct PackagedMemorySyncRunnerTests {
             "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "conv:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ])
+        #expect(snapshots.map(\.importID) == [1, 2])
         #expect(Set(snapshots.map(\.label)).count == 1)
         #expect(snapshots.map(\.rangeLabel).count == 2)
         let sent = try JSONSerialization.jsonObject(
@@ -754,6 +755,42 @@ struct PackagedMemorySyncRunnerTests {
                 of: "\"state\": \"ready\"",
                 with: "\"state\": \"partial\""
             ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1, ",
+                with: ""
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": \"not_an_int\""
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": 0"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": -1"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": true"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": 1.5"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": 1.0"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"import_id\": 1",
+                with: "\"import_id\": 9223372036854775808"
+            ),
+            archiveConversationsReply.replacingOccurrences(
+                of: "\"source\": \"archive\"",
+                with: "\"source\": \"visual\""
+            ),
         ]
 
         for (index, body) in malformed.enumerated() {
@@ -765,6 +802,22 @@ struct PackagedMemorySyncRunnerTests {
                 "malformed discovery case \(index)"
             )
         }
+    }
+
+    @Test
+    func archiveConversationDiscoveryAcceptsInt64Max() async throws {
+        let maxBody = archiveConversationsReply.replacingOccurrences(
+            of: "\"import_id\": 1",
+            with: "\"import_id\": 9223372036854775807"
+        )
+        let stub = try StubWorker(replying: maxBody)
+        defer { stub.cleanup() }
+        let outcome = await evidenceRunner(stub).archiveConversations()
+        guard case .ready(let snapshots) = outcome else {
+            Issue.record("expected Archive snapshot discovery success for Int64.max, got \(outcome)")
+            return
+        }
+        #expect(snapshots.first?.importID == Int64.max)
     }
 
     private func evidenceRunner(_ stub: StubWorker) -> PackagedMemorySyncRunner {

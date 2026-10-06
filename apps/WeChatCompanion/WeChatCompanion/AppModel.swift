@@ -23,9 +23,49 @@ struct ContextRevealRequest: Equatable {
 enum PreparationOrigin: Equatable, Sendable {
     case dailySummary
     case followUps
+    case questions
 
-    var destination: Destination { self == .dailySummary ? .dailySummary : .reminders }
-    var returnTitle: String { self == .dailySummary ? "Back to Daily Summary" : "Back to Follow-ups" }
+    var destination: Destination {
+        switch self {
+        case .dailySummary: .dailySummary
+        case .followUps: .reminders
+        case .questions: .agents
+        }
+    }
+    var returnTitle: String {
+        switch self {
+        case .dailySummary: "Back to Daily Summary"
+        case .followUps: "Back to Follow-ups"
+        case .questions: "Back to Questions"
+        }
+    }
+}
+
+enum QuestionOrigin: Equatable, Sendable {
+    case chats
+    case settings
+}
+
+enum QuestionExactUnavailableReason: Equatable, Sendable {
+    case discoveryUnavailable
+    case ambiguousIdentity
+
+    var message: String {
+        switch self {
+        case .discoveryUnavailable:
+            "Prepared conversations couldn’t be checked. Try again."
+        case .ambiguousIdentity:
+            "This conversation couldn’t be matched safely."
+        }
+    }
+}
+
+enum QuestionTargetState: Equatable, Sendable {
+    case allArchive
+    case exactLoading(importID: Int64)
+    case exactReady(snapshot: ArchiveSnapshot)
+    case exactNeedsPreparation(importID: Int64)
+    case exactUnavailable(importID: Int64, reason: QuestionExactUnavailableReason)
 }
 
 /// One-shot, session-only presentation intent; Search owns execution and results.
@@ -46,7 +86,17 @@ final class AppModel {
             // Any other exit from Settings retires the return action; only
             // returnToPreparationOrigin() consumes the origin deliberately.
             if oldValue == .settings, selectedDestination != .settings {
+                if preparationOrigin == .questions, selectedDestination != .agents {
+                    questionOrigin = nil
+                    questionTargetImportID = nil
+                    questionTargetState = .allArchive
+                }
                 preparationOrigin = nil
+            }
+            if oldValue == .agents, selectedDestination != .agents, selectedDestination != .settings {
+                questionOrigin = nil
+                questionTargetImportID = nil
+                questionTargetState = .allArchive
             }
         }
     }
@@ -54,9 +104,26 @@ final class AppModel {
     @ObservationIgnored private var navigationGeneration: UInt64 = 0
     private var searchParentDestination: Destination = .overview
     var primaryNavigationDestination: Destination {
-        selectedDestination == .search
+        if selectedDestination == .settings, let origin = preparationOrigin {
+            return origin.destination
+        }
+        if selectedDestination == .agents, questionOrigin == .chats {
+            return .chats
+        }
+        return selectedDestination == .search
             ? searchParentDestination
             : (selectedDestination ?? .overview).primaryDestination
+    }
+
+    func returnFromNonPrimaryDestination() {
+        if selectedDestination == .agents, questionOrigin == .chats {
+            questionOrigin = nil
+            questionTargetImportID = nil
+            questionTargetState = .allArchive
+            selectedDestination = .chats
+            return
+        }
+        selectedDestination = primaryNavigationDestination
     }
     var systemStatus = SystemStatus.unknown
     var lastDiagnostic: DiagnosticResult?
@@ -687,6 +754,9 @@ final class AppModel {
     private(set) var answerRevealTarget: ArchiveEvidenceAnchor?
     private(set) var archiveSnapshots: [ArchiveSnapshot] = []
     private(set) var selectedArchiveConversationID: String?
+    private(set) var questionOrigin: QuestionOrigin?
+    private(set) var questionTargetImportID: Int64?
+    private(set) var questionTargetState: QuestionTargetState = .allArchive
     @ObservationIgnored private var answerTask: Task<Void, Never>?
     /// The one user-visible deadline for a run. It is deliberately *earlier*
     /// than the packaged worker's own kill-switch: that one bounds a child
@@ -702,7 +772,13 @@ final class AppModel {
     var isAnswerRunActive: Bool { answerTask != nil }
 
     var canAskArchiveQuestion: Bool {
-        allowsLocalPersistence && !isAnswerRunActive && answerAvailability.isAvailable
+        guard allowsLocalPersistence, !isAnswerRunActive, answerAvailability.isAvailable else {
+            return false
+        }
+        if questionTargetImportID != nil {
+            guard case .exactReady = questionTargetState else { return false }
+        }
+        return true
     }
 
     func setAnswerWindow(_ window: DailySummaryWindow) {
@@ -715,10 +791,35 @@ final class AppModel {
 
     func loadArchiveSnapshots() async {
         guard !isAnswerRunActive else { return }
-        if case let .ready(snapshots) = await answerEvidence.archiveConversations() {
+        switch await answerEvidence.archiveConversations() {
+        case .failed:
+            archiveSnapshots = []
+            if let targetID = questionTargetImportID {
+                questionTargetState = .exactUnavailable(importID: targetID, reason: .discoveryUnavailable)
+                selectedArchiveConversationID = nil
+            } else if selectedArchiveConversationID != nil {
+                selectedArchiveConversationID = nil
+            }
+        case .ready(let snapshots):
             archiveSnapshots = snapshots
-            if let selectedArchiveConversationID,
-               !snapshots.contains(where: { $0.id == selectedArchiveConversationID }) {
+            if let targetID = questionTargetImportID {
+                let matches = snapshots.filter { $0.importID == targetID }
+                if matches.isEmpty {
+                    questionTargetState = .exactNeedsPreparation(importID: targetID)
+                    selectedArchiveConversationID = nil
+                } else if matches.count == 1 {
+                    let snapshot = matches[0]
+                    questionTargetState = .exactReady(snapshot: snapshot)
+                    selectedArchiveConversationID = snapshot.id
+                } else {
+                    questionTargetState = .exactUnavailable(
+                        importID: targetID,
+                        reason: .ambiguousIdentity
+                    )
+                    selectedArchiveConversationID = nil
+                }
+            } else if let selectedID = selectedArchiveConversationID,
+                      !snapshots.contains(where: { $0.id == selectedID }) {
                 setAnswerConversation(nil)
             }
         }
@@ -726,11 +827,81 @@ final class AppModel {
 
     func setAnswerConversation(_ snapshot: ArchiveSnapshot?) {
         guard !isAnswerRunActive else { return }
-        selectedArchiveConversationID = snapshot?.id
+        questionTargetImportID = nil
+        if let snapshot {
+            questionTargetState = .exactReady(snapshot: snapshot)
+            selectedArchiveConversationID = snapshot.id
+        } else {
+            questionTargetState = .allArchive
+            selectedArchiveConversationID = nil
+        }
         answerResult = nil
         answerSnapshot = nil
         answerRevealTarget = nil
         answerPhase = .idle
+    }
+
+    func askAboutCurrentArchiveConversation() async {
+        guard selectedDestination == .chats,
+              let importID = selectedArchiveImportID,
+              let importSummary = archiveEvidence.imports.first(where: { $0.id == importID }),
+              importSummary.shape == .attributed,
+              selectedVisualConversationID == nil
+        else { return }
+
+        questionOrigin = .chats
+        questionTargetImportID = importID
+        questionTargetState = .exactLoading(importID: importID)
+        selectedArchiveConversationID = nil
+        answerResult = nil
+        answerSnapshot = nil
+        answerRevealTarget = nil
+        answerPhase = .idle
+        selectedDestination = .agents
+    }
+
+    func openQuestionsFromSettings() {
+        questionOrigin = .settings
+        questionTargetImportID = nil
+        questionTargetState = .allArchive
+        selectedArchiveConversationID = nil
+        answerResult = nil
+        answerSnapshot = nil
+        answerRevealTarget = nil
+        answerPhase = .idle
+        selectedDestination = .agents
+    }
+
+    var canOpenQuestionsMemorySettings: Bool {
+        guard allowsLocalPersistence,
+              !isAnswerRunActive,
+              !memorySyncPhase.isRunning
+        else { return false }
+        guard case .exactNeedsPreparation = questionTargetState else { return false }
+        return true
+    }
+
+    func openQuestionsMemorySettings() async {
+        guard canOpenQuestionsMemorySettings,
+              let targetID = questionTargetImportID,
+              case .exactNeedsPreparation(targetID) = questionTargetState
+        else { return }
+
+        if memorySource != .archive {
+            await setMemorySource(.archive)
+        }
+
+        guard allowsLocalPersistence,
+              !isAnswerRunActive,
+              !memorySyncPhase.isRunning,
+              questionTargetImportID == targetID,
+              case .exactNeedsPreparation(targetID) = questionTargetState,
+              memorySource == .archive
+        else { return }
+
+        preparationOrigin = .questions
+        memorySettingsRequested = true
+        selectedDestination = .settings
     }
 
     /// One question, one run. Refuses a second run, an empty question, and a
@@ -739,6 +910,9 @@ final class AppModel {
     func askArchiveQuestion(_ question: String, now: Date = Date()) async {
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isAnswerRunActive else { return }
+        if questionTargetImportID != nil {
+            guard case .exactReady = questionTargetState else { return }
+        }
         // Re-read before deciding. The cached copy may predate the model
         // becoming ready, and this is the last point at which finding out
         // costs the user nothing.
@@ -2200,7 +2374,7 @@ enum Destination: String, CaseIterable, Identifiable {
     case search = "Search"
     case dailySummary = "Daily Summary"
     case reminders = "Follow-ups"
-    case agents = "Agents"
+    case agents = "Questions"
     case diagnostics = "Diagnostics"
     case settings = "Settings"
 
@@ -2661,7 +2835,10 @@ extension AppModel {
         destination: Destination,
         followUpPreparationRequired: Bool = false,
         storageOff: Bool = false,
-        preparationOrigin: PreparationOrigin? = nil
+        preparationOrigin: PreparationOrigin? = nil,
+        questionOrigin: QuestionOrigin? = nil,
+        questionTargetImportID: Int64? = nil,
+        questionPreparationRequired: Bool = false
     ) {
         let date = Date(timeIntervalSince1970: 1_791_151_200)
         allowsLocalPersistence = !storageOff
@@ -2692,10 +2869,36 @@ extension AppModel {
                     archiveEvidence: ArchiveEvidenceAnchor(importID: 1, sequence: 0))
             }
         }
+        if destination == .agents {
+            self.questionOrigin = questionOrigin
+            self.questionTargetImportID = questionTargetImportID
+            if let questionTargetImportID {
+                if questionPreparationRequired {
+                    questionTargetState = .exactNeedsPreparation(importID: questionTargetImportID)
+                } else {
+                    let snapshot = ArchiveSnapshot(id: "conv:preview-1", importID: questionTargetImportID, label: "Weekend plans", firstSeenAt: date, lastSeenAt: date)
+                    archiveSnapshots = [snapshot]
+                    questionTargetState = .exactReady(snapshot: snapshot)
+                    selectedArchiveConversationID = snapshot.id
+                }
+            } else {
+                questionTargetState = .allArchive
+            }
+        }
         selectedDestination = destination
         if let preparationOrigin {
             openStorageSettings(from: preparationOrigin)
         }
+    }
+
+    func setTestArchiveEvidence(
+        imports: [ArchiveEvidenceImportSummary],
+        selectedImportID: Int64? = nil,
+        selectedVisualID: Int64? = nil
+    ) {
+        archiveEvidence = ArchiveEvidenceSnapshot(storeState: .ready, imports: imports)
+        selectedArchiveImportID = selectedImportID
+        selectedVisualConversationID = selectedVisualID
     }
 }
 #endif

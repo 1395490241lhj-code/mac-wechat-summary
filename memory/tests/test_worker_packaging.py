@@ -105,3 +105,40 @@ def test_the_built_bundle_carries_the_pinned_identity():
     assert (BUILT / "Contents/MacOS/MemoryWorker").exists()
     # PyInstaller's macOS layout, which is what signs cleanly.
     assert (BUILT / "Contents/Frameworks").is_dir()
+
+
+@pytest.mark.skipif(not BUILT.exists(), reason="worker not built; run scripts/build-memory-worker.sh")
+def test_the_built_worker_emits_import_id_for_archive_conversations(tmp_path):
+    import json
+    import subprocess
+    from conftest import granted
+    from memory_store import MemoryStore
+    from memory_identity import conversation_canonical_id
+    app_support = tmp_path / "Library/Application Support/WeChatCompanion"
+    app_support.mkdir(parents=True, exist_ok=True)
+    (app_support / "state.json").write_text(json.dumps({"local_persistence_consent": True}))
+    store = tmp_path / "memory.sqlite"
+    valid_id = conversation_canonical_id("archive", "42")
+    with MemoryStore.open(granted(tmp_path)) as opened:
+        with opened.transaction():
+            opened.upsert_conversation(
+                canonical_id=valid_id,
+                source="archive",
+                source_conversation_id="42",
+                display_name="Chat 42",
+                kind=None,
+                first_seen_at=100.0,
+                last_seen_at=200.0,
+                now=1_700_000_000.0,
+            )
+    proc = subprocess.run(
+        [str(BUILT / "Contents/MacOS/MemoryWorker")],
+        input=json.dumps({"op": "archive_conversations", "store_path": str(store)}),
+        text=True, capture_output=True, env={"HOME": str(tmp_path)},
+    )
+    assert proc.returncode == 0
+    reply = json.loads(proc.stdout)
+    assert reply.get("ok") is True
+    assert len(reply["conversations"]) == 1
+    assert reply["conversations"][0]["import_id"] == 42
+    assert reply["conversations"][0]["canonical_conversation_id"] == valid_id

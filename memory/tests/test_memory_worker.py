@@ -593,8 +593,48 @@ def test_archive_conversation_discovery_is_unwindowed_and_keeps_same_label_obser
     rows = reply["conversations"]
     assert {row["canonical_conversation_id"] for row in rows} == {first, second}
     assert {row["source"] for row in rows} == {SOURCE_ARCHIVE}
+    assert {row["import_id"] for row in rows} == {1, 3}
     assert len({row["label"] for row in rows}) == 1
     assert {row["first_seen_at"] for row in rows} == {100.0, 300.0}
+
+
+@pytest.mark.parametrize("bad_id", ["abc", "-1", "0", "01", "1.5", "", "9223372036854775808"])
+def test_archive_conversation_discovery_rejects_malformed_source_identity(tmp_path, bad_id):
+    store = tmp_path / "memory.sqlite"
+    with MemoryStore.open(granted(tmp_path)) as opened:
+        with opened.transaction():
+            opened.upsert_conversation(
+                canonical_id=conversation_canonical_id(SOURCE_ARCHIVE, bad_id),
+                source=SOURCE_ARCHIVE,
+                source_conversation_id=bad_id,
+                display_name="Label",
+                kind=None,
+                first_seen_at=100.0,
+                last_seen_at=100.0,
+                now=1_700_000_000.0,
+            )
+    reply, code = run({"op": "archive_conversations", "store_path": str(store)})
+    assert (reply["ok"], code) == (False, 1), reply
+    assert reply["state"] == "archive_conversations_malformed"
+
+
+def test_archive_conversation_discovery_rejects_mismatched_canonical_identity(tmp_path):
+    store = tmp_path / "memory.sqlite"
+    with MemoryStore.open(granted(tmp_path)) as opened:
+        with opened.transaction():
+            opened.upsert_conversation(
+                canonical_id="conv:ffffffffffffffffffffffffffffffff",
+                source=SOURCE_ARCHIVE,
+                source_conversation_id="42",
+                display_name="Corrupt Pair",
+                kind=None,
+                first_seen_at=100.0,
+                last_seen_at=100.0,
+                now=1_700_000_000.0,
+            )
+    reply, code = run({"op": "archive_conversations", "store_path": str(store)})
+    assert (reply["ok"], code) == (False, 1), reply
+    assert reply["state"] == "archive_conversations_malformed"
 
 
 def test_archive_conversation_discovery_refuses_truncated_results(tmp_path):

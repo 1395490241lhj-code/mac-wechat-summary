@@ -100,6 +100,7 @@ struct AnswerEvidenceSnapshot: Equatable, Sendable {
 
 struct ArchiveSnapshot: Identifiable, Equatable, Sendable {
     let id: String
+    let importID: Int64
     let label: String
     let firstSeenAt: Date?
     let lastSeenAt: Date?
@@ -608,10 +609,13 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
                 guard let id = row["canonical_conversation_id"] as? String,
                       Self.isCanonicalConversationID(id),
                       let source = row["source"] as? String, source == "archive",
-                      let label = row["label"] as? String
+                      let label = row["label"] as? String,
+                      let rawImportID = row["import_id"],
+                      let importID = Self.positiveInt64(from: rawImportID)
                 else { return nil }
                 return ArchiveSnapshot(
                     id: id,
+                    importID: importID,
                     label: label,
                     firstSeenAt: Self.date(from: row["first_seen_at"]),
                     lastSeenAt: Self.date(from: row["last_seen_at"])
@@ -678,6 +682,15 @@ struct PackagedMemorySyncRunner: MemorySyncRunning, DailySummaryRunning, FollowU
     private static func date(from value: Any?) -> Date? {
         guard let seconds = value as? Double else { return nil }
         return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func positiveInt64(from value: Any?) -> Int64? {
+        guard let number = value as? NSNumber else { return nil }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        guard !CFNumberIsFloatType(number as CFNumber) else { return nil }
+        let int64 = number.int64Value
+        guard int64 > 0, String(int64) == number.stringValue else { return nil }
+        return int64
     }
 
     private static func isCanonicalConversationID(_ value: String) -> Bool {

@@ -52,20 +52,41 @@ private final class RecordingEvidenceRunner: AnswerEvidenceRunning, @unchecked S
         let start: Date
         let end: Date
         let messageLimit: Int
+        let canonicalID: String?
     }
 
     var outcomes: [AnswerEvidenceOutcome]
+    var discoveryOutcomes: [ArchiveConversationDiscoveryOutcome]
     private(set) var calls: [Call] = []
 
-    init(outcomes: [AnswerEvidenceOutcome]) { self.outcomes = outcomes }
+    init(
+        outcomes: [AnswerEvidenceOutcome] = [],
+        discoveryOutcomes: [ArchiveConversationDiscoveryOutcome] = []
+    ) {
+        self.outcomes = outcomes
+        self.discoveryOutcomes = discoveryOutcomes
+    }
 
     func answerEvidence(
         start: Date, end: Date, messageLimit: Int
     ) async -> AnswerEvidenceOutcome {
-        calls.append(Call(start: start, end: end, messageLimit: messageLimit))
+        calls.append(Call(start: start, end: end, messageLimit: messageLimit, canonicalID: nil))
         return outcomes.isEmpty
             ? .failed(.workerFailed(state: "no_outcome"))
             : outcomes.removeFirst()
+    }
+
+    func answerEvidenceScoped(
+        start: Date, end: Date, messageLimit: Int, conversationCanonicalID: String?
+    ) async -> AnswerEvidenceOutcome {
+        calls.append(Call(start: start, end: end, messageLimit: messageLimit, canonicalID: conversationCanonicalID))
+        return outcomes.isEmpty
+            ? .failed(.workerFailed(state: "no_outcome"))
+            : outcomes.removeFirst()
+    }
+
+    func archiveConversations() async -> ArchiveConversationDiscoveryOutcome {
+        discoveryOutcomes.isEmpty ? .ready([]) : discoveryOutcomes.removeFirst()
     }
 }
 
@@ -241,6 +262,7 @@ func archiveSnapshotSelectionClearsOnAllSnapshotsAndHasNoPersistenceState() {
 
     let snapshot = ArchiveSnapshot(
         id: "conv:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        importID: 1,
         label: "Imported Archive snapshot",
         firstSeenAt: Date(timeIntervalSince1970: 100),
         lastSeenAt: Date(timeIntervalSince1970: 100)
@@ -1283,6 +1305,356 @@ struct OnDeviceAnswerRunLifecycleTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("WeChatCompanion")
+    }
+}
+
+// MARK: - Exact conversation entry & lifecycle
+
+@MainActor
+@Suite("On-device answer exact conversation entry and lifecycle")
+struct OnDeviceAnswerExactEntryLifecycleTests {
+    private func makeAttributedModel(
+        importID: Int64,
+        shape: ArchiveEvidenceShape = .attributed,
+        discoveryOutcomes: [ArchiveConversationDiscoveryOutcome] = []
+    ) -> AppModel {
+        let model = makeAnswerModel(
+            evidence: RecordingEvidenceRunner(discoveryOutcomes: discoveryOutcomes),
+            answer: StubAnswerRunner()
+        )
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let summary = ArchiveEvidenceImportSummary(
+            id: importID,
+            displayName: "Conversation \(importID)",
+            shape: shape,
+            importedAt: date,
+            recordCount: 10,
+            firstSentAt: date,
+            lastSentAt: date,
+            isAnonymous: false,
+            link: nil,
+            attachmentBatchCount: 0,
+            attachmentCount: 0,
+            materializedAttachmentCount: 0
+        )
+        model.setTestArchiveEvidence(imports: [summary], selectedImportID: importID)
+        model.selectedDestination = .chats
+        return model
+    }
+
+    @Test("Chats exact entry navigates immediately and resolves after discovery")
+    func chatsExactEntryNavigatesImmediatelyAndResolves() async {
+        let snapshot = ArchiveSnapshot(
+            id: "conv:55555555555555555555555555555555",
+            importID: 5,
+            label: "Conversation 5",
+            firstSeenAt: Date(timeIntervalSince1970: 100),
+            lastSeenAt: Date(timeIntervalSince1970: 200)
+        )
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([snapshot])])
+        #expect(model.archiveSnapshots.isEmpty)
+
+        await model.askAboutCurrentArchiveConversation()
+        #expect(model.selectedDestination == .agents)
+        #expect(model.questionOrigin == .chats)
+        #expect(model.questionTargetImportID == 5)
+        #expect(model.questionTargetState == .exactLoading(importID: 5))
+        #expect(model.selectedArchiveConversationID == nil)
+        #expect(!model.canAskArchiveQuestion)
+
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactReady(snapshot: snapshot))
+        #expect(model.selectedArchiveConversationID == snapshot.id)
+        #expect(model.canAskArchiveQuestion)
+    }
+
+    @Test("Chats exact entry transitions to needs-preparation when 0 matches")
+    func chatsExactEntryNeedsPreparationWhenNoMatch() async {
+        let otherSnapshot = ArchiveSnapshot(
+            id: "conv:22222222222222222222222222222222",
+            importID: 2,
+            label: "Other",
+            firstSeenAt: nil,
+            lastSeenAt: nil
+        )
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([otherSnapshot])])
+        await model.askAboutCurrentArchiveConversation()
+
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactNeedsPreparation(importID: 5))
+        #expect(model.selectedArchiveConversationID == nil)
+        #expect(!model.canAskArchiveQuestion)
+    }
+
+    @Test("Discovery failure is distinct from needs-preparation")
+    func discoveryFailureIsDistinctFromNeedsPreparation() async {
+        let model = makeAttributedModel(
+            importID: 5,
+            discoveryOutcomes: [.failed(.workerFailed(state: "worker_process_died"))]
+        )
+        await model.askAboutCurrentArchiveConversation()
+
+        await model.loadArchiveSnapshots()
+        guard case .exactUnavailable(let id, let reason) = model.questionTargetState else {
+            Issue.record("expected exactUnavailable, got \(model.questionTargetState)")
+            return
+        }
+        #expect(id == 5)
+        #expect(reason == .discoveryUnavailable)
+        #expect(!reason.message.contains("worker_process_died"))
+        #expect(reason.message == "Prepared conversations couldn’t be checked. Try again.")
+        #expect(model.selectedArchiveConversationID == nil)
+        #expect(!model.canAskArchiveQuestion)
+    }
+
+    @Test("Duplicate matches fail closed as unavailable")
+    func duplicateMatchesFailClosed() async {
+        let snapA = ArchiveSnapshot(
+            id: "conv:5555555555555555555555555555555a",
+            importID: 5,
+            label: "Duplicate A",
+            firstSeenAt: nil,
+            lastSeenAt: nil
+        )
+        let snapB = ArchiveSnapshot(
+            id: "conv:5555555555555555555555555555555b",
+            importID: 5,
+            label: "Duplicate B",
+            firstSeenAt: nil,
+            lastSeenAt: nil
+        )
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([snapA, snapB])])
+        await model.askAboutCurrentArchiveConversation()
+
+        await model.loadArchiveSnapshots()
+        guard case .exactUnavailable(let id, let reason) = model.questionTargetState else {
+            Issue.record("expected exactUnavailable for duplicates, got \(model.questionTargetState)")
+            return
+        }
+        #expect(id == 5)
+        #expect(reason == .ambiguousIdentity)
+        #expect(reason.message == "This conversation couldn’t be matched safely.")
+        #expect(model.selectedArchiveConversationID == nil)
+        #expect(!model.canAskArchiveQuestion)
+    }
+
+    @Test("Unresolved exact target cannot execute against All Archive")
+    func unresolvedTargetCannotAskAllArchive() async {
+        let runner = RecordingEvidenceRunner(discoveryOutcomes: [.ready([])])
+        let stub = StubAnswerRunner()
+        let model = makeAnswerModel(evidence: runner, answer: stub)
+        let summary = ArchiveEvidenceImportSummary(
+            id: 5, displayName: "Chat", shape: .attributed,
+            importedAt: Date(), recordCount: 1, firstSentAt: nil, lastSentAt: nil,
+            isAnonymous: false, link: nil, attachmentBatchCount: 0, attachmentCount: 0,
+            materializedAttachmentCount: 0
+        )
+        model.setTestArchiveEvidence(imports: [summary], selectedImportID: 5)
+        model.selectedDestination = .chats
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactNeedsPreparation(importID: 5))
+        #expect(!model.canAskArchiveQuestion)
+
+        await model.askArchiveQuestion("偷偷提问")
+        #expect(runner.calls.isEmpty)
+        #expect(await stub.callCount == 0)
+    }
+
+    @Test("Question origin produces Back to Chats and preserves reader")
+    func questionOriginProducesBackToChats() async {
+        let model = makeAttributedModel(importID: 7)
+        await model.askAboutCurrentArchiveConversation()
+        #expect(model.selectedDestination == .agents)
+        #expect(model.questionOrigin == .chats)
+        #expect(model.primaryNavigationDestination == .chats)
+
+        model.returnFromNonPrimaryDestination()
+        #expect(model.selectedDestination == .chats)
+        #expect(model.selectedArchiveImportID == 7)
+        #expect(model.questionOrigin == nil)
+        #expect(model.questionTargetImportID == nil)
+    }
+
+    @Test("Ordinary Settings-origin Questions returns to Settings")
+    func ordinarySettingsOriginReturnsToSettings() {
+        let model = makeAnswerModel(evidence: RecordingEvidenceRunner(), answer: StubAnswerRunner())
+        model.openQuestionsFromSettings()
+        #expect(model.selectedDestination == .agents)
+        #expect(model.questionOrigin == .settings)
+        #expect(model.primaryNavigationDestination == .settings)
+
+        model.returnFromNonPrimaryDestination()
+        #expect(model.selectedDestination == .settings)
+    }
+
+    @Test("Unrelated navigation clears stale question origin and target")
+    func unrelatedNavigationClearsStaleState() async {
+        let model = makeAttributedModel(importID: 5)
+        await model.askAboutCurrentArchiveConversation()
+        #expect(model.questionOrigin == .chats)
+        #expect(model.questionTargetImportID == 5)
+
+        model.selectedDestination = .overview
+        #expect(model.questionOrigin == nil)
+        #expect(model.questionTargetImportID == nil)
+        #expect(model.questionTargetState == .allArchive)
+    }
+
+    @Test("Exact target survives Questions -> Settings -> Questions preparation round trip")
+    func exactTargetSurvivesPreparationRoundTrip() async {
+        let snap5 = ArchiveSnapshot(
+            id: "conv:55555555555555555555555555555555",
+            importID: 5,
+            label: "Prep 5",
+            firstSeenAt: nil,
+            lastSeenAt: nil
+        )
+        // First discovery: empty. Second discovery (after return): has snap5.
+        let runner = RecordingEvidenceRunner(discoveryOutcomes: [.ready([]), .ready([snap5])])
+        let model = makeAnswerModel(evidence: runner, answer: StubAnswerRunner())
+        let summary = ArchiveEvidenceImportSummary(
+            id: 5, displayName: "Chat", shape: .attributed,
+            importedAt: Date(), recordCount: 1, firstSentAt: nil, lastSentAt: nil,
+            isAnonymous: false, link: nil, attachmentBatchCount: 0, attachmentCount: 0,
+            materializedAttachmentCount: 0
+        )
+        model.setTestArchiveEvidence(imports: [summary], selectedImportID: 5)
+        model.selectedDestination = .chats
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactNeedsPreparation(importID: 5))
+
+        await model.openQuestionsMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .questions)
+        #expect(model.questionTargetImportID == 5)
+
+        model.returnToPreparationOrigin()
+        #expect(model.selectedDestination == .agents)
+        #expect(model.preparationOrigin == nil)
+        #expect(model.questionTargetImportID == 5)
+
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactReady(snapshot: snap5))
+        #expect(model.selectedArchiveConversationID == snap5.id)
+    }
+
+    @Test("Explicit scope change clears the original target intent")
+    func explicitScopeChangeClearsTarget() async {
+        let snap5 = ArchiveSnapshot(
+            id: "conv:55555555555555555555555555555555",
+            importID: 5,
+            label: "5",
+            firstSeenAt: nil,
+            lastSeenAt: nil
+        )
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([snap5])])
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetImportID == 5)
+
+        model.setAnswerConversation(nil)
+        #expect(model.questionTargetImportID == nil)
+        #expect(model.questionTargetState == .allArchive)
+        #expect(model.selectedArchiveConversationID == nil)
+    }
+
+    @Test("Unattributed and Visual rows cannot initiate the exact handoff")
+    func unattributedAndVisualCannotInitiateHandoff() async {
+        let unattributedModel = makeAttributedModel(importID: 3, shape: .unattributed)
+        await unattributedModel.askAboutCurrentArchiveConversation()
+        #expect(unattributedModel.selectedDestination == .chats)
+        #expect(unattributedModel.questionTargetImportID == nil)
+
+        let visualModel = makeAttributedModel(importID: 4)
+        let summary4 = ArchiveEvidenceImportSummary(
+            id: 4, displayName: "Conversation 4", shape: .attributed,
+            importedAt: Date(), recordCount: 10, firstSentAt: nil, lastSentAt: nil,
+            isAnonymous: false, link: nil, attachmentBatchCount: 0, attachmentCount: 0,
+            materializedAttachmentCount: 0
+        )
+        visualModel.setTestArchiveEvidence(imports: [summary4], selectedImportID: 4, selectedVisualID: 10)
+        await visualModel.askAboutCurrentArchiveConversation()
+        #expect(visualModel.selectedDestination == .chats)
+        #expect(visualModel.questionTargetImportID == nil)
+    }
+
+    @Test("Questions preparation aligns memorySource to archive from visual default and runs zero sync")
+    func questionsPreparationAlignsSourceToArchiveAndRunsNoSync() async {
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([])])
+        #expect(model.memorySource == .visual)
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        #expect(model.questionTargetState == .exactNeedsPreparation(importID: 5))
+        #expect(model.canOpenQuestionsMemorySettings)
+
+        await model.openQuestionsMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .questions)
+        #expect(model.hasMemorySettingsRequest)
+        #expect(model.memorySource == .archive)
+        #expect(model.memorySyncPhase == .idle)
+    }
+
+    @Test("Chats exact entry is refused when current destination is not chats")
+    func chatsExactEntryRefusedOutsideChats() async {
+        let model = makeAttributedModel(importID: 5)
+        model.selectedDestination = .overview
+        await model.askAboutCurrentArchiveConversation()
+        #expect(model.selectedDestination == .overview)
+        #expect(model.questionOrigin == nil)
+        #expect(model.questionTargetImportID == nil)
+    }
+
+    @Test("Synthetic worker failure token does not appear in presentation state")
+    func syntheticFailureTokenDoesNotLeak() async {
+        let token = "synthetic_worker_leak_token_12345"
+        let model = makeAttributedModel(
+            importID: 5,
+            discoveryOutcomes: [.failed(.workerFailed(state: token))]
+        )
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        guard case .exactUnavailable(_, let reason) = model.questionTargetState else {
+            Issue.record("expected exactUnavailable")
+            return
+        }
+        #expect(!reason.message.contains(token))
+        #expect(!String(describing: model.questionTargetState).contains(token))
+    }
+
+    @Test("Exact target is retired if Settings preparation journey is abandoned")
+    func exactTargetRetiredIfPreparationAbandoned() async {
+        let model = makeAttributedModel(importID: 5, discoveryOutcomes: [.ready([])])
+        await model.askAboutCurrentArchiveConversation()
+        await model.loadArchiveSnapshots()
+        await model.openQuestionsMemorySettings()
+        #expect(model.selectedDestination == .settings)
+        #expect(model.preparationOrigin == .questions)
+        #expect(model.questionTargetImportID == 5)
+
+        // User abandons by navigating to Home instead of Back to Questions
+        model.selectedDestination = .overview
+        #expect(model.preparationOrigin == nil)
+        #expect(model.questionOrigin == nil)
+        #expect(model.questionTargetImportID == nil)
+        #expect(model.questionTargetState == .allArchive)
+    }
+
+    @Test("Storage enablement alone runs nothing")
+    func storageEnablementAloneRunsNothing() async {
+        let runner = RecordingEvidenceRunner()
+        let model = makeAnswerModel(evidence: runner, answer: StubAnswerRunner(), consent: false)
+        #expect(!model.allowsLocalPersistence)
+
+        await model.setAllowsLocalPersistence(true)
+        #expect(model.allowsLocalPersistence)
+        #expect(runner.calls.isEmpty)
+        #expect(model.answerPhase == .idle)
+        #expect(model.memorySyncPhase == .idle)
+        #expect(model.dailySummaryPhase == .idle)
+        #expect(model.followUpPhase == .idle)
     }
 }
 
