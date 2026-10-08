@@ -110,7 +110,7 @@ macOS 菜单栏应用，一键总结微信群聊消息。
 
 本项目会处理本地聊天记录、数据库、密钥/访问材料以及 AI 服务配置，因此把隐私边界、输入验证、持久化安全和测试隔离作为维护的一部分。
 
-- **Maintainer / Security contact:** Hongjing Liang ([@1395490241lhj-code](https://github.com/1395490241lhj-code))
+- **Maintainer / Security contact for this fork:** Hongjing Liang ([@1395490241lhj-code](https://github.com/1395490241lhj-code))
 - 安全问题请参阅 [SECURITY.md](SECURITY.md)。
 - 请不要在公开 issue 中提交真实聊天内容、数据库密钥、API Key、私有归档或其他敏感数据。
 
