@@ -2,7 +2,7 @@
 
 ## Maintainer
 
-Security maintainer: **Hongjing Liang** (GitHub: [@1395490241lhj-code](https://github.com/1395490241lhj-code)).
+Security maintainer for this fork: **Hongjing Liang** (GitHub: [@1395490241lhj-code](https://github.com/1395490241lhj-code)).
 
 This project handles sensitive local data, including chat history, local databases, credentials or access material used to read those databases, imported archives, and AI-provider configuration. Security and privacy reports are welcome.
 
@@ -14,7 +14,7 @@ Security fixes are developed against the current `main` branch. Older revisions 
 
 Please **do not post secrets, database keys, API keys, real chat content, private archives, personal identifiers, or other sensitive user data in a public issue**.
 
-If GitHub private vulnerability reporting is available for this repository, use it. Otherwise, open a minimal public issue asking for a private reporting channel and include only non-sensitive metadata needed to establish the affected component and version.
+If GitHub private vulnerability reporting is available for this repository, use it. Otherwise, do not publish sensitive details. Use a contact method listed on the maintainer's GitHub profile if one is available; if no private contact method is listed, open a minimal pull request that contains no exploit details or private data and only asks the maintainer to establish a private reporting channel.
 
 Useful reports include:
 
